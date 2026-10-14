@@ -144,6 +144,10 @@ fn open_icon_window(
     let (sx, sy, sw, sh) = gpui_rect(b, dh);
     let x = (sx + sw + 6.).clamp(8., (dw - 44.).max(8.));
     let y = (sy + sh + 6.).clamp(8., (dh - 44.).max(8.));
+    eprintln!(
+        "[beek] 图标窗口位置：({:.0}, {:.0})（显示区 {:.0}x{:.0}）",
+        x, y, dw, dh
+    );
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
@@ -208,12 +212,27 @@ fn open_popup_window(
 fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
     std::thread::spawn(move || {
         let debug = std::env::var("BEEK_DEBUG").is_ok();
+        let mut trusted = unsafe { accessibility_sys::AXIsProcessTrusted() };
+        let mut ticks: u64 = 0;
         let mut last = String::new();
         let mut stable_since: Option<Instant> = None;
         let mut icon_shown = false;
         let mut dismissed = String::new();
         loop {
             std::thread::sleep(Duration::from_millis(50));
+            ticks += 1;
+            if !trusted {
+                // 未授权时不做无意义的 AX 轮询；每 2 秒复查一次授权状态
+                if ticks % 40 == 0 {
+                    trusted = unsafe { accessibility_sys::AXIsProcessTrusted() };
+                    if trusted {
+                        eprintln!(
+                            "[beek] 辅助功能权限已生效：开始取词（若选中文字仍无反应，请点菜单栏「重新启动 BeeK」）"
+                        );
+                    }
+                }
+                continue;
+            }
             let cur = unsafe { ax_selected_text() };
             match cur {
                 Some(t) if t == dismissed => {
@@ -270,6 +289,53 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
     });
 }
 
+// ---------- 自检（BEEK_SELFTEST=1）----------
+/// 无需辅助功能权限，直接注入模拟选区走完整链路，
+/// 用于验证「蜜蜂图标窗口 → 翻译请求 → 结果弹窗」这条链路真的能跑通。
+fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
+    std::thread::spawn(move || {
+        const SAMPLE: &str = "The quick brown fox jumps over the lazy dog.";
+        let b = SelBounds { x: 600.0, y: 400.0, w: 220.0, h: 20.0 };
+        std::thread::sleep(Duration::from_secs(2));
+        eprintln!("[自检] 注入模拟选区（Cocoa 600,400 220x20）→ 显示蜜蜂图标");
+        let _ = tx.send(UiEvent::ShowIcon(b, SAMPLE.to_string()));
+
+        std::thread::sleep(Duration::from_secs(2));
+        eprintln!("[自检] 模拟点击蜜蜂图标 → 发起翻译");
+        let _ = tx.send(UiEvent::StartTranslate(SAMPLE.to_string(), b));
+
+        std::thread::sleep(Duration::from_secs(8));
+        menubar::dump_windows("自检：翻译弹窗阶段");
+        menubar::dump_menu();
+
+        eprintln!(
+            "[自检] 点击菜单项前：activationPolicy={} 勾选={}",
+            menubar::activation_policy(),
+            menubar::toggle_item_state()
+        );
+        let p1 = menubar::trigger_dock_toggle();
+        eprintln!(
+            "[自检] 第一次点击「在 Dock 中显示」后：activationPolicy={}（0=显示 1=隐藏）勾选={}",
+            p1,
+            menubar::toggle_item_state()
+        );
+        std::thread::sleep(Duration::from_secs(1));
+        let p2 = menubar::trigger_dock_toggle();
+        eprintln!(
+            "[自检] 第二次点击「在 Dock 中显示」后：activationPolicy={}（0=显示 1=隐藏）勾选={}",
+            p2,
+            menubar::toggle_item_state()
+        );
+
+        // 恢复用户原本的设置（自检不应该改动用户配置）
+        if config::load().show_in_dock != orig_show_in_dock {
+            config::save(&config::Config { show_in_dock: orig_show_in_dock });
+            menubar::set_dock_visible(orig_show_in_dock);
+        }
+        eprintln!("[自检] 完成，show_in_dock 已恢复为 {}", orig_show_in_dock);
+    });
+}
+
 // ---------- 主入口 ----------
 fn main() {
     Application::new().run(|cx: &mut App| {
@@ -288,8 +354,12 @@ fn main() {
         }
 
         let (tx, rx) = mpsc::channel::<UiEvent>();
+        if std::env::var("BEEK_SELFTEST").is_ok() {
+            spawn_selftest(tx.clone(), cfg.show_in_dock);
+        }
         spawn_ax_monitor(tx.clone());
 
+        let debug_events = std::env::var("BEEK_DEBUG").is_ok();
         cx.spawn(async move |cx| {
             let mut icon_win: Option<WindowHandle<IconView>> = None;
             let mut popup_win: Option<WindowHandle<PopupView>> = None;
@@ -320,6 +390,9 @@ fn main() {
                             });
                         }
                         UiEvent::TranslateDone(text, result, b) => {
+                            if debug_events {
+                                eprintln!("[beek] 翻译结果：{:?}", result);
+                            }
                             close_window(cx, &mut icon_win);
                             close_window(cx, &mut popup_win);
                             popup_win = open_popup_window(cx, text, result, b, tx.clone());
