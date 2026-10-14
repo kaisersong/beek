@@ -129,7 +129,6 @@ enum PopupContent {
 }
 
 struct PopupView {
-    text: String,
     content: PopupContent,
     /// true = 卡片贴窗口底部。弹窗放在选区上方时用，这样内容变长是向上长，不会压住选区
     anchor_bottom: bool,
@@ -198,13 +197,6 @@ impl Render for PopupView {
             .bg(white())
             .rounded(px(12.))
             .shadow_lg()
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(0x999999))
-                    .mb(px(8.))
-                    .child(self.text.clone()),
-            )
             .child(body)
             .child(
                 div()
@@ -262,8 +254,6 @@ const POPUP_MAX_H: f32 = 320.;
 const POPUP_MIN_H: f32 = 92.;
 /// 页脚高度（点）：一行提示 + 复制按钮
 const POPUP_FOOTER_H: f32 = 22.;
-/// 卡片顶部引用原文的字号
-const POPUP_QUOTE_PT: f32 = 14.;
 
 fn display_size(cx: &mut AsyncApp) -> (f32, f32) {
     cx.update(|app| {
@@ -484,7 +474,7 @@ fn text_height(
     }
 }
 
-/// 卡片应有的高度（pt）：内边距 + 引用原文 + 正文 + 页脚
+/// 卡片应有的高度（pt）：内边距 + 正文 + 页脚
 fn card_height(window: &Window, view: &PopupView) -> f32 {
     let style = window.text_style();
     let rem = window.rem_size();
@@ -493,19 +483,17 @@ fn card_height(window: &Window, view: &PopupView) -> f32 {
     let unit = if base > 0. { lh / base } else { 1.2 };
     let text_w = POPUP_W - POPUP_PAD * 2.;
     let body = view.body_text();
-    let quote_h = text_height(window, &view.text, POPUP_QUOTE_PT, POPUP_QUOTE_PT * unit, text_w);
     let body_h = text_height(window, &body, base, base * unit, text_w);
     if std::env::var("BEEK_DEBUG").is_ok() {
         eprintln!(
-            "[beek] 高度度量：引用 {:.0}pt / 正文 {:.0}pt（正文 {} 字符，宽 {:.0}，行高系数 {:.2}）",
-            quote_h,
+            "[beek] 高度度量：正文 {:.0}pt（正文 {} 字符，宽 {:.0}，行高系数 {:.2}）",
             body_h,
             body.chars().count(),
             text_w,
             unit
         );
     }
-    (POPUP_PAD + quote_h + 8. + body_h + 12. + POPUP_FOOTER_H + POPUP_PAD).ceil() + 2.
+    (POPUP_PAD + body_h + 12. + POPUP_FOOTER_H + POPUP_PAD).ceil() + 2.
 }
 
 /// 是否应当因为「在弹窗外部按下鼠标」而关闭弹窗。
@@ -529,7 +517,6 @@ fn should_close_on_press(
 
 fn open_popup_window(
     cx: &mut AsyncApp,
-    text: String,
     content: PopupContent,
     b: SelBounds,
 ) -> Option<(WindowHandle<PopupView>, PopupGeom)> {
@@ -569,7 +556,6 @@ fn open_popup_window(
         },
         move |_window, cx| {
             cx.new(|_cx| PopupView {
-                text,
                 content,
                 anchor_bottom,
                 win_h,
@@ -929,7 +915,7 @@ fn main() {
                             popup_geom = None;
                             // 关键：先开弹窗再等网络，用户点完立刻就有东西出来
                             let opened =
-                                open_popup_window(cx, text.clone(), PopupContent::Loading, b);
+                                open_popup_window(cx, PopupContent::Loading, b);
                             if let Some((w, geom)) = opened {
                                 // 立刻按内容量一次高度（此时正文是「翻译中…」）
                                 popup_geom = Some(sync_popup_geometry(cx, &w, geom));
