@@ -263,15 +263,21 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
                             icon_shown = false;
                         }
                     } else if let Some(since) = stable_since {
-                        if since.elapsed() >= Duration::from_millis(300) && !icon_shown {
+                        if !icon_shown && since.elapsed() >= Duration::from_millis(300) {
                             if let Some(b) = unsafe { ax_selection_bounds() } {
                                 let _ = tx.send(UiEvent::ShowIcon(b, last.clone()));
                                 if debug {
                                     eprintln!("[beek] 选区矩形(Cocoa): x={} y={} w={} h={}", b.x, b.y, b.w, b.h);
                                 }
                                 icon_shown = true;
+                                stable_since = None;
+                            } else if since.elapsed() >= Duration::from_millis(3000) {
+                                // 3 秒都取不到矩形就不再重试，避免每个 tick 反复查 AX
+                                if debug {
+                                    eprintln!("[beek] 选区矩形取不到，跳过本次选区：{:?}", last);
+                                }
+                                stable_since = None;
                             }
-                            stable_since = None;
                         }
                     }
                 }

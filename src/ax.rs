@@ -39,18 +39,92 @@ unsafe fn try_get_text(el: AXUIElementRef) -> Option<String> {
 #[derive(Clone, Copy, Debug)]
 pub struct SelBounds { pub x: f64, pub y: f64, pub w: f64, pub h: f64 }
 
-/// 用 AXBoundsForRange 取选区真实矩形
-pub unsafe fn ax_selection_bounds() -> Option<SelBounds> {
+fn debug_on() -> bool {
+    std::env::var("BEEK_DEBUG").is_ok()
+}
+
+/// 当前焦点元素（取词与取矩形共用同一条链路）
+unsafe fn focused_element() -> Option<AXUIElementRef> {
     let sys = AXUIElementCreateSystemWide();
+    AXUIElementSetMessagingTimeout(sys, 0.5);
     let app = ax_get_attr(sys, kAXFocusedApplicationAttribute).ok()? as AXUIElementRef;
     let el = ax_get_attr(app, kAXFocusedUIElementAttribute).ok()? as AXUIElementRef;
-    let range = ax_get_attr(el, "AXSelectedTextMarkerRange").ok()?;
+    AXUIElementSetMessagingTimeout(el, 0.5);
+    Some(el)
+}
+
+/// AXBoundsForRange：给一个 range 取屏幕矩形
+unsafe fn bounds_from_range(el: AXUIElementRef, range: *const c_void) -> Option<SelBounds> {
     let val = ax_param_attr(el, "AXBoundsForRange", range).ok()?;
     let mut rect = [0f64; 4];
-    let ok: bool = AXValueGetValue(val as _, 2, rect.as_mut_ptr() as *mut c_void);
+    // CGRect 的 type code 是 kAXValueTypeCGRect(3)，不是 kAXValueTypeCGSize(2)
+    let ok: bool = AXValueGetValue(val as _, kAXValueTypeCGRect, rect.as_mut_ptr() as *mut c_void);
     if ok && rect[2] > 0. && rect[3] > 0. {
         Some(SelBounds { x: rect[0], y: rect[1], w: rect[2], h: rect[3] })
-    } else { None }
+    } else {
+        None
+    }
+}
+
+/// 单个元素上的三条取矩形路线：原生 AXSelectedTextRange / WebKit·Chromium
+/// AXSelectedTextMarkerRange / 多选区 AXSelectedTextRanges
+unsafe fn bounds_routes(el: AXUIElementRef) -> Option<SelBounds> {
+    if let Ok(r) = ax_get_attr(el, "AXSelectedTextRange") {
+        if let Some(b) = bounds_from_range(el, r) {
+            return Some(b);
+        }
+    }
+    if let Ok(r) = ax_get_attr(el, "AXSelectedTextMarkerRange") {
+        if let Some(b) = bounds_from_range(el, r) {
+            return Some(b);
+        }
+    }
+    if let Ok(arr) = ax_get_attr(el, "AXSelectedTextRanges") {
+        let a = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(arr as _);
+        if !a.is_empty() {
+            if let Some(first) = a.get(0) {
+                if let Some(b) = bounds_from_range(el, *first) {
+                    return Some(b);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 兜底：用元素自身矩形（取左下角一小块），保证图标至少出现在文本区域附近
+unsafe fn element_frame(el: AXUIElementRef) -> Option<SelBounds> {
+    let pos = ax_get_attr(el, kAXPositionAttribute).ok()?;
+    let size = ax_get_attr(el, kAXSizeAttribute).ok()?;
+    let mut p = [0f64; 2];
+    let mut s = [0f64; 2];
+    let okp: bool = AXValueGetValue(pos as _, kAXValueTypeCGPoint, p.as_mut_ptr() as *mut c_void);
+    let oks: bool = AXValueGetValue(size as _, kAXValueTypeCGSize, s.as_mut_ptr() as *mut c_void);
+    if okp && oks && s[0] > 0. && s[1] > 0. {
+        Some(SelBounds { x: p[0], y: p[1], w: s[0].min(40.), h: s[1].min(20.) })
+    } else {
+        None
+    }
+}
+
+/// 取选区真实矩形：焦点元素优先，必要时沿父链上溯
+pub unsafe fn ax_selection_bounds() -> Option<SelBounds> {
+    let el = focused_element()?;
+    let mut cur = el;
+    for _ in 0..5 {
+        if let Some(b) = bounds_routes(cur) {
+            return Some(b);
+        }
+        match ax_get_attr(cur, kAXParentAttribute) {
+            Ok(p) => cur = p as AXUIElementRef,
+            Err(_) => break,
+        }
+    }
+    let fb = element_frame(el);
+    if debug_on() {
+        eprintln!("[beek] 选区矩形：三条 range 路线都失败，兜底元素矩形 = {:?}", fb);
+    }
+    fb
 }
 
 unsafe fn get_role(el: AXUIElementRef) -> Option<String> {
