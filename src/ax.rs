@@ -131,6 +131,19 @@ unsafe fn find_webarea_text(el: AXUIElementRef, depth: u32) -> Option<String> {
     None
 }
 
+/// 请求辅助功能权限：未授权时会弹出系统对话框引导用户去授权
+pub unsafe fn prompt_accessibility() {
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFDictionary;
+    extern "C" {
+        static kAXTrustedCheckOptionPrompt: CFStringRef;
+    }
+    let key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt);
+    let dict =
+        CFDictionary::from_CFType_pairs(&[(key.as_CFType(), CFBoolean::true_value().as_CFType())]);
+    let _ = AXIsProcessTrustedWithOptions(dict.as_concrete_TypeRef());
+}
+
 /// URL 不弹窗
 pub fn is_url(s: &str) -> bool {
     let t = s.trim();

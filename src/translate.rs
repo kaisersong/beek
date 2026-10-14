@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 const ARK_URL: &str = "https://ark.cn-beijing.volces.com/api/v3/chat/completions";
 const MODEL: &str = "doubao-seed-2-0-mini-260428";
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct Msg { role: String, content: String }
 #[derive(Serialize)]
 struct Req { model: String, messages: Vec<Msg> }
