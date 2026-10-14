@@ -117,6 +117,28 @@ pub fn dump_windows(tag: &str) {
     }
 }
 
+/// 当前可见的翻译弹窗个数（按弹窗尺寸识别，自检用）
+pub fn popup_window_count() -> usize {
+    unsafe {
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let windows: id = msg_send![app, windows];
+        let count: usize = msg_send![windows, count];
+        let mut found = 0usize;
+        for i in 0..count {
+            let w: id = msg_send![windows, objectAtIndex: i];
+            let frame: cocoa::foundation::NSRect = msg_send![w, frame];
+            let visible: i8 = msg_send![w, isVisible];
+            if visible != 0
+                && (frame.size.width - crate::POPUP_W as f64).abs() < 1.0
+                && (frame.size.height - crate::POPUP_H as f64).abs() < 1.0
+            {
+                found += 1;
+            }
+        }
+        found
+    }
+}
+
 /// 切换 Dock 图标显示。Accessory = 只保留菜单栏图标，不在 Dock 显示。
 pub fn set_dock_visible(visible: bool) {
     unsafe {

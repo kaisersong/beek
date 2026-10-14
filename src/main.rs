@@ -1,5 +1,5 @@
 // BeeK v1.0 — GPUI 重写版
-// 选中文本 → 小蜜蜂图标 → 点击翻译 → 弹窗显示
+// 选中文本 → 小蜜蜂图标 → 点击翻译 → 弹窗显示（流式增量）
 mod ax;
 mod config;
 mod menubar;
@@ -14,9 +14,18 @@ use std::time::{Duration, Instant};
 enum UiEvent {
     ShowIcon(SelBounds, String),
     HideIcon,
+    /// 点击图标：发起翻译。请求 id 由主循环分配，用于丢弃过期结果。
     StartTranslate(String, SelBounds),
-    TranslateDone(String, Result<String, String>, SelBounds),
+    /// 流式增量
+    TranslateChunk(u64, String),
+    /// 翻译结束
+    TranslateDone(u64, Result<String, String>),
     ClosePopup,
+}
+
+/// 进程启动至今的毫秒数，用于日志取证
+fn ms(t0: Instant) -> u128 {
+    t0.elapsed().as_millis()
 }
 
 // ---------- 图标视图 ----------
@@ -28,14 +37,24 @@ struct IconView {
 }
 
 impl Render for IconView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let tx = self.tx.clone();
-        let text = self.text.clone();
-        let b = self.bounds;
-        let loading = self.loading;
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 用 listener 拿到 &mut self：点击当刻就置位 loading。
+        // 如果只靠主循环轮询改状态，双击的第二下会漏进来，发出第二次翻译请求。
+        let on_mouse_down = cx.listener(
+            |this: &mut IconView,
+             ev: &MouseDownEvent,
+             _window: &mut Window,
+             _cx: &mut Context<IconView>| {
+                if this.loading || ev.click_count > 1 {
+                    return;
+                }
+                this.loading = true;
+                let _ = this.tx.send(UiEvent::StartTranslate(this.text.clone(), this.bounds));
+            },
+        );
         div()
-            .w(px(36.))
-            .h(px(36.))
+            .w(px(ICON_SIZE))
+            .h(px(ICON_SIZE))
             .flex()
             .items_center()
             .justify_center()
@@ -44,18 +63,14 @@ impl Render for IconView {
             .shadow_lg()
             .cursor_pointer()
             .text_size(px(18.))
-            .child(if loading { "⏳" } else { "🐝" })
-            .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                if !loading {
-                    let _ = tx.send(UiEvent::StartTranslate(text.clone(), b));
-                }
-                cx.stop_propagation();
-            })
+            .child(if self.loading { "⏳" } else { "🐝" })
+            .on_mouse_down(MouseButton::Left, on_mouse_down)
     }
 }
 
 // ---------- 弹窗视图 ----------
 enum PopupContent {
+    Loading,
     Result(String),
     Error(String),
 }
@@ -67,18 +82,29 @@ struct PopupView {
 }
 
 impl Render for PopupView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let tx = self.tx.clone();
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match &self.content {
+            PopupContent::Loading => div().text_base().text_color(rgb(0x888888)).child("翻译中…"),
             PopupContent::Result(r) => div().text_base().child(r.clone()),
             PopupContent::Error(e) => div()
                 .text_base()
                 .text_color(rgb(0xcc3333))
                 .child(format!("翻译失败：{}", e)),
         };
+        // 点击当刻直接同步关窗，不等主循环下一轮轮询；
+        // 同时通知主循环作废在飞行中的翻译，否则迟到的结果会把弹窗再弹回来一次。
+        let on_mouse_down = cx.listener(
+            |this: &mut PopupView,
+             _ev: &MouseDownEvent,
+             window: &mut Window,
+             _cx: &mut Context<PopupView>| {
+                let _ = this.tx.send(UiEvent::ClosePopup);
+                window.remove_window();
+            },
+        );
         div()
             .id("popup")
-            .w(px(380.))
+            .w(px(POPUP_W))
             .h_full()
             .overflow_y_scroll()
             .p(px(16.))
@@ -86,10 +112,7 @@ impl Render for PopupView {
             .rounded(px(12.))
             .shadow_lg()
             .cursor_pointer()
-            .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                let _ = tx.send(UiEvent::ClosePopup);
-                cx.stop_propagation();
-            })
+            .on_mouse_down(MouseButton::Left, on_mouse_down)
             .child(
                 div()
                     .text_sm()
@@ -115,6 +138,9 @@ const ICON_SIZE: f32 = 36.;
 const ICON_GAP: f32 = 6.;
 /// 窗口距离屏幕边缘的最小留白（点）
 const SCREEN_MARGIN: f32 = 8.;
+/// 弹窗尺寸（点）
+const POPUP_W: f32 = 380.;
+const POPUP_H: f32 = 320.;
 
 fn display_size(cx: &mut AsyncApp) -> (f32, f32) {
     cx.update(|app| {
@@ -194,23 +220,19 @@ fn open_icon_window(
 fn open_popup_window(
     cx: &mut AsyncApp,
     text: String,
-    result: Result<String, String>,
+    content: PopupContent,
     b: SelBounds,
     tx: mpsc::Sender<UiEvent>,
 ) -> Option<WindowHandle<PopupView>> {
     let (dw, dh) = display_size(cx);
     let (sx, sy, _sw, sh) = gpui_rect(b, dh);
-    let x = sx.clamp(8., (dw - 396.).max(8.));
-    let y = (sy + sh + 8.).clamp(8., (dh - 336.).max(8.));
-    let content = match result {
-        Ok(r) => PopupContent::Result(r),
-        Err(e) => PopupContent::Error(e),
-    };
+    let x = sx.clamp(SCREEN_MARGIN, (dw - POPUP_W - SCREEN_MARGIN).max(SCREEN_MARGIN));
+    let y = (sy + sh + SCREEN_MARGIN).clamp(SCREEN_MARGIN, (dh - POPUP_H - SCREEN_MARGIN).max(SCREEN_MARGIN));
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
                 origin: point(px(x), px(y)),
-                size: size(px(380.), px(320.)),
+                size: size(px(POPUP_W), px(POPUP_H)),
             })),
             titlebar: None,
             kind: WindowKind::PopUp,
@@ -234,7 +256,6 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
         let mut last = String::new();
         let mut stable_since: Option<Instant> = None;
         let mut icon_shown = false;
-        let mut dismissed = String::new();
         loop {
             std::thread::sleep(Duration::from_millis(50));
             ticks += 1;
@@ -252,14 +273,6 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
             }
             let cur = unsafe { ax_selected_text() };
             match cur {
-                Some(t) if t == dismissed => {
-                    if icon_shown {
-                        let _ = tx.send(UiEvent::HideIcon);
-                        icon_shown = false;
-                    }
-                    last.clear();
-                    stable_since = None;
-                }
                 Some(t) if is_url(&t) => {
                     if icon_shown {
                         let _ = tx.send(UiEvent::HideIcon);
@@ -305,11 +318,45 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
                     }
                     last.clear();
                     stable_since = None;
-                    dismissed.clear();
                 }
             }
         }
     });
+}
+
+// ---------- 命令行自检（BEEK_TRANSLATE_SELFTEST=1）----------
+/// 不需要辅助功能权限、不需要图形界面，直接量接口耗时。
+/// 用来验证「关思维链 + 流式」到底把等待时间压到了多少。
+fn translate_selftest() {
+    const SAMPLE: &str = "The quick brown fox jumps over the lazy dog. This sentence is long enough to show how fast the first characters arrive.";
+    eprintln!("[自检] 文本 {} 字符", SAMPLE.chars().count());
+
+    let t0 = Instant::now();
+    match translate::translate(SAMPLE) {
+        Ok(s) => eprintln!("[自检] 非流式：总计 {}ms → {}", ms(t0), s),
+        Err(e) => eprintln!("[自检] 非流式失败：{}", e),
+    }
+
+    let t1 = Instant::now();
+    let mut first: Option<u128> = None;
+    let result = translate::translate_stream(SAMPLE, |chunk| {
+        if first.is_none() {
+            first = Some(ms(t1));
+            eprintln!("[自检] 流式首字 {}ms：{:?}", ms(t1), chunk);
+        }
+    });
+    eprintln!(
+        "[自检] 流式：首字 {}ms，总计 {}ms → {}",
+        match first {
+            Some(v) => format!("{}", v),
+            None => "无内容".to_string(),
+        },
+        ms(t1),
+        match result {
+            Ok(s) => s,
+            Err(e) => format!("失败：{}", e),
+        }
+    );
 }
 
 // ---------- 自检（BEEK_SELFTEST=1）----------
@@ -318,17 +365,46 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
 fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
     std::thread::spawn(move || {
         const SAMPLE: &str = "The quick brown fox jumps over the lazy dog.";
+        // 回归用例用：足够长，保证「关闭弹窗」发生在结果返回之前
+        const LONG_SAMPLE: &str =
+            "Selection translation tools usually live in the menu bar and wait for the user \
+             to highlight a piece of text. The hard part is not the translation itself, but \
+             making the interface feel instant: the icon has to appear next to the selection \
+             within a few hundred milliseconds, and the result window must open right away \
+             instead of blocking on the network request. When the request is still in flight \
+             and the user dismisses the window, a late response must never bring the window \
+             back, otherwise the whole tool feels haunted by ghosts of previous requests.";
         let b = SelBounds { x: 600.0, y: 400.0, w: 220.0, h: 20.0 };
         std::thread::sleep(Duration::from_secs(2));
         eprintln!("[自检] 注入模拟选区（Cocoa 600,400 220x20）→ 显示蜜蜂图标");
         let _ = tx.send(UiEvent::ShowIcon(b, SAMPLE.to_string()));
 
         std::thread::sleep(Duration::from_secs(2));
-        eprintln!("[自检] 模拟点击蜜蜂图标 → 发起翻译");
+        eprintln!("[自检] 模拟点击蜜蜂图标 → 发起翻译（弹窗应立即出现，内容流式填充）");
         let _ = tx.send(UiEvent::StartTranslate(SAMPLE.to_string(), b));
 
-        std::thread::sleep(Duration::from_secs(8));
-        menubar::dump_windows("自检：翻译弹窗阶段");
+        std::thread::sleep(Duration::from_secs(1));
+        eprintln!(
+            "[自检] 点击后 1 秒：可见翻译弹窗 {} 个（期望 1，说明弹窗不依赖翻译完成）",
+            menubar::popup_window_count()
+        );
+        menubar::dump_windows("自检：点击图标 1 秒后");
+
+        // 回归用例：翻译「还在请求中」就关掉弹窗，迟到的结果不能把弹窗再弹回来。
+        // 用长文本，并等上一条翻译彻底结束，保证关闭动作确实发生在收到结果之前。
+        std::thread::sleep(Duration::from_secs(5));
+        eprintln!("[自检] 回归：再次发起翻译（长文本），400ms 后关闭弹窗");
+        let _ = tx.send(UiEvent::StartTranslate(LONG_SAMPLE.to_string(), b));
+        std::thread::sleep(Duration::from_millis(400));
+        eprintln!("[自检] 模拟点击弹窗关闭（此时请求仍在飞行中）");
+        let _ = tx.send(UiEvent::ClosePopup);
+
+        std::thread::sleep(Duration::from_secs(10));
+        eprintln!(
+            "[自检] 关闭后 10 秒：可见翻译弹窗 {} 个（期望 0，迟到的结果不得重新弹窗）",
+            menubar::popup_window_count()
+        );
+        menubar::dump_windows("自检：请求途中关闭弹窗 10 秒后");
         menubar::dump_menu();
 
         eprintln!(
@@ -361,6 +437,11 @@ fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
 
 // ---------- 主入口 ----------
 fn main() {
+    if std::env::var("BEEK_TRANSLATE_SELFTEST").is_ok() {
+        translate_selftest();
+        return;
+    }
+
     Application::new().run(|cx: &mut App| {
         let cfg = config::load();
         menubar::set_dock_visible(cfg.show_in_dock);
@@ -382,15 +463,24 @@ fn main() {
         }
         spawn_ax_monitor(tx.clone());
 
-        let debug_events = std::env::var("BEEK_DEBUG").is_ok();
         cx.spawn(async move |cx| {
+            let t0 = Instant::now();
             let mut icon_win: Option<WindowHandle<IconView>> = None;
             let mut popup_win: Option<WindowHandle<PopupView>> = None;
+            // 请求 id 记账：只认「当前在飞行中 / 当前展示」的那一次翻译。
+            // 迟到的结果一律丢弃，否则关闭弹窗后它会被再弹回来。
+            let mut req_seq: u64 = 0;
+            let mut in_flight: Option<u64> = None;
+            let mut shown: Option<u64> = None;
+            // 已经写进弹窗的增量段数（自检取证用）
+            let mut chunks_applied: u64 = 0;
             loop {
                 while let Ok(ev) = rx.try_recv() {
                     match ev {
                         UiEvent::ShowIcon(b, text) => {
-                            // 新选区出现时，旧弹窗关闭，图标取而代之
+                            // 新选区：旧弹窗关闭，作废旧翻译
+                            shown = None;
+                            in_flight = None;
                             close_window(cx, &mut popup_win);
                             if icon_win.is_none() {
                                 icon_win = open_icon_window(cx, b, text, tx.clone());
@@ -400,33 +490,116 @@ fn main() {
                             close_window(cx, &mut icon_win);
                         }
                         UiEvent::StartTranslate(text, b) => {
-                            if let Some(w) = &icon_win {
-                                let _ = w.update(cx, |view, _window, vcx| {
-                                    view.loading = true;
-                                    vcx.notify();
-                                });
+                            if let Some(id) = in_flight {
+                                eprintln!("[beek] +{}ms 忽略重复点击（id={} 仍在翻译中）", ms(t0), id);
+                                continue;
                             }
-                            let tx2 = tx.clone();
-                            std::thread::spawn(move || {
-                                let result = translate::translate(&text);
-                                let _ = tx2.send(UiEvent::TranslateDone(text, result, b));
-                            });
-                        }
-                        UiEvent::TranslateDone(text, result, b) => {
-                            if debug_events {
-                                eprintln!("[beek] 翻译结果：{:?}", result);
-                            }
+                            req_seq += 1;
+                            let id = req_seq;
+                            in_flight = Some(id);
+                            shown = Some(id);
+                            chunks_applied = 0;
                             close_window(cx, &mut icon_win);
                             close_window(cx, &mut popup_win);
-                            popup_win = open_popup_window(cx, text, result, b, tx.clone());
+                            // 关键：先开弹窗再等网络，用户点完立刻就有东西出来
+                            popup_win = open_popup_window(
+                                cx,
+                                text.clone(),
+                                PopupContent::Loading,
+                                b,
+                                tx.clone(),
+                            );
+                            eprintln!("[beek] +{}ms 点击图标 → 弹窗立即显示（id={}）", ms(t0), id);
+                            let tx2 = tx.clone();
+                            std::thread::spawn(move || {
+                                let started = Instant::now();
+                                let mut first_at: Option<u128> = None;
+                                let result = translate::translate_stream(&text, |chunk| {
+                                    if first_at.is_none() {
+                                        first_at = Some(started.elapsed().as_millis());
+                                    }
+                                    let _ = tx2.send(UiEvent::TranslateChunk(id, chunk.to_string()));
+                                });
+                                let _ = tx2.send(UiEvent::TranslateDone(id, result));
+                                eprintln!(
+                                    "[beek] +{}ms 翻译线程结束（id={}，首字 {}ms，总 {}ms）",
+                                    ms(t0),
+                                    id,
+                                    match first_at {
+                                        Some(v) => format!("{}", v),
+                                        None => "无".to_string(),
+                                    },
+                                    started.elapsed().as_millis()
+                                );
+                            });
+                        }
+                        UiEvent::TranslateChunk(id, chunk) => {
+                            if Some(id) != shown {
+                                continue;
+                            }
+                            if let Some(w) = &popup_win {
+                                let ok = w
+                                    .update(cx, |view, _window, vcx| {
+                                        match &mut view.content {
+                                            PopupContent::Result(s) => s.push_str(&chunk),
+                                            _ => view.content = PopupContent::Result(chunk),
+                                        }
+                                        vcx.notify();
+                                    })
+                                    .is_ok();
+                                if ok {
+                                    chunks_applied += 1;
+                                }
+                            }
+                        }
+                        UiEvent::TranslateDone(id, result) => {
+                            if in_flight == Some(id) {
+                                in_flight = None;
+                            }
+                            if Some(id) != shown {
+                                eprintln!("[beek] +{}ms 丢弃过期翻译结果（id={}）", ms(t0), id);
+                                continue;
+                            }
+                            let mut applied = false;
+                            if let Some(w) = &popup_win {
+                                let content = match result {
+                                    Ok(r) => PopupContent::Result(r),
+                                    Err(e) => PopupContent::Error(e),
+                                };
+                                applied = w
+                                    .update(cx, |view, _window, vcx| {
+                                        view.content = content;
+                                        vcx.notify();
+                                    })
+                                    .is_ok();
+                            }
+                            if applied {
+                                eprintln!(
+                                    "[beek] +{}ms 译文写入弹窗（id={}，已流式写入 {} 段）",
+                                    ms(t0),
+                                    id,
+                                    chunks_applied
+                                );
+                            } else {
+                                eprintln!("[beek] +{}ms 弹窗已不在，结果丢弃（id={}）", ms(t0), id);
+                            }
                         }
                         UiEvent::ClosePopup => {
+                            let was = shown.take();
+                            // 作废在飞行中的翻译：关闭之后不再被迟到的结果弹回来
+                            in_flight = None;
                             close_window(cx, &mut popup_win);
+                            eprintln!(
+                                "[beek] +{}ms 关闭弹窗（id={:?}，已流式写入 {} 段）",
+                                ms(t0),
+                                was,
+                                chunks_applied
+                            );
                         }
                     }
                 }
                 cx.background_executor()
-                    .timer(Duration::from_millis(50))
+                    .timer(Duration::from_millis(16))
                     .await;
             }
         })
