@@ -1,10 +1,14 @@
-// BeeK 翻译模块 — 豆包 Ark API（流式 + 关闭思维链）
+// 翻译模块 — 豆包 Ark API（流式 + 关闭思维链）
 //
 // 实测（短句，本机）：
 //   非流式 + 思维链开启  3.12s   ← 旧行为，弹窗要等这么久
 //   非流式 + 关闭思维链  1.09s
 //   流式   + 关闭思维链  0.62s 见到首字
 // 因此这里固定关闭 thinking 并走流式，让弹窗能立刻显示译文增量。
+//
+// 两种模式：
+//   translate_*  选中一段话 → 只出译文
+//   explain_*    选中单个词 → 词典式详解（首行是读音，其余是词性/释义/例句/搭配）
 use serde::{Deserialize, Serialize};
 
 const ARK_URL: &str = "https://ark.cn-beijing.volces.com/api/v3/chat/completions";
@@ -39,12 +43,43 @@ struct BlockChoice { message: Msg }
 #[derive(Deserialize)]
 struct Resp { choices: Vec<BlockChoice> }
 
-fn build_body(text: &str, stream: bool) -> Req {
-    let prompt = format!(
+/// 选中的是不是「单个词」：没有空白、不太长、至少含一个字母（拉丁字母或汉字）。
+/// 选中单个词时给词典式详解（含读音），而不是只给一句译文。
+pub fn is_single_word(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() || t.chars().count() > 24 {
+        return false;
+    }
+    if t.chars().any(|c| c.is_whitespace()) {
+        return false;
+    }
+    t.chars().any(|c| c.is_alphabetic())
+}
+
+/// 读音行的固定前缀：模型必须用它开头，方便客户端把读音单独提出来做成标题行
+const PRON_PREFIX: &str = "读音：";
+
+fn translate_prompt(text: &str) -> String {
+    format!(
         "将以下文本翻译成中文。要求：简洁准确，只输出译文不要解释。\
         AI 语境中的 Agent 必须译为\"智能体\"，不能译为\"代理人\"。\n\n{}",
         text
-    );
+    )
+}
+
+fn explain_prompt(text: &str) -> String {
+    format!(
+        "你是一本词典。请针对「{}」这个词给出详解，并给出它的读音。用中文讲解，\
+        严格按下面的格式输出，不要任何前言、标题、总结或多余空行：\n\
+        第一行：{}<读音>（英文词给英式/美式国际音标，例如 /ˈeɪdʒənt/；中文词给拼音）\n\
+        之后每行以「- 」开头，依次给出：词性与中文释义（多个义项就多行）、\
+        例句（英文原句 + 中文翻译）、常见搭配或短语；必要时再加一行用法辨析。\n\
+        要求具体、不要套话。",
+        text, PRON_PREFIX
+    )
+}
+
+fn build_body(prompt: String, stream: bool) -> Req {
     Req {
         model: MODEL.to_string(),
         messages: vec![Msg { role: "user".into(), content: prompt }],
@@ -65,12 +100,12 @@ fn api_key() -> Result<String, String> {
     std::env::var("BEEK_ARK_KEY").map_err(|_| "未设置 BEEK_ARK_KEY".to_string())
 }
 
-fn start(text: &str, stream: bool) -> Result<reqwest::blocking::Response, String> {
+fn start(prompt: String, stream: bool) -> Result<reqwest::blocking::Response, String> {
     let key = api_key()?;
     let resp = client()?
         .post(ARK_URL)
         .header("Authorization", format!("Bearer {}", key))
-        .json(&build_body(text, stream))
+        .json(&build_body(prompt, stream))
         .send()
         .map_err(|e| format!("请求失败：{}", e))?;
     if !resp.status().is_success() {
@@ -81,11 +116,11 @@ fn start(text: &str, stream: bool) -> Result<reqwest::blocking::Response, String
     Ok(resp)
 }
 
-/// 流式翻译：每收到一段正文增量就回调一次 `on_chunk`，返回完整译文。
-pub fn translate_stream(text: &str, mut on_chunk: impl FnMut(&str)) -> Result<String, String> {
+/// 流式请求：每收到一段正文增量就回调一次 `on_chunk`，返回完整正文。
+fn stream(prompt: String, mut on_chunk: impl FnMut(&str)) -> Result<String, String> {
     let debug = std::env::var("BEEK_DEBUG").is_ok();
     let t0 = std::time::Instant::now();
-    let resp = start(text, true)?;
+    let resp = start(prompt, true)?;
     if debug {
         eprintln!(
             "[beek] 流式响应：status={} http={:?} encoding={:?} len={:?}",
@@ -169,9 +204,54 @@ pub fn translate_stream(text: &str, mut on_chunk: impl FnMut(&str)) -> Result<St
     }
 }
 
+/// 流式翻译（整句/整段）：只出译文。
+pub fn translate_stream(text: &str, on_chunk: impl FnMut(&str)) -> Result<String, String> {
+    stream(translate_prompt(text), on_chunk)
+}
+
+/// 流式详解（单个词）：首行是「读音：…」，其余是词性/释义/例句/搭配。
+pub fn explain_stream(text: &str, on_chunk: impl FnMut(&str)) -> Result<String, String> {
+    stream(explain_prompt(text), on_chunk)
+}
+
+/// 从详解正文里拆出读音行：返回 (读音, 去掉读音行后的正文)。
+///
+/// 模型被要求第一行写「读音：/…/」，但在流式过程中第一行可能还没收完——
+/// 所以只有确认第一行后面已经换行时才算数，否则原样显示，避免半截内容闪一下。
+pub fn split_pron(raw: &str) -> (Option<String>, String) {
+    let Some((first, rest)) = raw.split_once('\n') else {
+        return (None, raw.to_string());
+    };
+    let head = first.trim();
+    let pron = head
+        .strip_prefix(PRON_PREFIX)
+        .or_else(|| head.strip_prefix("读音:"))
+        .or_else(|| head.strip_prefix("音标："))
+        .or_else(|| head.strip_prefix("音标:"))
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    match pron {
+        Some(p) => (Some(p), rest.trim_start().to_string()),
+        None => (None, raw.to_string()),
+    }
+}
+
 /// 非流式翻译：保留给自检对比，UI 不再使用。
 pub fn translate(text: &str) -> Result<String, String> {
-    let resp = start(text, false)?;
+    let resp = start(translate_prompt(text), false)?;
+    let parsed: Resp = resp.json().map_err(|e| format!("解析响应失败：{}", e))?;
+    parsed
+        .choices
+        .into_iter()
+        .next()
+        .map(|c| c.message.content.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "空响应".to_string())
+}
+
+/// 非流式详解：保留给自检对比，UI 不再使用。
+pub fn explain(text: &str) -> Result<String, String> {
+    let resp = start(explain_prompt(text), false)?;
     let parsed: Resp = resp.json().map_err(|e| format!("解析响应失败：{}", e))?;
     parsed
         .choices

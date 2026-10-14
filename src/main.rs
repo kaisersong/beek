@@ -30,6 +30,38 @@ enum UiEvent {
     ClosePopup,
 }
 
+/// 朗读一个词：用系统自带的 /usr/bin/say，不联网也不需要额外权限。
+/// 中文（CJK）用「Tingting」音色，英文用「Samantha」；音色不可用时退回系统默认音色。
+fn speak(word: &str) {
+    let w = word.trim().to_string();
+    if w.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let voice = if w.chars().any(|c| (c as u32) > 0x2e80) { "Tingting" } else { "Samantha" };
+        let with_voice = std::process::Command::new("/usr/bin/say")
+            .arg("-v")
+            .arg(voice)
+            .arg(&w)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if with_voice {
+            return;
+        }
+        let fallback = std::process::Command::new("/usr/bin/say")
+            .arg(&w)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if fallback {
+            eprintln!("[beek] 朗读 {:?}：{} 音色不可用，已用系统默认音色", w, voice);
+        } else {
+            eprintln!("[beek] 朗读 {:?} 失败（/usr/bin/say 不可用）", w);
+        }
+    });
+}
+
 /// 进程启动至今的毫秒数，用于日志取证
 fn ms(t0: Instant) -> u128 {
     t0.elapsed().as_millis()
@@ -134,6 +166,8 @@ enum PopupContent {
 
 struct PopupView {
     content: PopupContent,
+    /// Some(词) = 单词模式（词典式详解）：卡片顶部显示「词 + 读音 + 🔊」
+    word: Option<String>,
     /// true = 卡片贴窗口底部。弹窗放在选区上方时用，这样内容变长是向上长，不会压住选区
     anchor_bottom: bool,
     /// 窗口当前高度（卡片用它做高度上限，超出则内部滚动）
@@ -146,9 +180,33 @@ impl PopupView {
     /// 卡片里要显示的正文
     fn body_text(&self) -> String {
         match &self.content {
-            PopupContent::Loading => "翻译中…".to_string(),
+            PopupContent::Loading => {
+                if self.word.is_some() {
+                    "查询中…".to_string()
+                } else {
+                    "翻译中…".to_string()
+                }
+            }
             PopupContent::Result(t) => t.clone(),
             PopupContent::Error(e) => format!("翻译失败：{}", e),
+        }
+    }
+
+    /// 单词模式：把「读音：…」那一行从正文里拆出来，返回 (读音, 不含读音行的正文)
+    fn pron_and_body(&self) -> (Option<String>, String) {
+        match &self.content {
+            PopupContent::Result(raw) => translate::split_pron(raw),
+            _ => (None, self.body_text()),
+        }
+    }
+
+    /// 复制到剪贴板的内容：单词模式连词和读音一起复制，方便粘到别处
+    fn copy_text(&self) -> String {
+        let (pron, body) = self.pron_and_body();
+        match (self.word.as_deref(), pron) {
+            (Some(w), Some(p)) => format!("{}  {}\n{}", w, p, body),
+            (Some(w), None) => format!("{}\n{}", w, body),
+            _ => body,
         }
     }
 
@@ -157,7 +215,7 @@ impl PopupView {
         if matches!(self.content, PopupContent::Loading) {
             return;
         }
-        cx.write_to_clipboard(ClipboardItem::new_string(self.body_text()));
+        cx.write_to_clipboard(ClipboardItem::new_string(self.copy_text()));
         self.copied = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -176,14 +234,61 @@ impl PopupView {
 
 impl Render for PopupView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let body = match &self.content {
-            PopupContent::Loading => div().text_base().text_color(rgb(0x888888)).child("翻译中…"),
-            PopupContent::Result(r) => div().text_base().child(r.clone()),
-            PopupContent::Error(e) => div()
-                .text_base()
-                .text_color(rgb(0xcc3333))
-                .child(format!("翻译失败：{}", e)),
-        };
+        // 单词模式：正文里的「读音：…」那一行抽出来做成标题，不在正文里重复
+        let (pron, shown) = self.pron_and_body();
+        let body = div()
+            .text_base()
+            .text_color(if matches!(self.content, PopupContent::Error(_)) {
+                rgb(0xcc3333)
+            } else if matches!(self.content, PopupContent::Loading) {
+                rgb(0x888888)
+            } else {
+                rgb(0x1f1f1f)
+            })
+            .child(shown);
+
+        // 发音按钮：点一下用系统语音朗读这个词
+        let on_speak = cx.listener(
+            |this: &mut PopupView, _ev: &MouseDownEvent, _w: &mut Window, _cx: &mut Context<PopupView>| {
+                if let Some(w) = this.word.clone() {
+                    speak(&w);
+                }
+            },
+        );
+        // 顶部标题行（只有单词模式才有）：词 + 读音 + 🔊
+        let header = self.word.clone().map(|w| {
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .mb(px(8.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(div().text_lg().font_weight(FontWeight::BOLD).child(w))
+                        .child(match pron.clone() {
+                            Some(p) => div().text_sm().text_color(rgb(0x666666)).child(p),
+                            None => div().text_sm().text_color(rgb(0xcccccc)).child("读音…"),
+                        }),
+                )
+                .child(
+                    div()
+                        .id("beek-speak")
+                        .w(px(20.))
+                        .h(px(20.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(5.))
+                        .hover(|s| s.bg(rgb(0xe8e8e8)))
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, on_speak)
+                        .child(div().text_sm().child("🔊")),
+                )
+        });
+
         // 弹窗内点击不做任何事：关闭动作是「点弹窗外部」，
         // 由主循环轮询全局鼠标状态完成（非激活窗口收不到外部点击事件）。
         let on_copy = cx.listener(
@@ -221,6 +326,7 @@ impl Render for PopupView {
                             .child(div().w(px(22.)).h(px(2.)).rounded(px(1.)).bg(rgb(0xcccccc))),
                     ),
             )
+            .children(header)
             .child(body)
             .child(
                 div()
@@ -564,8 +670,15 @@ fn card_height(window: &Window, view: &PopupView) -> f32 {
     let lh = f32::from(style.line_height_in_pixels(rem));
     let unit = if base > 0. { lh / base } else { 1.2 };
     let text_w = POPUP_W - POPUP_PAD * 2.;
-    let body = view.body_text();
+    // 单词模式：正文里的「读音：…」那一行会显示在标题里，量高度时要先把它拆出去，
+    // 否则会多算一行
+    let body = view.pron_and_body().1;
     let body_h = text_height(window, &body, base, base * unit, text_w);
+    // 单词模式顶部多一行「词 + 读音」（text_lg = 1.125rem，下边距 8）
+    let head_h = match view.word.as_deref() {
+        Some(w) => text_height(window, w, base * 1.125, base * 1.125 * unit, text_w) + 8.,
+        None => 0.,
+    };
     if std::env::var("BEEK_DEBUG").is_ok() {
         eprintln!(
             "[beek] 高度度量：正文 {:.0}pt（正文 {} 字符，宽 {:.0}，行高系数 {:.2}）",
@@ -575,7 +688,7 @@ fn card_height(window: &Window, view: &PopupView) -> f32 {
             unit
         );
     }
-    (POPUP_PAD + POPUP_DRAG_H + 6. + body_h + 12. + POPUP_FOOTER_H + POPUP_PAD).ceil() + 2.
+    (POPUP_PAD + POPUP_DRAG_H + 6. + head_h + body_h + 12. + POPUP_FOOTER_H + POPUP_PAD).ceil() + 2.
 }
 
 /// 顶部拖动条（≡）在 Cocoa 坐标里可以被按住拖动的区域：
@@ -621,6 +734,7 @@ fn open_popup_window(
     cx: &mut AsyncApp,
     content: PopupContent,
     b: SelBounds,
+    word: Option<String>,
 ) -> Option<(WindowHandle<PopupView>, PopupGeom)> {
     let (dw, dh) = display_size(cx);
     let (sx, sy, sw, sh) = gpui_rect(b, dh);
@@ -659,6 +773,7 @@ fn open_popup_window(
         move |_window, cx| {
             cx.new(|_cx| PopupView {
                 content,
+                word,
                 anchor_bottom,
                 win_h,
                 copied: false,
@@ -807,6 +922,61 @@ fn translate_selftest() {
             Err(e) => format!("失败：{}", e),
         }
     );
+
+    // ---- 单词模式：词典式详解（含读音）----
+    eprintln!(
+        "[自检] 单词判定：\"serendipity\"={}（期望 true）  \"hello world\"={}（期望 false）  \"智能体\"={}（期望 true）  超长词={}（期望 false）",
+        translate::is_single_word("serendipity"),
+        translate::is_single_word("hello world"),
+        translate::is_single_word("智能体"),
+        translate::is_single_word(&"a".repeat(40))
+    );
+    let (p1, b1) = translate::split_pron("读音：/ˌserənˈdɪpəti/\n- n. 意外发现珍宝的运气");
+    eprintln!(
+        "[自检] 读音拆分：读音={:?}（期望 Some(/ˌserənˈdɪpəti/)）正文={:?}",
+        p1, b1
+    );
+    let (p2, _) = translate::split_pron("读音：/ˌserə");
+    eprintln!("[自检] 读音未收完（还没有换行）不拆：{:?}（期望 None）", p2);
+    let (p3, _) = translate::split_pron("这是一段译文，没有读音行");
+    eprintln!("[自检] 没有读音行时不动正文：{:?}（期望 None）", p3);
+
+    const WORD: &str = "serendipity";
+    let t2 = Instant::now();
+    match translate::explain(WORD) {
+        Ok(s) => {
+            let (pron, body) = translate::split_pron(&s);
+            eprintln!(
+                "[自检] 单词详解：总计 {}ms，读音={:?}，正文 {} 字",
+                ms(t2),
+                pron,
+                body.chars().count()
+            );
+            eprintln!("[自检] 单词详解正文预览：\n{}", body);
+        }
+        Err(e) => eprintln!("[自检] 单词详解失败：{}", e),
+    }
+
+    let t3 = Instant::now();
+    let mut first_word_chunk: Option<u128> = None;
+    let streamed = translate::explain_stream(WORD, |chunk| {
+        if first_word_chunk.is_none() {
+            first_word_chunk = Some(ms(t3));
+            eprintln!("[自检] 详解流式首字 {}ms：{:?}", ms(t3), chunk);
+        }
+    });
+    eprintln!(
+        "[自检] 详解流式：首字 {}ms，总计 {}ms，结果 {}",
+        match first_word_chunk {
+            Some(v) => format!("{}", v),
+            None => "无内容".to_string(),
+        },
+        ms(t3),
+        match streamed {
+            Ok(s) => format!("{} 字", s.chars().count()),
+            Err(e) => format!("失败：{}", e),
+        }
+    );
 }
 
 // ---------- 自检（BEEK_SELFTEST=1）----------
@@ -949,6 +1119,27 @@ fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
             drag_starts(0, 1, mx_, h.1 + h.3 + 5.0, h)
         );
 
+        // ---- 单词模式：单个词应该出「词 + 读音 + 🔊」标题行 ----
+        let wb = SelBounds { x: 600.0, y: 240.0, w: 90.0, h: 20.0 };
+        eprintln!("[自检] 单词模式：注入单个词（serendipity），期望弹窗顶部有「词 + 读音 + 🔊」");
+        let _ = tx.send(UiEvent::StartTranslate("serendipity".to_string(), wb));
+        std::thread::sleep(Duration::from_secs(8));
+        menubar::dump_windows("自检：单词模式弹窗（应比整句译文多一行标题）");
+        eprintln!(
+            "[自检] 单词模式判定：serendipity={}（期望 true）  hello world={}（期望 false）",
+            translate::is_single_word("serendipity"),
+            translate::is_single_word("hello world")
+        );
+        let (pron_demo, body_demo) = translate::split_pron("读音：/ˌserənˈdɪpəti/\n- n. 意外发现珍宝的运气");
+        eprintln!(
+            "[自检] 读音拆分：读音={:?} 正文={:?}",
+            pron_demo, body_demo
+        );
+        let (not_done, _) = translate::split_pron("读音：/ˌserə");
+        eprintln!("[自检] 读音行没收完（无换行）时不拆：{:?}（期望 None）", not_done);
+        let _ = tx.send(UiEvent::ClosePopup);
+        std::thread::sleep(Duration::from_millis(300));
+
         eprintln!(
             "[自检] 点击菜单项前：activationPolicy={} 勾选={}",
             menubar::activation_policy(),
@@ -1051,9 +1242,18 @@ fn main() {
                             close_window(cx, &mut icon_win);
                             close_window(cx, &mut popup_win);
                             popup_geom = None;
+                            // 单个词 → 词典式详解（带读音）；一段话 → 只出译文
+                            let word = if translate::is_single_word(&text) {
+                                Some(text.clone())
+                            } else {
+                                None
+                            };
+                            if word.is_some() {
+                                eprintln!("[beek] +{}ms 判定为单个词，走词典详解：{:?}", ms(t0), text);
+                            }
                             // 关键：先开弹窗再等网络，用户点完立刻就有东西出来
                             let opened =
-                                open_popup_window(cx, PopupContent::Loading, b);
+                                open_popup_window(cx, PopupContent::Loading, b, word.clone());
                             if let Some((w, geom)) = opened {
                                 // 立刻按内容量一次高度（此时正文是「翻译中…」）
                                 popup_geom = Some(sync_popup_geometry(cx, &w, geom));
@@ -1066,12 +1266,17 @@ fn main() {
                             std::thread::spawn(move || {
                                 let started = Instant::now();
                                 let mut first_at: Option<u128> = None;
-                                let result = translate::translate_stream(&text, |chunk| {
+                                let mut on_chunk = |chunk: &str| {
                                     if first_at.is_none() {
                                         first_at = Some(started.elapsed().as_millis());
                                     }
                                     let _ = tx2.send(UiEvent::TranslateChunk(id, chunk.to_string()));
-                                });
+                                };
+                                let result = if word.is_some() {
+                                    translate::explain_stream(&text, &mut on_chunk)
+                                } else {
+                                    translate::translate_stream(&text, &mut on_chunk)
+                                };
                                 let _ = tx2.send(UiEvent::TranslateDone(id, result));
                                 eprintln!(
                                     "[beek] +{}ms 翻译线程结束（id={}，首字 {}ms，总 {}ms）",
