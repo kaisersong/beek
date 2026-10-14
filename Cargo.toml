@@ -1,0 +1,24 @@
+[package]
+name = "beek"
+version = "0.1.0"
+edition = "2021"
+description = "轻量 macOS AI 划词翻译工具 - Lightweight AI selection translator for macOS"
+
+[[bin]]
+name = "beek"
+path = "src/main.rs"
+
+[dependencies]
+# GPUI - Zed 的 UI 框架
+gpui = "0.2"
+# Ely - GPUI 组件库 (Overlays, Loading 等)
+ely-gpui-component = { git = "https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components" }
+# macOS 系统集成
+accessibility-sys = "0.2"
+cocoa = "0.25"
+core-foundation = "0.9"
+objc = "0.2"
+# HTTP + JSON
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
