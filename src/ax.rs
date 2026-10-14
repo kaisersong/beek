@@ -35,7 +35,8 @@ unsafe fn try_get_text(el: AXUIElementRef) -> Option<String> {
     cfstring_to_string(v)
 }
 
-/// 选区矩形 (x, y, w, h)，Cocoa 屏幕坐标系
+/// 选区矩形 (x, y, w, h)。坐标是「显示器左上角为原点、y 轴向下」的屏幕坐标，
+/// 与 GPUI 的窗口坐标系一致（实测见 main.rs 的 gpui_rect 注释），不要当 Cocoa 左下原点处理。
 #[derive(Clone, Copy, Debug)]
 pub struct SelBounds { pub x: f64, pub y: f64, pub w: f64, pub h: f64 }
 

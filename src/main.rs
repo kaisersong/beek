@@ -293,8 +293,9 @@ impl Render for PopupView {
 }
 
 // ---------- 窗口管理 ----------
-/// 图标窗口边长（点）= 悬浮按钮可见圆的直径（原来 32pt，用户要求减半）
-const ICON_SIZE: f32 = 16.;
+/// 图标窗口边长（点）= 悬浮按钮可见圆的直径。
+/// 32pt → 16pt（半数）后用户反馈偏小，再放大 50%：16 × 1.5 = 24pt。
+const ICON_SIZE: f32 = 24.;
 /// 图标与选区边缘的间距（点）：0 = 紧贴选区上沿
 const ICON_GAP: f32 = 0.;
 /// 绘制时把素材放大一点再裁掉外圈，看起来就是「没有边框」。
@@ -337,11 +338,16 @@ fn display_size(cx: &mut AsyncApp) -> (f32, f32) {
     .unwrap_or((1920., 1080.))
 }
 
-/// AX 返回 Cocoa 屏幕坐标（左下原点），GPUI 的窗口坐标以显示器左上角为原点、y 轴向下。
+/// AX 返回的就是「显示器左上角为原点、y 轴向下」的屏幕坐标，和 GPUI 的窗口坐标系一致，
+/// 所以这里只做 f64→f32，**不能翻转 y**。
+///
+/// 实测（BEEK_AX_PROBE 探针，TextEdit）：文本区 AXPosition=(181,134)、AXSize=(656,384)，
+/// 与窗口工具读到的同一元素 frame（左上原点）逐值相等；第一行 5 个字符的
+/// AXBoundsForRange = (191, 134, 33.1, 13)，y=134 正是第一行的上沿。
+/// 早期版本按「Cocoa 左下原点」翻转，导致图标和弹窗被镜像到选区上方近一个屏高的位置。
 /// 返回 (left, top, width, height)，单位为逻辑点。
-fn gpui_rect(b: SelBounds, display_h: f32) -> (f32, f32, f32, f32) {
-    let top = display_h - (b.y as f32 + b.h as f32);
-    (b.x as f32, top, b.w as f32, b.h as f32)
+fn gpui_rect(b: SelBounds, _display_h: f32) -> (f32, f32, f32, f32) {
+    (b.x as f32, b.y as f32, b.w as f32, b.h as f32)
 }
 
 fn close_window<V: Render>(cx: &mut AsyncApp, slot: &mut Option<WindowHandle<V>>) {
@@ -741,7 +747,7 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
                             if let Some(b) = unsafe { ax_selection_bounds() } {
                                 let _ = tx.send(UiEvent::ShowIcon(b, last.clone()));
                                 if debug {
-                                    eprintln!("[beek] 选区矩形(Cocoa): x={} y={} w={} h={}", b.x, b.y, b.w, b.h);
+                                    eprintln!("[beek] 选区矩形(屏幕左上原点): x={} y={} w={} h={}", b.x, b.y, b.w, b.h);
                                 }
                                 icon_shown = true;
                                 stable_since = None;
@@ -820,7 +826,7 @@ fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
              back, otherwise the whole tool feels haunted by ghosts of previous requests.";
         let b = SelBounds { x: 600.0, y: 400.0, w: 220.0, h: 20.0 };
         std::thread::sleep(Duration::from_secs(2));
-        eprintln!("[自检] 注入模拟选区（Cocoa 600,400 220x20）→ 显示蜜蜂图标");
+        eprintln!("[自检] 注入模拟选区（屏幕坐标 600,400 220x20）→ 显示蜜蜂图标");
         let _ = tx.send(UiEvent::ShowIcon(b, SAMPLE.to_string()));
 
         std::thread::sleep(Duration::from_secs(2));
@@ -853,8 +859,9 @@ fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
 
         // ---- 定位回归：弹窗不得盖住选区 ----
         // 用 dh=982 的屏幕算纯函数，覆盖「下方放得下 / 放不下要转上方」两种情形
-        for &(label, cocoa_y) in &[("屏幕中部", 500.0f64), ("屏幕底部", 60.0f64)] {
-            let bb = SelBounds { x: 600.0, y: cocoa_y, w: 220.0, h: 20.0 };
+        // （选区坐标是屏幕左上原点：500 = 屏幕中上部，900 = 贴近屏幕底边）
+        for &(label, sel_y) in &[("屏幕中部", 500.0f64), ("屏幕下部", 900.0f64)] {
+            let bb = SelBounds { x: 600.0, y: sel_y, w: 220.0, h: 20.0 };
             let (sx, sy, sw, sh) = gpui_rect(bb, 982.0);
             let (px_, py_, side, max_h, anchor) =
                 popup_placement(1512.0, 982.0, sx, sy, sh, 200.);
@@ -868,8 +875,8 @@ fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
             );
         }
         // 真实窗口：注入一个贴近屏幕底部的选区，看弹窗是否转到选区上方
-        let bot = SelBounds { x: 600.0, y: 60.0, w: 220.0, h: 20.0 };
-        eprintln!("[自检] 几何回归：注入屏幕底部选区（Cocoa 600,60 220x20）");
+        let bot = SelBounds { x: 600.0, y: 900.0, w: 220.0, h: 20.0 };
+        eprintln!("[自检] 几何回归：注入贴近屏幕底部的选区（屏幕坐标 600,900 220x20）");
         let _ = tx.send(UiEvent::ShowIcon(bot, SAMPLE.to_string()));
         std::thread::sleep(Duration::from_millis(400));
         let _ = tx.send(UiEvent::StartTranslate(SAMPLE.to_string(), bot));
