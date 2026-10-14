@@ -109,6 +109,13 @@ impl Render for PopupView {
 }
 
 // ---------- 窗口管理 ----------
+/// 图标窗口边长（点）
+const ICON_SIZE: f32 = 36.;
+/// 图标与选区边缘的间距（点）
+const ICON_GAP: f32 = 6.;
+/// 窗口距离屏幕边缘的最小留白（点）
+const SCREEN_MARGIN: f32 = 8.;
+
 fn display_size(cx: &mut AsyncApp) -> (f32, f32) {
     cx.update(|app| {
         app.primary_display()
@@ -142,17 +149,27 @@ fn open_icon_window(
 ) -> Option<WindowHandle<IconView>> {
     let (dw, dh) = display_size(cx);
     let (sx, sy, sw, sh) = gpui_rect(b, dh);
-    let x = (sx + sw + 6.).clamp(8., (dw - 44.).max(8.));
-    let y = (sy + sh + 6.).clamp(8., (dh - 44.).max(8.));
+    // 右边缘与选区右边缘对齐
+    let x = (sx + sw - ICON_SIZE).clamp(SCREEN_MARGIN, (dw - ICON_SIZE - SCREEN_MARGIN).max(SCREEN_MARGIN));
+    // 优先放在选区正上方；贴到屏幕上边缘时退到选区下方
+    let above = sy - ICON_SIZE - ICON_GAP;
+    let (y, side) = if above >= SCREEN_MARGIN {
+        (above, "上方")
+    } else {
+        (
+            (sy + sh + ICON_GAP).clamp(SCREEN_MARGIN, (dh - ICON_SIZE - SCREEN_MARGIN).max(SCREEN_MARGIN)),
+            "下方",
+        )
+    };
     eprintln!(
-        "[beek] 图标窗口位置：({:.0}, {:.0})（显示区 {:.0}x{:.0}）",
-        x, y, dw, dh
+        "[beek] 图标窗口位置：({:.0}, {:.0}) 选区{}，右边缘对齐（显示区 {:.0}x{:.0}）",
+        x, y, side, dw, dh
     );
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
                 origin: point(px(x), px(y)),
-                size: size(px(36.), px(36.)),
+                size: size(px(ICON_SIZE), px(ICON_SIZE)),
             })),
             titlebar: None,
             kind: WindowKind::PopUp,
