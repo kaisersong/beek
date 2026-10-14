@@ -118,7 +118,8 @@ pub fn dump_windows(tag: &str) {
     }
 }
 
-/// 当前可见的翻译弹窗个数（按弹窗尺寸识别，自检用）
+/// 当前可见的翻译弹窗个数（按弹窗宽度识别，自检用）。
+/// 高度是按内容变的，所以只能靠宽度区分（图标窗口只有 32pt 宽）。
 pub fn popup_window_count() -> usize {
     unsafe {
         let app: id = msg_send![class!(NSApplication), sharedApplication];
@@ -129,10 +130,7 @@ pub fn popup_window_count() -> usize {
             let w: id = msg_send![windows, objectAtIndex: i];
             let frame: cocoa::foundation::NSRect = msg_send![w, frame];
             let visible: i8 = msg_send![w, isVisible];
-            if visible != 0
-                && (frame.size.width - crate::POPUP_W as f64).abs() < 1.0
-                && (frame.size.height - crate::POPUP_H as f64).abs() < 1.0
-            {
+            if visible != 0 && (frame.size.width - crate::POPUP_W as f64).abs() < 1.0 {
                 found += 1;
             }
         }

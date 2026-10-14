@@ -23,6 +23,8 @@ enum UiEvent {
     TranslateChunk(u64, String),
     /// 翻译结束
     TranslateDone(u64, Result<String, String>),
+    /// 自检用：走真实复制逻辑把译文写进剪贴板
+    CopyResult,
     ClosePopup,
 }
 
@@ -129,6 +131,44 @@ enum PopupContent {
 struct PopupView {
     text: String,
     content: PopupContent,
+    /// true = 卡片贴窗口底部。弹窗放在选区上方时用，这样内容变长是向上长，不会压住选区
+    anchor_bottom: bool,
+    /// 窗口当前高度（卡片用它做高度上限，超出则内部滚动）
+    win_h: f32,
+    /// 「已复制」提示是否显示中
+    copied: bool,
+}
+
+impl PopupView {
+    /// 卡片里要显示的正文
+    fn body_text(&self) -> String {
+        match &self.content {
+            PopupContent::Loading => "翻译中…".to_string(),
+            PopupContent::Result(t) => t.clone(),
+            PopupContent::Error(e) => format!("翻译失败：{}", e),
+        }
+    }
+
+    /// 复制正文到系统剪贴板，并短暂显示「已复制」
+    fn copy(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.content, PopupContent::Loading) {
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(self.body_text()));
+        self.copied = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1500))
+                .await;
+            this.update(cx, |this, cx| {
+                this.copied = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
 }
 
 impl Render for PopupView {
@@ -143,12 +183,18 @@ impl Render for PopupView {
         };
         // 弹窗内点击不做任何事：关闭动作是「点弹窗外部」，
         // 由主循环轮询全局鼠标状态完成（非激活窗口收不到外部点击事件）。
-        div()
-            .id("popup")
+        let on_copy = cx.listener(
+            |this: &mut PopupView, _ev: &MouseDownEvent, _w: &mut Window, cx: &mut Context<PopupView>| {
+                this.copy(cx);
+            },
+        );
+
+        let card = div()
+            .id("beek-popup")
             .w(px(POPUP_W))
-            .h_full()
+            .max_h(px(self.win_h))
             .overflow_y_scroll()
-            .p(px(16.))
+            .p(px(POPUP_PAD))
             .bg(white())
             .rounded(px(12.))
             .shadow_lg()
@@ -163,10 +209,37 @@ impl Render for PopupView {
             .child(
                 div()
                     .mt(px(12.))
-                    .text_xs()
-                    .text_color(rgb(0xbbbbbb))
-                    .child("点击弹窗外任意处关闭"),
-            )
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0xbbbbbb))
+                            .child("点击弹窗外任意处关闭"),
+                    )
+                    .child(
+                        div()
+                            .id("beek-copy")
+                            .px(px(8.))
+                            .py(px(2.))
+                            .rounded(px(6.))
+                            .bg(rgb(0xf0f0f0))
+                            .text_xs()
+                            .text_color(rgb(0x666666))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0xe4e4e4)))
+                            .child(if self.copied { "已复制" } else { "复制" })
+                            .on_mouse_down(MouseButton::Left, on_copy),
+                    ),
+            );
+
+        // 放在选区上方时把卡片贴到窗口底部：窗口顶端固定，高度变大时卡片向上长
+        let mut root = div().w(px(POPUP_W)).h_full().flex().flex_col();
+        if self.anchor_bottom {
+            root = root.justify_end();
+        }
+        root.child(card)
     }
 }
 
@@ -179,9 +252,18 @@ const ICON_GAP: f32 = 2.;
 const SCREEN_MARGIN: f32 = 8.;
 /// 弹窗与选区的间距（点）
 const POPUP_GAP: f32 = 8.;
-/// 弹窗尺寸（点）
+/// 弹窗宽度（点）
 const POPUP_W: f32 = 380.;
-const POPUP_H: f32 = 320.;
+/// 弹窗内边距（点）
+const POPUP_PAD: f32 = 16.;
+/// 弹窗高度上限（点）：内容超过就内部滚动
+const POPUP_MAX_H: f32 = 320.;
+/// 打开时的起始高度（点）：只用于决定放上方还是下方，随后立刻按内容量准
+const POPUP_MIN_H: f32 = 92.;
+/// 页脚高度（点）：一行提示 + 复制按钮
+const POPUP_FOOTER_H: f32 = 22.;
+/// 卡片顶部引用原文的字号
+const POPUP_QUOTE_PT: f32 = 14.;
 
 fn display_size(cx: &mut AsyncApp) -> (f32, f32) {
     cx.update(|app| {
@@ -268,29 +350,162 @@ fn overlaps(ax: f32, ay: f32, aw: f32, ah: f32, bx: f32, by: f32, bw: f32, bh: f
 
 /// 弹窗摆放：优先选区下方；下方放不下就放上方；两边都放不下时往空间更大的一侧靠。
 /// 关键是不能靠 clamp 把弹窗往上顶——那会让弹窗盖住选中的词。
-fn popup_placement(dw: f32, dh: f32, sx: f32, sy: f32, sh: f32) -> (f32, f32, &'static str) {
+///
+/// 返回 (x, y, 说明, 高度上限, 是否锚底)。
+/// GPUI 只能改窗口尺寸、不能移动窗口，所以：
+///   放下方 → 窗口顶固定在选区下方，高度随内容向下长；
+///   放上方 → 窗口顶固定在「选区上方 - 高度上限」，卡片贴窗口底部，内容向上长，绝不压选区。
+fn popup_placement(
+    dw: f32,
+    dh: f32,
+    sx: f32,
+    sy: f32,
+    sh: f32,
+    want_h: f32,
+) -> (f32, f32, &'static str, f32, bool) {
     let x = sx.clamp(
         SCREEN_MARGIN,
         (dw - POPUP_W - SCREEN_MARGIN).max(SCREEN_MARGIN),
     );
-    let below = sy + sh + POPUP_GAP;
-    let above = sy - POPUP_H - POPUP_GAP;
-    let room_below = dh - SCREEN_MARGIN - below;
+    let room_below = dh - SCREEN_MARGIN - (sy + sh + POPUP_GAP);
     let room_above = sy - POPUP_GAP - SCREEN_MARGIN;
-    let (y, side) = if room_below >= POPUP_H {
-        (below, "下方")
-    } else if room_above >= POPUP_H {
-        (above, "上方")
-    } else if room_above > room_below {
-        // 两边都放不下：尽量少压选区，选上方
-        (above.max(SCREEN_MARGIN), "上方（空间不足）")
-    } else {
+    if room_below >= want_h {
         (
-            below.min(dh - POPUP_H - SCREEN_MARGIN).max(SCREEN_MARGIN),
-            "下方（空间不足）",
+            x,
+            sy + sh + POPUP_GAP,
+            "下方",
+            room_below.min(POPUP_MAX_H),
+            false,
         )
-    };
-    (x, y, side)
+    } else if room_above >= want_h {
+        let h = room_above.min(POPUP_MAX_H);
+        (x, sy - POPUP_GAP - h, "上方", h, true)
+    } else if room_below >= room_above {
+        (
+            x,
+            sy + sh + POPUP_GAP,
+            "下方（空间不足）",
+            room_below.min(POPUP_MAX_H),
+            false,
+        )
+    } else {
+        let h = room_above.min(POPUP_MAX_H);
+        (x, sy - POPUP_GAP - h, "上方（空间不足）", h, true)
+    }
+}
+
+/// 弹窗几何（逻辑点，屏幕左上原点）
+#[derive(Clone, Copy, Debug)]
+struct PopupGeom {
+    x: f32,
+    y: f32,
+    /// 窗口允许的最大高度
+    max_h: f32,
+    /// 卡片贴窗口底部（放在选区上方时）
+    anchor_bottom: bool,
+    /// 显示器高度，用于换算 Cocoa 坐标
+    dh: f32,
+    /// 卡片当前高度（按内容量出来的）
+    card_h: f32,
+    /// 放上方还是下方（日志用）
+    side: &'static str,
+}
+
+impl PopupGeom {
+    /// 窗口当前应有的高度
+    fn win_h(&self) -> f32 {
+        if self.anchor_bottom {
+            self.max_h
+        } else {
+            self.card_h.min(self.max_h)
+        }
+    }
+
+    /// 卡片矩形（Cocoa 坐标，左下原点），用于「点击弹窗外部关闭」。
+    /// 用卡片而不是窗口：放上方时窗口里有透明空白区，点那里也算「弹窗外部」。
+    fn card_cocoa(&self) -> (f64, f64, f64, f64) {
+        let card_top = if self.anchor_bottom {
+            self.y + self.win_h() - self.card_h
+        } else {
+            self.y
+        };
+        (
+            self.x as f64,
+            (self.dh - (card_top + self.card_h)) as f64,
+            POPUP_W as f64,
+            self.card_h as f64,
+        )
+    }
+}
+
+/// 一段文本在给定宽度、字号下的高度（pt）。
+/// 注意 shape_text 是按段落返回 WrappedLine 的，折行数藏在它内部的 wrap_boundaries 里，
+/// 所以必须用 WrappedLine::size(line_height)（= line_height ×（折行数+1））来量，
+/// 直接数 lines.len() 只会得到段落数（单段落永远是 1）。
+fn text_height(
+    window: &Window,
+    text: &str,
+    font_size: f32,
+    line_height: f32,
+    width: f32,
+) -> f32 {
+    let style = window.text_style();
+    let mut f = font(style.font_family.clone());
+    f.weight = style.font_weight;
+    f.style = style.font_style;
+    let runs = [TextRun {
+        len: text.len(),
+        font: f,
+        color: style.color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }];
+    match window.text_system().shape_text(
+        text.to_string().into(),
+        px(font_size),
+        &runs,
+        Some(px(width)),
+        None,
+    ) {
+        Ok(lines) => lines
+            .iter()
+            .map(|l| f32::from(l.size(px(line_height)).height))
+            .sum::<f32>()
+            .max(line_height),
+        // 度量失败时按字符宽度粗略估：CJK 按 1em、其他按 0.5em 算
+        Err(_) => {
+            let em: f32 = text
+                .chars()
+                .map(|c| if (c as u32) > 0x2e80 { 1.0 } else { 0.5 })
+                .sum();
+            ((em * font_size) / width.max(1.)).ceil().max(1.) * line_height
+        }
+    }
+}
+
+/// 卡片应有的高度（pt）：内边距 + 引用原文 + 正文 + 页脚
+fn card_height(window: &Window, view: &PopupView) -> f32 {
+    let style = window.text_style();
+    let rem = window.rem_size();
+    let base = f32::from(style.font_size.to_pixels(rem));
+    let lh = f32::from(style.line_height_in_pixels(rem));
+    let unit = if base > 0. { lh / base } else { 1.2 };
+    let text_w = POPUP_W - POPUP_PAD * 2.;
+    let body = view.body_text();
+    let quote_h = text_height(window, &view.text, POPUP_QUOTE_PT, POPUP_QUOTE_PT * unit, text_w);
+    let body_h = text_height(window, &body, base, base * unit, text_w);
+    if std::env::var("BEEK_DEBUG").is_ok() {
+        eprintln!(
+            "[beek] 高度度量：引用 {:.0}pt / 正文 {:.0}pt（正文 {} 字符，宽 {:.0}，行高系数 {:.2}）",
+            quote_h,
+            body_h,
+            body.chars().count(),
+            text_w,
+            unit
+        );
+    }
+    (POPUP_PAD + quote_h + 8. + body_h + 12. + POPUP_FOOTER_H + POPUP_PAD).ceil() + 2.
 }
 
 /// 是否应当因为「在弹窗外部按下鼠标」而关闭弹窗。
@@ -317,27 +532,32 @@ fn open_popup_window(
     text: String,
     content: PopupContent,
     b: SelBounds,
-) -> Option<(WindowHandle<PopupView>, (f64, f64, f64, f64))> {
+) -> Option<(WindowHandle<PopupView>, PopupGeom)> {
     let (dw, dh) = display_size(cx);
     let (sx, sy, sw, sh) = gpui_rect(b, dh);
-    let (x, y, side) = popup_placement(dw, dh, sx, sy, sh);
-    let hit = overlaps(sx, sy, sw, sh, x, y, POPUP_W, POPUP_H);
+    // 起始高度只用来定位置；真实高度在拿到窗口后按内容量（同一轮事件内完成，不会闪）
+    let (x, y, side, max_h, anchor_bottom) =
+        popup_placement(dw, dh, sx, sy, sh, POPUP_MIN_H);
+    let win_h = if anchor_bottom { max_h } else { POPUP_MIN_H };
+    let hit = overlaps(sx, sy, sw, sh, x, y, POPUP_W, win_h);
     eprintln!(
-        "[beek] 弹窗位置：({:.0}, {:.0}) 选区{}，选区=({:.0}, {:.0}, {:.0}x{:.0})，压住选区={}（显示区 {:.0}x{:.0}）",
-        x, y, side, sx, sy, sw, sh, hit, dw, dh
+        "[beek] 弹窗位置：({:.0}, {:.0}) {}，选区=({:.0}, {:.0}, {:.0}x{:.0})，压住选区={}，高度上限={:.0}，锚底={}（显示区 {:.0}x{:.0}）",
+        x, y, side, sx, sy, sw, sh, hit, max_h, anchor_bottom, dw, dh
     );
-    // 交给「点击弹窗外部关闭」用的 Cocoa 坐标矩形（左下原点）
-    let cocoa = (
-        x as f64,
-        (dh - (y + POPUP_H)) as f64,
-        POPUP_W as f64,
-        POPUP_H as f64,
-    );
+    let geom = PopupGeom {
+        x,
+        y,
+        max_h,
+        anchor_bottom,
+        dh,
+        card_h: win_h,
+        side,
+    };
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
                 origin: point(px(x), px(y)),
-                size: size(px(POPUP_W), px(POPUP_H)),
+                size: size(px(POPUP_W), px(win_h)),
             })),
             titlebar: None,
             kind: WindowKind::PopUp,
@@ -347,10 +567,46 @@ fn open_popup_window(
             window_background: WindowBackgroundAppearance::Transparent,
             ..Default::default()
         },
-        |_window, cx| cx.new(|_cx| PopupView { text, content }),
+        move |_window, cx| {
+            cx.new(|_cx| PopupView {
+                text,
+                content,
+                anchor_bottom,
+                win_h,
+                copied: false,
+            })
+        },
     )
     .ok()
-    .map(|w| (w, cocoa))
+    .map(|w| (w, geom))
+}
+
+/// 按当前内容重算卡片高度、必要时调整窗口尺寸，返回更新后的几何
+fn sync_popup_geometry(
+    cx: &mut AsyncApp,
+    win: &WindowHandle<PopupView>,
+    geom: PopupGeom,
+) -> PopupGeom {
+    let mut out = geom;
+    if let Ok(g) = win.update(cx, |view, window, vcx| {
+        let mut g = geom;
+        g.card_h = card_height(window, view);
+        let win_h = g.win_h();
+        let cur_h = f32::from(window.bounds().size.height);
+        if (win_h - cur_h).abs() > 0.5 {
+            window.resize(size(px(POPUP_W), px(win_h)));
+            eprintln!(
+                "[beek] 弹窗高度：{:.0} → {:.0}（卡片 {:.0}，上限 {:.0}，{}）",
+                cur_h, win_h, g.card_h, g.max_h, g.side
+            );
+        }
+        view.win_h = win_h;
+        vcx.notify();
+        g
+    }) {
+        out = g;
+    }
+    out
 }
 
 // ---------- AX 监控后台线程 ----------
@@ -518,11 +774,15 @@ fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
         for &(label, cocoa_y) in &[("屏幕中部", 500.0f64), ("屏幕底部", 60.0f64)] {
             let bb = SelBounds { x: 600.0, y: cocoa_y, w: 220.0, h: 20.0 };
             let (sx, sy, sw, sh) = gpui_rect(bb, 982.0);
-            let (px_, py_, side) = popup_placement(1512.0, 982.0, sx, sy, sh);
-            let hit = overlaps(sx, sy, sw, sh, px_, py_, POPUP_W, POPUP_H);
+            let (px_, py_, side, max_h, anchor) =
+                popup_placement(1512.0, 982.0, sx, sy, sh, 200.);
+            // 按最坏情况（卡片长到高度上限）检查是否压住选区
+            let card_h = max_h;
+            let card_top = if anchor { py_ + max_h - card_h } else { py_ };
+            let hit = overlaps(sx, sy, sw, sh, px_, card_top, POPUP_W, card_h);
             eprintln!(
-                "[自检] 定位({}): 选区 top={:.0} 高={:.0} → 弹窗 ({:.0}, {:.0}) {}，压住选区={}（期望 false）",
-                label, sy, sh, px_, py_, side, hit
+                "[自检] 定位({}): 选区 top={:.0} 高={:.0} → 弹窗 ({:.0}, {:.0}) {}，上限 {:.0}，锚底={}，压住选区={}（期望 false）",
+                label, sy, sh, px_, py_, side, max_h, anchor, hit
             );
         }
         // 真实窗口：注入一个贴近屏幕底部的选区，看弹窗是否转到选区上方
@@ -533,6 +793,19 @@ fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
         let _ = tx.send(UiEvent::StartTranslate(SAMPLE.to_string(), bot));
         std::thread::sleep(Duration::from_secs(1));
         menubar::dump_windows("自检：底部选区弹出时");
+        let _ = tx.send(UiEvent::ClosePopup);
+        std::thread::sleep(Duration::from_millis(300));
+
+        // ---- 高度随内容增长 + 复制 ----
+        // 用长文本：流式过程中应看到弹窗高度一段段变大，最后触发复制供外部校验
+        let _ = tx.send(UiEvent::ShowIcon(b, LONG_SAMPLE.to_string()));
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = tx.send(UiEvent::StartTranslate(LONG_SAMPLE.to_string(), b));
+        std::thread::sleep(Duration::from_secs(4));
+        menubar::dump_windows("自检：长文本流式结束后");
+        eprintln!("[自检] 触发复制（与点弹窗里的「复制」按钮同一条路径）");
+        let _ = tx.send(UiEvent::CopyResult);
+        std::thread::sleep(Duration::from_millis(600));
         let _ = tx.send(UiEvent::ClosePopup);
         std::thread::sleep(Duration::from_millis(300));
 
@@ -605,7 +878,8 @@ fn main() {
         }
 
         let (tx, rx) = mpsc::channel::<UiEvent>();
-        if std::env::var("BEEK_SELFTEST").is_ok() {
+        let selftest_mode = std::env::var("BEEK_SELFTEST").is_ok();
+        if selftest_mode {
             spawn_selftest(tx.clone(), cfg.show_in_dock);
         }
         spawn_ax_monitor(tx.clone());
@@ -621,8 +895,8 @@ fn main() {
             let mut shown: Option<u64> = None;
             // 已经写进弹窗的增量段数（自检取证用）
             let mut chunks_applied: u64 = 0;
-            // 弹窗的 Cocoa 坐标矩形 + 上一次采样的鼠标按键掩码：用于「点击弹窗外部关闭」
-            let mut popup_cocoa: Option<(f64, f64, f64, f64)> = None;
+            // 弹窗几何 + 上一次采样的鼠标按键掩码：用于「点击弹窗外部关闭」
+            let mut popup_geom: Option<PopupGeom> = None;
             let mut prev_buttons: Option<i64> = None;
             loop {
                 while let Ok(ev) = rx.try_recv() {
@@ -632,7 +906,7 @@ fn main() {
                             shown = None;
                             in_flight = None;
                             close_window(cx, &mut popup_win);
-                            popup_cocoa = None;
+                            popup_geom = None;
                             if icon_win.is_none() {
                                 icon_win = open_icon_window(cx, b, text, tx.clone());
                             }
@@ -652,12 +926,15 @@ fn main() {
                             chunks_applied = 0;
                             close_window(cx, &mut icon_win);
                             close_window(cx, &mut popup_win);
-                            popup_cocoa = None;
+                            popup_geom = None;
                             // 关键：先开弹窗再等网络，用户点完立刻就有东西出来
                             let opened =
                                 open_popup_window(cx, text.clone(), PopupContent::Loading, b);
-                            popup_cocoa = opened.as_ref().map(|(_, rect)| *rect);
-                            popup_win = opened.map(|(w, _)| w);
+                            if let Some((w, geom)) = opened {
+                                // 立刻按内容量一次高度（此时正文是「翻译中…」）
+                                popup_geom = Some(sync_popup_geometry(cx, &w, geom));
+                                popup_win = Some(w);
+                            }
                             // 忽略「开弹窗那一刻还按着的鼠标」，否则点图标的那一下会立刻把它关掉
                             prev_buttons = None;
                             eprintln!("[beek] +{}ms 点击图标 → 弹窗立即显示（id={}）", ms(t0), id);
@@ -700,6 +977,10 @@ fn main() {
                                     .is_ok();
                                 if ok {
                                     chunks_applied += 1;
+                                    // 内容变长了 → 重算高度（向下长 / 向上长）
+                                    if let Some(g) = popup_geom {
+                                        popup_geom = Some(sync_popup_geometry(cx, w, g));
+                                    }
                                 }
                             }
                         }
@@ -725,6 +1006,21 @@ fn main() {
                                     .is_ok();
                             }
                             if applied {
+                                if let Some(g) = popup_geom {
+                                    if let Some(w) = popup_win.as_ref() {
+                                        popup_geom = Some(sync_popup_geometry(cx, w, g));
+                                    }
+                                }
+                                // 自检模式：结果一落地立刻走一次复制，避免等待期间被外部点击打断
+                                if selftest_mode {
+                                    if let Some(w) = popup_win.as_ref() {
+                                        let _ = w.update(cx, |view, _window, vcx| view.copy(vcx));
+                                        eprintln!(
+                                            "[beek] +{}ms 自检：译文落地即复制到剪贴板（同复制按钮走的函数）",
+                                            ms(t0)
+                                        );
+                                    }
+                                }
                                 eprintln!(
                                     "[beek] +{}ms 译文写入弹窗（id={}，已流式写入 {} 段）",
                                     ms(t0),
@@ -735,12 +1031,23 @@ fn main() {
                                 eprintln!("[beek] +{}ms 弹窗已不在，结果丢弃（id={}）", ms(t0), id);
                             }
                         }
+                        UiEvent::CopyResult => {
+                            // 自检：走 PopupView 的真实复制逻辑（和点「复制」按钮同一条路径）
+                            if let Some(w) = &popup_win {
+                                let ok = w
+                                    .update(cx, |view, _window, vcx| view.copy(vcx))
+                                    .is_ok();
+                                eprintln!("[beek] +{}ms 复制译文到剪贴板（ok={}）", ms(t0), ok);
+                            } else {
+                                eprintln!("[beek] +{}ms 复制请求：弹窗已不在，跳过", ms(t0));
+                            }
+                        }
                         UiEvent::ClosePopup => {
                             let was = shown.take();
                             // 作废在飞行中的翻译：关闭之后不再被迟到的结果弹回来
                             in_flight = None;
                             close_window(cx, &mut popup_win);
-                            popup_cocoa = None;
+                            popup_geom = None;
                             eprintln!(
                                 "[beek] +{}ms 关闭弹窗（id={:?}，已流式写入 {} 段）",
                                 ms(t0),
@@ -752,7 +1059,7 @@ fn main() {
                 }
                 // 「点击弹窗外部关闭」：弹窗是 focus:false 的非激活窗口，点它外面不会
                 // 产生任何窗口事件，所以只能主动轮询全局鼠标状态。
-                if let Some(rect) = popup_cocoa {
+                if let Some(rect) = popup_geom.map(|g| g.card_cocoa()) {
                     let (mx, my, buttons) = mouse::state();
                     match prev_buttons {
                         // 第一次采样只记状态，不判定
