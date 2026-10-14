@@ -1,9 +1,10 @@
 // BeeK 菜单栏模块 — NSStatusItem + Dock 显示策略
 use crate::config::{self, Config};
+use crate::icons;
 use cocoa::base::{id, nil};
-use cocoa::foundation::NSString;
+use cocoa::foundation::{NSString, NSSize, NSUInteger};
 use objc::declare::ClassDecl;
-use objc::runtime::{Class, Object, Sel};
+use objc::runtime::{Class, Object, Sel, YES};
 use objc::{class, msg_send, sel, sel_impl};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -206,7 +207,28 @@ pub fn setup_status_item(cfg: &Config) {
         // NSStatusBar 返回的对象可能被自动释放，显式 retain 保证菜单栏图标常驻。
         let _: id = msg_send![item, retain];
         let button: id = msg_send![item, button];
-        let _: () = msg_send![button, setTitle: nsstr("🐝")];
+        // 菜单栏图标：内嵌的 36px @2x template 图（纯黑 + alpha），
+        // setTemplate 之后 AppKit 会按菜单栏明暗自动反色，无需两套素材。
+        let png = icons::MENUBAR_TEMPLATE_PNG;
+        let data: id = msg_send![class!(NSData),
+            dataWithBytes: png.as_ptr() as *const std::os::raw::c_void
+            length: png.len() as NSUInteger];
+        let img_alloc: id = msg_send![class!(NSImage), alloc];
+        let img: id = msg_send![img_alloc, initWithData: data];
+        if img == nil {
+            eprintln!("[beek] ⚠️ 菜单栏图标解码失败，回退为 emoji");
+            let _: () = msg_send![button, setTitle: nsstr("🐝")];
+        } else {
+            let sz = NSSize::new(
+                icons::MENUBAR_ICON_PT as _,
+                icons::MENUBAR_ICON_PT as _,
+            );
+            let _: () = msg_send![img, setSize: sz];
+            let _: () = msg_send![img, setTemplate: YES];
+            let _: () = msg_send![button, setImage: img];
+            let _: () = msg_send![button, setImagePosition: 1i64]; // NSImageOnly
+            let _: () = msg_send![button, setTitle: nsstr("")];
+        }
 
         let menu_alloc: id = msg_send![class!(NSMenu), alloc];
         let menu: id = msg_send![menu_alloc, init];
@@ -265,13 +287,31 @@ pub fn setup_status_item(cfg: &Config) {
         } else {
             let frame: cocoa::foundation::NSRect = msg_send![btn_window, frame];
             let visible: i8 = msg_send![btn_window, isVisible];
+            // 回读按钮实际持有的图像，确认 setImage 真的生效（不依赖肉眼）
+            let shown_img: id = msg_send![button, image];
+            let img_desc = if shown_img == nil {
+                "无（已回退 emoji）".to_string()
+            } else {
+                let s: NSSize = msg_send![shown_img, size];
+                let is_tpl: objc::runtime::BOOL = msg_send![shown_img, isTemplate];
+                format!("{:.0}x{:.0}pt template={}", s.width, s.height, is_tpl)
+            };
+            let btn_title: id = msg_send![button, title];
+            let title_ptr: *const std::os::raw::c_char = msg_send![btn_title, UTF8String];
+            let title_s = if title_ptr.is_null() {
+                String::new()
+            } else {
+                std::ffi::CStr::from_ptr(title_ptr).to_string_lossy().into_owned()
+            };
             eprintln!(
-                "[beek] 菜单栏图标已就绪：visible={} frame=({:.0}, {:.0}, {:.0}, {:.0})",
+                "[beek] 菜单栏图标已就绪：visible={} frame=({:.0}, {:.0}, {:.0}, {:.0}) 图像={} 标题={:?}",
                 visible != 0,
                 frame.origin.x,
                 frame.origin.y,
                 frame.size.width,
-                frame.size.height
+                frame.size.height,
+                img_desc,
+                title_s
             );
 
             // 状态栏布局是异步的，2 秒后再确认一次真实位置

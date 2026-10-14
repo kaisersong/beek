@@ -2,11 +2,13 @@
 // 选中文本 → 小蜜蜂图标 → 点击翻译 → 弹窗显示（流式增量）
 mod ax;
 mod config;
+mod icons;
 mod menubar;
 mod translate;
 
 use ax::{ax_selected_text, ax_selection_bounds, is_url, SelBounds};
 use gpui::*;
+use icons::IconKind;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -33,6 +35,10 @@ struct IconView {
     text: String,
     bounds: SelBounds,
     loading: bool,
+    hovered: bool,
+    pressed: bool,
+    /// 上一次绘制用的图标状态，仅用于日志取证（状态切换时才打印）
+    last_kind: Option<IconKind>,
     tx: mpsc::Sender<UiEvent>,
 }
 
@@ -44,27 +50,71 @@ impl Render for IconView {
             |this: &mut IconView,
              ev: &MouseDownEvent,
              _window: &mut Window,
-             _cx: &mut Context<IconView>| {
+             cx: &mut Context<IconView>| {
                 if this.loading || ev.click_count > 1 {
                     return;
                 }
                 this.loading = true;
+                this.pressed = true;
+                cx.notify();
                 let _ = this.tx.send(UiEvent::StartTranslate(this.text.clone(), this.bounds));
             },
         );
+        let on_mouse_up = cx.listener(
+            |this: &mut IconView,
+             _ev: &MouseUpEvent,
+             _window: &mut Window,
+             cx: &mut Context<IconView>| {
+                if this.pressed {
+                    this.pressed = false;
+                    cx.notify();
+                }
+            },
+        );
+        // hover 需要元素带 id 才会注册命中盒
+        let on_hover = cx.listener(
+            |this: &mut IconView,
+             hovered: &bool,
+             _window: &mut Window,
+             cx: &mut Context<IconView>| {
+                if this.hovered != *hovered {
+                    this.hovered = *hovered;
+                    cx.notify();
+                }
+            },
+        );
+
+        let kind = if self.loading {
+            IconKind::Disabled
+        } else if self.pressed {
+            IconKind::Pressed
+        } else if self.hovered {
+            IconKind::Hover
+        } else {
+            IconKind::Default
+        };
+        if self.last_kind != Some(kind) {
+            eprintln!("[beek] 图标状态切换 → {:?}", kind);
+            self.last_kind = Some(kind);
+        }
+
+        // 素材本身是圆形徽标（四角透明），直接铺图标，不再衬白底卡片和圆角阴影
         div()
+            .id("beek-icon")
             .w(px(ICON_SIZE))
             .h(px(ICON_SIZE))
             .flex()
             .items_center()
             .justify_center()
-            .bg(white())
-            .rounded(px(10.))
-            .shadow_lg()
             .cursor_pointer()
-            .text_size(px(18.))
-            .child(if self.loading { "⏳" } else { "🐝" })
+            .child(
+                img(kind.render_image(cx))
+                    .w(px(icons::SELECTION_ICON_PT))
+                    .h(px(icons::SELECTION_ICON_PT)),
+            )
             .on_mouse_down(MouseButton::Left, on_mouse_down)
+            .on_mouse_up(MouseButton::Left, on_mouse_up)
+            .on_hover(on_hover)
     }
 }
 
@@ -210,6 +260,9 @@ fn open_icon_window(
                 text,
                 bounds: b,
                 loading: false,
+                hovered: false,
+                pressed: false,
+                last_kind: None,
                 tx,
             })
         },
