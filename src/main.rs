@@ -4,6 +4,7 @@ mod ax;
 mod config;
 mod icons;
 mod menubar;
+mod mouse;
 mod translate;
 
 use ax::{ax_selected_text, ax_selection_bounds, is_url, SelBounds};
@@ -128,7 +129,6 @@ enum PopupContent {
 struct PopupView {
     text: String,
     content: PopupContent,
-    tx: mpsc::Sender<UiEvent>,
 }
 
 impl Render for PopupView {
@@ -141,17 +141,8 @@ impl Render for PopupView {
                 .text_color(rgb(0xcc3333))
                 .child(format!("翻译失败：{}", e)),
         };
-        // 点击当刻直接同步关窗，不等主循环下一轮轮询；
-        // 同时通知主循环作废在飞行中的翻译，否则迟到的结果会把弹窗再弹回来一次。
-        let on_mouse_down = cx.listener(
-            |this: &mut PopupView,
-             _ev: &MouseDownEvent,
-             window: &mut Window,
-             _cx: &mut Context<PopupView>| {
-                let _ = this.tx.send(UiEvent::ClosePopup);
-                window.remove_window();
-            },
-        );
+        // 弹窗内点击不做任何事：关闭动作是「点弹窗外部」，
+        // 由主循环轮询全局鼠标状态完成（非激活窗口收不到外部点击事件）。
         div()
             .id("popup")
             .w(px(POPUP_W))
@@ -161,8 +152,6 @@ impl Render for PopupView {
             .bg(white())
             .rounded(px(12.))
             .shadow_lg()
-            .cursor_pointer()
-            .on_mouse_down(MouseButton::Left, on_mouse_down)
             .child(
                 div()
                     .text_sm()
@@ -176,18 +165,20 @@ impl Render for PopupView {
                     .mt(px(12.))
                     .text_xs()
                     .text_color(rgb(0xbbbbbb))
-                    .child("点击任意处关闭"),
+                    .child("点击弹窗外任意处关闭"),
             )
     }
 }
 
 // ---------- 窗口管理 ----------
-/// 图标窗口边长（点）
-const ICON_SIZE: f32 = 36.;
+/// 图标窗口边长（点）。等于素材绘制尺寸，窗口里不留多余空白，图标才能贴着选区
+const ICON_SIZE: f32 = 32.;
 /// 图标与选区边缘的间距（点）
-const ICON_GAP: f32 = 6.;
+const ICON_GAP: f32 = 2.;
 /// 窗口距离屏幕边缘的最小留白（点）
 const SCREEN_MARGIN: f32 = 8.;
+/// 弹窗与选区的间距（点）
+const POPUP_GAP: f32 = 8.;
 /// 弹窗尺寸（点）
 const POPUP_W: f32 = 380.;
 const POPUP_H: f32 = 320.;
@@ -238,8 +229,8 @@ fn open_icon_window(
         )
     };
     eprintln!(
-        "[beek] 图标窗口位置：({:.0}, {:.0}) 选区{}，右边缘对齐（显示区 {:.0}x{:.0}）",
-        x, y, side, dw, dh
+        "[beek] 图标窗口位置：({:.0}, {:.0}) 选区{}，右边缘对齐（选区=({:.0}, {:.0}, {:.0}x{:.0})，显示区 {:.0}x{:.0}）",
+        x, y, side, sx, sy, sw, sh, dw, dh
     );
     cx.open_window(
         WindowOptions {
@@ -270,17 +261,78 @@ fn open_icon_window(
     .ok()
 }
 
+/// 弹窗矩形与选区矩形是否相交（同一坐标系，左上原点、y 向下）
+fn overlaps(ax: f32, ay: f32, aw: f32, ah: f32, bx: f32, by: f32, bw: f32, bh: f32) -> bool {
+    ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah
+}
+
+/// 弹窗摆放：优先选区下方；下方放不下就放上方；两边都放不下时往空间更大的一侧靠。
+/// 关键是不能靠 clamp 把弹窗往上顶——那会让弹窗盖住选中的词。
+fn popup_placement(dw: f32, dh: f32, sx: f32, sy: f32, sh: f32) -> (f32, f32, &'static str) {
+    let x = sx.clamp(
+        SCREEN_MARGIN,
+        (dw - POPUP_W - SCREEN_MARGIN).max(SCREEN_MARGIN),
+    );
+    let below = sy + sh + POPUP_GAP;
+    let above = sy - POPUP_H - POPUP_GAP;
+    let room_below = dh - SCREEN_MARGIN - below;
+    let room_above = sy - POPUP_GAP - SCREEN_MARGIN;
+    let (y, side) = if room_below >= POPUP_H {
+        (below, "下方")
+    } else if room_above >= POPUP_H {
+        (above, "上方")
+    } else if room_above > room_below {
+        // 两边都放不下：尽量少压选区，选上方
+        (above.max(SCREEN_MARGIN), "上方（空间不足）")
+    } else {
+        (
+            below.min(dh - POPUP_H - SCREEN_MARGIN).max(SCREEN_MARGIN),
+            "下方（空间不足）",
+        )
+    };
+    (x, y, side)
+}
+
+/// 是否应当因为「在弹窗外部按下鼠标」而关闭弹窗。
+/// prev/cur 是前后两次采样的按键掩码：只有「空 → 按下」才算一次新点击，
+/// 这样打开弹窗时那次还没松开的按下不会立刻把弹窗关掉。
+/// rect 与 mx/my 都在 Cocoa 屏幕坐标系（左下原点、y 向上）。
+fn should_close_on_press(
+    prev_buttons: i64,
+    cur_buttons: i64,
+    mx: f64,
+    my: f64,
+    rect: (f64, f64, f64, f64),
+) -> bool {
+    if prev_buttons != 0 || cur_buttons == 0 {
+        return false;
+    }
+    let (x, y, w, h) = rect;
+    let inside = mx >= x && mx <= x + w && my >= y && my <= y + h;
+    !inside
+}
+
 fn open_popup_window(
     cx: &mut AsyncApp,
     text: String,
     content: PopupContent,
     b: SelBounds,
-    tx: mpsc::Sender<UiEvent>,
-) -> Option<WindowHandle<PopupView>> {
+) -> Option<(WindowHandle<PopupView>, (f64, f64, f64, f64))> {
     let (dw, dh) = display_size(cx);
-    let (sx, sy, _sw, sh) = gpui_rect(b, dh);
-    let x = sx.clamp(SCREEN_MARGIN, (dw - POPUP_W - SCREEN_MARGIN).max(SCREEN_MARGIN));
-    let y = (sy + sh + SCREEN_MARGIN).clamp(SCREEN_MARGIN, (dh - POPUP_H - SCREEN_MARGIN).max(SCREEN_MARGIN));
+    let (sx, sy, sw, sh) = gpui_rect(b, dh);
+    let (x, y, side) = popup_placement(dw, dh, sx, sy, sh);
+    let hit = overlaps(sx, sy, sw, sh, x, y, POPUP_W, POPUP_H);
+    eprintln!(
+        "[beek] 弹窗位置：({:.0}, {:.0}) 选区{}，选区=({:.0}, {:.0}, {:.0}x{:.0})，压住选区={}（显示区 {:.0}x{:.0}）",
+        x, y, side, sx, sy, sw, sh, hit, dw, dh
+    );
+    // 交给「点击弹窗外部关闭」用的 Cocoa 坐标矩形（左下原点）
+    let cocoa = (
+        x as f64,
+        (dh - (y + POPUP_H)) as f64,
+        POPUP_W as f64,
+        POPUP_H as f64,
+    );
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
@@ -295,9 +347,10 @@ fn open_popup_window(
             window_background: WindowBackgroundAppearance::Transparent,
             ..Default::default()
         },
-        |_window, cx| cx.new(|_cx| PopupView { text, content, tx }),
+        |_window, cx| cx.new(|_cx| PopupView { text, content }),
     )
     .ok()
+    .map(|w| (w, cocoa))
 }
 
 // ---------- AX 监控后台线程 ----------
@@ -460,6 +513,47 @@ fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
         menubar::dump_windows("自检：请求途中关闭弹窗 10 秒后");
         menubar::dump_menu();
 
+        // ---- 定位回归：弹窗不得盖住选区 ----
+        // 用 dh=982 的屏幕算纯函数，覆盖「下方放得下 / 放不下要转上方」两种情形
+        for &(label, cocoa_y) in &[("屏幕中部", 500.0f64), ("屏幕底部", 60.0f64)] {
+            let bb = SelBounds { x: 600.0, y: cocoa_y, w: 220.0, h: 20.0 };
+            let (sx, sy, sw, sh) = gpui_rect(bb, 982.0);
+            let (px_, py_, side) = popup_placement(1512.0, 982.0, sx, sy, sh);
+            let hit = overlaps(sx, sy, sw, sh, px_, py_, POPUP_W, POPUP_H);
+            eprintln!(
+                "[自检] 定位({}): 选区 top={:.0} 高={:.0} → 弹窗 ({:.0}, {:.0}) {}，压住选区={}（期望 false）",
+                label, sy, sh, px_, py_, side, hit
+            );
+        }
+        // 真实窗口：注入一个贴近屏幕底部的选区，看弹窗是否转到选区上方
+        let bot = SelBounds { x: 600.0, y: 60.0, w: 220.0, h: 20.0 };
+        eprintln!("[自检] 几何回归：注入屏幕底部选区（Cocoa 600,60 220x20）");
+        let _ = tx.send(UiEvent::ShowIcon(bot, SAMPLE.to_string()));
+        std::thread::sleep(Duration::from_millis(400));
+        let _ = tx.send(UiEvent::StartTranslate(SAMPLE.to_string(), bot));
+        std::thread::sleep(Duration::from_secs(1));
+        menubar::dump_windows("自检：底部选区弹出时");
+        let _ = tx.send(UiEvent::ClosePopup);
+        std::thread::sleep(Duration::from_millis(300));
+
+        // ---- 「点击弹窗外部关闭」判定（纯函数）----
+        let r = (500.0f64, 300.0f64, 380.0f64, 320.0f64);
+        eprintln!(
+            "[自检] 外部点击判定：弹窗内新按下={}（期望 false）  弹窗内持续按住={}（期望 false）",
+            should_close_on_press(0, 1, 600.0, 400.0, r),
+            should_close_on_press(1, 1, 600.0, 400.0, r)
+        );
+        eprintln!(
+            "[自检] 外部点击判定：弹窗外新按下={}（期望 true）   弹窗外持续按住={}（期望 false）",
+            should_close_on_press(0, 1, 100.0, 100.0, r),
+            should_close_on_press(1, 1, 100.0, 100.0, r)
+        );
+        eprintln!(
+            "[自检] 外部点击判定：无按键={}（期望 false）        弹窗边界上(500,300)={}（期望 false）",
+            should_close_on_press(0, 0, 100.0, 100.0, r),
+            should_close_on_press(0, 1, 500.0, 300.0, r)
+        );
+
         eprintln!(
             "[自检] 点击菜单项前：activationPolicy={} 勾选={}",
             menubar::activation_policy(),
@@ -527,6 +621,9 @@ fn main() {
             let mut shown: Option<u64> = None;
             // 已经写进弹窗的增量段数（自检取证用）
             let mut chunks_applied: u64 = 0;
+            // 弹窗的 Cocoa 坐标矩形 + 上一次采样的鼠标按键掩码：用于「点击弹窗外部关闭」
+            let mut popup_cocoa: Option<(f64, f64, f64, f64)> = None;
+            let mut prev_buttons: Option<i64> = None;
             loop {
                 while let Ok(ev) = rx.try_recv() {
                     match ev {
@@ -535,6 +632,7 @@ fn main() {
                             shown = None;
                             in_flight = None;
                             close_window(cx, &mut popup_win);
+                            popup_cocoa = None;
                             if icon_win.is_none() {
                                 icon_win = open_icon_window(cx, b, text, tx.clone());
                             }
@@ -554,14 +652,14 @@ fn main() {
                             chunks_applied = 0;
                             close_window(cx, &mut icon_win);
                             close_window(cx, &mut popup_win);
+                            popup_cocoa = None;
                             // 关键：先开弹窗再等网络，用户点完立刻就有东西出来
-                            popup_win = open_popup_window(
-                                cx,
-                                text.clone(),
-                                PopupContent::Loading,
-                                b,
-                                tx.clone(),
-                            );
+                            let opened =
+                                open_popup_window(cx, text.clone(), PopupContent::Loading, b);
+                            popup_cocoa = opened.as_ref().map(|(_, rect)| *rect);
+                            popup_win = opened.map(|(w, _)| w);
+                            // 忽略「开弹窗那一刻还按着的鼠标」，否则点图标的那一下会立刻把它关掉
+                            prev_buttons = None;
                             eprintln!("[beek] +{}ms 点击图标 → 弹窗立即显示（id={}）", ms(t0), id);
                             let tx2 = tx.clone();
                             std::thread::spawn(move || {
@@ -642,6 +740,7 @@ fn main() {
                             // 作废在飞行中的翻译：关闭之后不再被迟到的结果弹回来
                             in_flight = None;
                             close_window(cx, &mut popup_win);
+                            popup_cocoa = None;
                             eprintln!(
                                 "[beek] +{}ms 关闭弹窗（id={:?}，已流式写入 {} 段）",
                                 ms(t0),
@@ -650,6 +749,33 @@ fn main() {
                             );
                         }
                     }
+                }
+                // 「点击弹窗外部关闭」：弹窗是 focus:false 的非激活窗口，点它外面不会
+                // 产生任何窗口事件，所以只能主动轮询全局鼠标状态。
+                if let Some(rect) = popup_cocoa {
+                    let (mx, my, buttons) = mouse::state();
+                    match prev_buttons {
+                        // 第一次采样只记状态，不判定
+                        None => prev_buttons = Some(buttons),
+                        Some(prev) => {
+                            if should_close_on_press(prev, buttons, mx, my, rect) {
+                                eprintln!(
+                                    "[beek] +{}ms 在弹窗外部按下鼠标（{:.0},{:.0}，弹窗 ({:.0},{:.0},{:.0}x{:.0})）→ 关闭",
+                                    ms(t0),
+                                    mx,
+                                    my,
+                                    rect.0,
+                                    rect.1,
+                                    rect.2,
+                                    rect.3
+                                );
+                                let _ = tx.send(UiEvent::ClosePopup);
+                            }
+                            prev_buttons = Some(buttons);
+                        }
+                    }
+                } else {
+                    prev_buttons = None;
                 }
                 cx.background_executor()
                     .timer(Duration::from_millis(16))
