@@ -16,7 +16,8 @@ pub const MENUBAR_TEMPLATE_PNG: &[u8] =
 /// 菜单栏图标的逻辑尺寸（pt）。素材 36px，按 18pt 绘制正好 2x。
 pub const MENUBAR_ICON_PT: f64 = 18.0;
 
-/// 悬浮按钮图标的逻辑绘制尺寸（pt）。素材 64px，按 32pt 绘制在 2x 屏上正好 1:1。
+/// 悬浮按钮素材的设计尺寸（pt）：素材 64px，原本按 32pt 绘制（2x 屏 1:1）。
+/// 现在的实际绘制尺寸由悬浮窗口决定（见 main.rs 的 ICON_SIZE / ICON_ZOOM）。
 pub const SELECTION_ICON_PT: f32 = 32.0;
 
 /// 悬浮按钮的四种状态，素材均为 64x64（@2x），按 32pt 逻辑尺寸绘制。
@@ -73,7 +74,7 @@ impl IconKind {
                     .expect("内嵌划词图标解码失败");
                 let sz = image.size(0);
                 eprintln!(
-                    "[beek] 内嵌图标解码完成：{:?} = {}x{} px（按 {}pt 绘制）",
+                    "[beek] 内嵌图标解码完成：{:?} = {}x{} px（素材按 {}pt 设计）",
                     self, sz.width.0, sz.height.0, SELECTION_ICON_PT
                 );
                 image

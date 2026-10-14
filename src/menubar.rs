@@ -2,7 +2,7 @@
 use crate::config::{self, Config};
 use crate::icons;
 use cocoa::base::{id, nil};
-use cocoa::foundation::{NSString, NSSize, NSUInteger};
+use cocoa::foundation::{NSPoint, NSString, NSSize, NSUInteger};
 use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Sel, YES};
 use objc::{class, msg_send, sel, sel_impl};
@@ -116,6 +116,48 @@ pub fn dump_windows(tag: &str) {
             );
         }
     }
+}
+
+/// 把弹窗窗口的左上角移到 Cocoa 屏幕坐标 (x, y_top)，返回是否找到并移动了窗口。
+///
+/// gpui 0.2.2 的 mac 平台没有移动窗口的 API：`Div::window_control_area(Drag)` 在
+/// mac/window.rs 里的 `on_hit_test_window_control` 是空实现（只有 Windows 用它做 HTCAPTION），
+/// 所以只能绕过 gpui，直接对 AppKit 的窗口下手。这里按宽度 + isVisible 认出「当前显示的那个」
+/// 弹窗（宽度区分弹窗与图标窗口；isVisible 排除已关闭的旧弹窗，它们的 NSWindow 还在 NSApp.windows
+/// 里），再用 setFrameTopLeftPoint —— 不需要任何额外权限。
+///
+/// 必须在主线程调用：AppKit 的窗口事务（NSWMWindowCoordinator）在别的线程上会直接让进程
+/// trap 掉（实测 EXC_BREAKPOINT / SIGTRAP，见 2026-10-14 的崩溃报告）。
+pub fn popup_window_move(x: f64, y_top: f64) -> bool {
+    if !is_main_thread() {
+        eprintln!("[beek] ⚠️ popup_window_move 只能在主线程调用，本次移动已忽略");
+        debug_assert!(false, "popup_window_move 必须在主线程调用");
+        return false;
+    }
+    unsafe {
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let windows: id = msg_send![app, windows];
+        let count: usize = msg_send![windows, count];
+        for i in 0..count {
+            let w: id = msg_send![windows, objectAtIndex: i];
+            let frame: cocoa::foundation::NSRect = msg_send![w, frame];
+            let visible: i8 = msg_send![w, isVisible];
+            if visible != 0 && (frame.size.width - crate::POPUP_W as f64).abs() < 1.0 {
+                let p = NSPoint::new(x, y_top);
+                let _: () = msg_send![w, setFrameTopLeftPoint: p];
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// 当前线程是不是主线程（AppKit 的窗口操作只允许在主线程做）
+fn is_main_thread() -> bool {
+    extern "C" {
+        fn pthread_main_np() -> i32;
+    }
+    unsafe { pthread_main_np() != 0 }
 }
 
 /// 当前可见的翻译弹窗个数（按弹窗宽度识别，自检用）。

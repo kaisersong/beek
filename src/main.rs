@@ -25,6 +25,8 @@ enum UiEvent {
     TranslateDone(u64, Result<String, String>),
     /// 自检用：走真实复制逻辑把译文写进剪贴板
     CopyResult,
+    /// 自检用：在主线程把弹窗挪到指定位置（AppKit 只能在主线程动窗口）
+    DragTest(f64, f64),
     ClosePopup,
 }
 
@@ -101,19 +103,21 @@ impl Render for IconView {
             self.last_kind = Some(kind);
         }
 
-        // 素材本身是圆形徽标（四角透明），直接铺图标，不再衬白底卡片和圆角阴影
+        // 素材是圆形徽标（四角透明），直接铺图标；放大 ICON_ZOOM 后由容器裁掉外圈描边。
+        // 注意 img() 的尺寸不吃 pt 换算，必须用 ICON_SIZE * ICON_ZOOM（见 ICON_ZOOM 的推导）。
         div()
             .id("beek-icon")
             .w(px(ICON_SIZE))
             .h(px(ICON_SIZE))
+            .overflow_hidden()
             .flex()
             .items_center()
             .justify_center()
             .cursor_pointer()
             .child(
                 img(kind.render_image(cx))
-                    .w(px(icons::SELECTION_ICON_PT))
-                    .h(px(icons::SELECTION_ICON_PT)),
+                    .w(px(ICON_SIZE * ICON_ZOOM))
+                    .h(px(ICON_SIZE * ICON_ZOOM)),
             )
             .on_mouse_down(MouseButton::Left, on_mouse_down)
             .on_mouse_up(MouseButton::Left, on_mouse_up)
@@ -197,6 +201,26 @@ impl Render for PopupView {
             .bg(white())
             .rounded(px(12.))
             .shadow_lg()
+            // 顶部拖动条：等于 macOS 原生的窗口拖动区，按住可以拖走整个弹窗
+            .child(
+                div()
+                    .id("beek-drag")
+                    .w_full()
+                    .h(px(POPUP_DRAG_H))
+                    .mb(px(6.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .window_control_area(WindowControlArea::Drag)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().w(px(22.)).h(px(2.)).rounded(px(1.)).bg(rgb(0xcccccc)))
+                            .child(div().w(px(22.)).h(px(2.)).rounded(px(1.)).bg(rgb(0xcccccc))),
+                    ),
+            )
             .child(body)
             .child(
                 div()
@@ -211,18 +235,51 @@ impl Render for PopupView {
                             .child("点击弹窗外任意处关闭"),
                     )
                     .child(
+                        // 复制按钮：两个叠起来的圆角方框 = 复制图标
                         div()
                             .id("beek-copy")
-                            .px(px(8.))
-                            .py(px(2.))
-                            .rounded(px(6.))
-                            .bg(rgb(0xf0f0f0))
-                            .text_xs()
-                            .text_color(rgb(0x666666))
+                            .w(px(20.))
+                            .h(px(20.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(5.))
+                            .hover(|s| s.bg(rgb(0xe8e8e8)))
                             .cursor_pointer()
-                            .hover(|s| s.bg(rgb(0xe4e4e4)))
-                            .child(if self.copied { "已复制" } else { "复制" })
-                            .on_mouse_down(MouseButton::Left, on_copy),
+                            .on_mouse_down(MouseButton::Left, on_copy)
+                            .child(
+                                div()
+                                    .relative()
+                                    .w(px(12.))
+                                    .h(px(12.))
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .left(px(4.))
+                                            .top(px(0.))
+                                            .w(px(8.))
+                                            .h(px(8.))
+                                            .border_1()
+                                            .border_color(rgb(0xbbbbbb))
+                                            .rounded(px(2.)),
+                                    )
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .left(px(0.))
+                                            .top(px(4.))
+                                            .w(px(8.))
+                                            .h(px(8.))
+                                            .bg(white())
+                                            .border_1()
+                                            .border_color(if self.copied {
+                                                rgb(0x2f9e44)
+                                            } else {
+                                                rgb(0x888888)
+                                            })
+                                            .rounded(px(2.)),
+                                    ),
+                            ),
                     ),
             );
 
@@ -236,10 +293,18 @@ impl Render for PopupView {
 }
 
 // ---------- 窗口管理 ----------
-/// 图标窗口边长（点）。等于素材绘制尺寸，窗口里不留多余空白，图标才能贴着选区
-const ICON_SIZE: f32 = 32.;
-/// 图标与选区边缘的间距（点）
-const ICON_GAP: f32 = 2.;
+/// 图标窗口边长（点）= 悬浮按钮可见圆的直径（原来 32pt，用户要求减半）
+const ICON_SIZE: f32 = 16.;
+/// 图标与选区边缘的间距（点）：0 = 紧贴选区上沿
+const ICON_GAP: f32 = 0.;
+/// 绘制时把素材放大一点再裁掉外圈，看起来就是「没有边框」。
+///
+/// 素材是 64x64 的圆形徽标，不透明的圆只占 x=3..61，也就是左右各 3/64 = 4.6875% 是
+/// 透明/半透明的抗锯齿边，贴在浅色背景上就是用户看到的那圈「边框」。
+/// 取 Z 使得「放大后被容器裁掉的边」正好等于这 4.6875%：
+///   (1 - 1/Z) / 2 = 0.046875  →  Z = 1 / 0.90625 = 1.103448…
+/// 于是容器的 16pt 正好等于完整的圆，边缘的抗锯齿被裁掉，圆本身一点不糊、也不被切。
+const ICON_ZOOM: f32 = 1.103448;
 /// 窗口距离屏幕边缘的最小留白（点）
 const SCREEN_MARGIN: f32 = 8.;
 /// 弹窗与选区的间距（点）
@@ -254,6 +319,11 @@ const POPUP_MAX_H: f32 = 320.;
 const POPUP_MIN_H: f32 = 92.;
 /// 页脚高度（点）：一行提示 + 复制按钮
 const POPUP_FOOTER_H: f32 = 22.;
+/// 顶部拖动条高度（点）
+const POPUP_DRAG_H: f32 = 12.;
+/// 决定「放下方还是上方」时要求的最小可用高度（点）：
+/// 只要下方还有这么多空间就优先放下方（不够才转上方）
+const POPUP_MIN_USABLE: f32 = 80.;
 
 fn display_size(cx: &mut AsyncApp) -> (f32, f32) {
     cx.update(|app| {
@@ -402,6 +472,12 @@ struct PopupGeom {
 }
 
 impl PopupGeom {
+    /// 窗口被用户拖走之后，几何记录必须跟上：窗口位置变了，
+    /// 卡片在里面的相对位置（anchor_bottom 等）没变，所以只有 x/y 跟着改。
+    fn with_origin(&self, x: f32, y: f32) -> PopupGeom {
+        PopupGeom { x, y, ..*self }
+    }
+
     /// 窗口当前应有的高度
     fn win_h(&self) -> f32 {
         if self.anchor_bottom {
@@ -474,7 +550,7 @@ fn text_height(
     }
 }
 
-/// 卡片应有的高度（pt）：内边距 + 正文 + 页脚
+/// 卡片应有的高度（pt）：内边距 + 拖动条 + 正文 + 页脚
 fn card_height(window: &Window, view: &PopupView) -> f32 {
     let style = window.text_style();
     let rem = window.rem_size();
@@ -493,7 +569,27 @@ fn card_height(window: &Window, view: &PopupView) -> f32 {
             unit
         );
     }
-    (POPUP_PAD + body_h + 12. + POPUP_FOOTER_H + POPUP_PAD).ceil() + 2.
+    (POPUP_PAD + POPUP_DRAG_H + 6. + body_h + 12. + POPUP_FOOTER_H + POPUP_PAD).ceil() + 2.
+}
+
+/// 顶部拖动条（≡）在 Cocoa 坐标里可以被按住拖动的区域：
+/// 卡片最上面「内边距 + 拖动条」那一条，整宽。
+/// 做成纯函数是为了让自检能直接断言，不用真的动鼠标。
+fn drag_handle_cocoa(geom: &PopupGeom) -> (f64, f64, f64, f64) {
+    let (cx, cy, cw, ch) = geom.card_cocoa();
+    let top = cy + ch;
+    let h = (POPUP_PAD + POPUP_DRAG_H) as f64;
+    (cx, top - h, cw, h)
+}
+
+/// 这次采样是否要「开始拖动弹窗」：上一刻没按、这一刻按下，且按在拖动条上。
+/// 和 should_close_on_press 一样只在「空 → 按下」那一下成立，所以按住不放不会反复触发。
+fn drag_starts(prev_buttons: i64, cur_buttons: i64, mx: f64, my: f64, handle: (f64, f64, f64, f64)) -> bool {
+    if prev_buttons != 0 || cur_buttons == 0 {
+        return false;
+    }
+    let (x, y, w, h) = handle;
+    mx >= x && mx <= x + w && my >= y && my <= y + h
 }
 
 /// 是否应当因为「在弹窗外部按下鼠标」而关闭弹窗。
@@ -524,7 +620,7 @@ fn open_popup_window(
     let (sx, sy, sw, sh) = gpui_rect(b, dh);
     // 起始高度只用来定位置；真实高度在拿到窗口后按内容量（同一轮事件内完成，不会闪）
     let (x, y, side, max_h, anchor_bottom) =
-        popup_placement(dw, dh, sx, sy, sh, POPUP_MIN_H);
+        popup_placement(dw, dh, sx, sy, sh, POPUP_MIN_USABLE);
     let win_h = if anchor_bottom { max_h } else { POPUP_MIN_H };
     let hit = overlaps(sx, sy, sw, sh, x, y, POPUP_W, win_h);
     eprintln!(
@@ -789,6 +885,11 @@ fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
         let _ = tx.send(UiEvent::StartTranslate(LONG_SAMPLE.to_string(), b));
         std::thread::sleep(Duration::from_secs(4));
         menubar::dump_windows("自检：长文本流式结束后");
+        // ---- 真实拖动：把弹窗挪到别处（用户拖拖动条时每 16ms 走的就是这个函数）----
+        // 注意：AppKit 的窗口事务只能在主线程做，所以这里把动作发给主循环执行
+        eprintln!("[自检] 真实拖动：请求主线程把弹窗左上角移到 Cocoa (520, 700)");
+        let _ = tx.send(UiEvent::DragTest(520.0, 700.0));
+        std::thread::sleep(Duration::from_millis(300));
         eprintln!("[自检] 触发复制（与点弹窗里的「复制」按钮同一条路径）");
         let _ = tx.send(UiEvent::CopyResult);
         std::thread::sleep(Duration::from_millis(600));
@@ -811,6 +912,34 @@ fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
             "[自检] 外部点击判定：无按键={}（期望 false）        弹窗边界上(500,300)={}（期望 false）",
             should_close_on_press(0, 0, 100.0, 100.0, r),
             should_close_on_press(0, 1, 500.0, 300.0, r)
+        );
+
+        // ---- 拖动条（≡）判定（纯函数）----
+        let g = PopupGeom {
+            x: 600.,
+            y: 590.,
+            max_h: 320.,
+            anchor_bottom: false,
+            dh: 982.,
+            card_h: 268.,
+            side: "下方",
+        };
+        let h = drag_handle_cocoa(&g);
+        let strip_h = (POPUP_PAD + POPUP_DRAG_H) as f64;
+        eprintln!(
+            "[自检] 拖动条区域(Cocoa)：({:.0}, {:.0}) {:.0}x{:.0}（期望上沿={:.0}、高={:.0}，卡片下沿={:.0}）",
+            h.0, h.1, h.2, h.3, 982.0 - 590.0, strip_h, 982.0 - (590.0 + 268.0)
+        );
+        let (mx_, my_) = (h.0 + h.2 / 2.0, h.1 + h.3 / 2.0);
+        eprintln!(
+            "[自检] 拖动判定：条内新按下={}（期望 true）  条内持续按住={}（期望 false）",
+            drag_starts(0, 1, mx_, my_, h),
+            drag_starts(1, 1, mx_, my_, h)
+        );
+        eprintln!(
+            "[自检] 拖动判定：条下方正文处按下={}（期望 false，不得靠拖正文移动窗口）  条上方按下={}（期望 false）",
+            drag_starts(0, 1, mx_, h.1 - 5.0, h),
+            drag_starts(0, 1, mx_, h.1 + h.3 + 5.0, h)
         );
 
         eprintln!(
@@ -884,6 +1013,8 @@ fn main() {
             // 弹窗几何 + 上一次采样的鼠标按键掩码：用于「点击弹窗外部关闭」
             let mut popup_geom: Option<PopupGeom> = None;
             let mut prev_buttons: Option<i64> = None;
+            // 正在拖动弹窗时记着「鼠标相对窗口左上角的偏移」（Cocoa 坐标）
+            let mut drag: Option<(f64, f64)> = None;
             loop {
                 while let Ok(ev) = rx.try_recv() {
                     match ev {
@@ -1028,6 +1159,18 @@ fn main() {
                                 eprintln!("[beek] +{}ms 复制请求：弹窗已不在，跳过", ms(t0));
                             }
                         }
+                        UiEvent::DragTest(x, y_top) => {
+                            // 自检：主线程上走一次真实的窗口移动（拖动条拖动用的就是它）
+                            let ok = menubar::popup_window_move(x, y_top);
+                            eprintln!(
+                                "[beek] +{}ms 自检：主线程移动弹窗到 Cocoa ({:.0}, {:.0}) → {}（期望 true）",
+                                ms(t0),
+                                x,
+                                y_top,
+                                ok
+                            );
+                            menubar::dump_windows("自检：真实拖动之后（期望 x=520、frame 上沿=700）");
+                        }
                         UiEvent::ClosePopup => {
                             let was = shown.take();
                             // 作废在飞行中的翻译：关闭之后不再被迟到的结果弹回来
@@ -1043,15 +1186,54 @@ fn main() {
                         }
                     }
                 }
-                // 「点击弹窗外部关闭」：弹窗是 focus:false 的非激活窗口，点它外面不会
-                // 产生任何窗口事件，所以只能主动轮询全局鼠标状态。
-                if let Some(rect) = popup_geom.map(|g| g.card_cocoa()) {
+                // 「点击弹窗外部关闭」+「按住拖动条拖动弹窗」：弹窗是 focus:false 的
+                // 非激活窗口，点它外面/拖它都不会产生可用的窗口事件（gpui 的 mac 平台
+                // 也没有拖动窗口的 API），所以两件事都靠主动轮询全局鼠标状态来做。
+                if let Some(g) = popup_geom {
+                    let rect = g.card_cocoa();
+                    let handle = drag_handle_cocoa(&g);
                     let (mx, my, buttons) = mouse::state();
                     match prev_buttons {
                         // 第一次采样只记状态，不判定
                         None => prev_buttons = Some(buttons),
                         Some(prev) => {
-                            if should_close_on_press(prev, buttons, mx, my, rect) {
+                            if let Some((off_x, off_y)) = drag {
+                                if buttons == 0 {
+                                    drag = None;
+                                    eprintln!(
+                                        "[beek] +{}ms 拖动结束：弹窗左上角 ({:.0}, {:.0})",
+                                        ms(t0),
+                                        g.x,
+                                        g.y
+                                    );
+                                } else {
+                                    // 窗口左上角 = 鼠标位置 - 按下时的偏移
+                                    let nx = mx - off_x;
+                                    let ntop = my - off_y;
+                                    if menubar::popup_window_move(nx, ntop) {
+                                        // 窗口已经被 AppKit 挪走了，几何记录必须跟上，
+                                        // 否则「弹窗外部」的判定矩形还留在原地
+                                        popup_geom = Some(
+                                            g.with_origin(nx as f32, (g.dh as f64 - ntop) as f32),
+                                        );
+                                    }
+                                }
+                            } else if drag_starts(prev, buttons, mx, my, handle) {
+                                // 记下「鼠标相对窗口左上角」的偏移，拖动时才不会跳
+                                let (dx, dy) = (
+                                    mx - g.x as f64,
+                                    my - (g.dh as f64 - g.y as f64),
+                                );
+                                drag = Some((dx, dy));
+                                eprintln!(
+                                    "[beek] +{}ms 按住拖动条 → 开始拖动弹窗（鼠标 {:.0},{:.0}，窗口 ({:.0},{:.0})）",
+                                    ms(t0),
+                                    mx,
+                                    my,
+                                    g.x,
+                                    g.y
+                                );
+                            } else if should_close_on_press(prev, buttons, mx, my, rect) {
                                 eprintln!(
                                     "[beek] +{}ms 在弹窗外部按下鼠标（{:.0},{:.0}，弹窗 ({:.0},{:.0},{:.0}x{:.0})）→ 关闭",
                                     ms(t0),
@@ -1069,6 +1251,7 @@ fn main() {
                     }
                 } else {
                     prev_buttons = None;
+                    drag = None;
                 }
                 cx.background_executor()
                     .timer(Duration::from_millis(16))
