@@ -255,6 +255,42 @@ pub unsafe fn describe_frontmost() -> String {
     )
 }
 
+/// 上一次成功拿到的前台应用 pid。
+/// 用处：系统级「当前焦点应用」在焦点切换的一瞬间会返回 kAXErrorNoValue(-25212)，
+/// 此时不能直接放弃本次取词（那样用户要反复划好几次才成功一次），
+/// 沿用它 —— 用户刚在哪个应用里划词，那个应用就是我们要找的。
+static LAST_APP_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// pid_t 就是 i32；只为 AXUIElementGetPid 的签名服务，避免为它引 libc
+type LibcPid = i32;
+
+unsafe fn focused_app() -> Option<AXUIElementRef> {
+    for _ in 0..3 {
+        let sys = AXUIElementCreateSystemWide();
+        AXUIElementSetMessagingTimeout(sys, 0.5);
+        if let Ok(a) = ax_get_attr(sys, kAXFocusedApplicationAttribute) {
+            let app = a as AXUIElementRef;
+            let mut pid: LibcPid = 0;
+            if AXUIElementGetPid(app, &mut pid) == 0 && pid > 0 {
+                LAST_APP_PID.store(pid, std::sync::atomic::Ordering::Relaxed);
+            }
+            return Some(app);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    // 重试仍失败（正在切焦点）→ 用上次成功的那个应用
+    let pid = LAST_APP_PID.load(std::sync::atomic::Ordering::Relaxed);
+    if pid > 0 {
+        eprintln!(
+            "[beek] 取词：系统级焦点应用暂时取不到（焦点切换中），沿用上次的 pid {}",
+            pid
+        );
+        return Some(AXUIElementCreateApplication(pid));
+    }
+    eprintln!("[beek] 取词：拿不到系统级焦点应用，也没有可沿用的应用");
+    None
+}
+
 /// 取当前选区（文本 + 矩形）。
 ///
 /// 两条硬约束（都是实测踩出来的）：
@@ -267,15 +303,8 @@ pub unsafe fn describe_frontmost() -> String {
 /// 监视器每 tick 都调这个函数，所以平时靠 `deep=false` 只走便宜的路
 /// （焦点元素 → 父链 → 焦点元素子树）；只有刚发生过划词动作时才放开深层搜索。
 pub unsafe fn ax_selection(deep: bool) -> Option<Selection> {
-    let sys = AXUIElementCreateSystemWide();
-    AXUIElementSetMessagingTimeout(sys, 0.5);
-    let app = match ax_get_attr(sys, kAXFocusedApplicationAttribute) {
-        Ok(a) => a as AXUIElementRef,
-        Err(e) => {
-            eprintln!("[beek] 取词：拿不到系统级焦点应用（AX 错误 {}）", e);
-            return None;
-        }
-    };
+    // 前台应用统一走 focused_app()：它带重试，并在焦点切换瞬间沿用上次的应用
+    let app = focused_app()?;
     let focused_el = ax_get_attr(app, kAXFocusedUIElementAttribute)
         .ok()
         .map(|v| v as AXUIElementRef);
