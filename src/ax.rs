@@ -218,27 +218,42 @@ unsafe fn webarea_selection(
 }
 
 /// 取当前选区（文本 + 矩形，同一个元素）
+///
+/// 注意：**不能**在拿不到「app 级焦点元素」时直接返回。
+/// 实测（探针 BEEK_AX_PROBE_PID=2238 打在 Safari 上）Safari 不提供
+/// app 级 AXFocusedUIElement（返回 nil），于是只剩「从焦点窗口搜 AXWebArea」这条能走的路。
+/// 早期版本就是因为在第一步就 `?` 掉，导致 Safari / Chromium 类应用（Muse、Grok Bot）
+/// 完全弹不出图标。
 pub unsafe fn ax_selection() -> Option<Selection> {
-    let (app, el) = focused_app_and_element()?;
-    // 1) 焦点元素自己 → 沿父链最多 4 层
-    let mut cur = el;
-    for level in 0..5 {
-        if let Some((text, bounds, base)) = element_selection(cur) {
-            let source = if level == 0 { base } else { "parent" };
-            return Some(Selection { text, bounds, source });
+    let sys = AXUIElementCreateSystemWide();
+    AXUIElementSetMessagingTimeout(sys, 0.5);
+    let app = match ax_get_attr(sys, kAXFocusedApplicationAttribute) {
+        Ok(a) => a as AXUIElementRef,
+        Err(_) => return None,
+    };
+
+    // 1) 焦点元素自己 → 沿父链最多 4 层 → 焦点元素子树（拿得到焦点元素时才有这一步）
+    if let Ok(el) = ax_get_attr(app, kAXFocusedUIElementAttribute) {
+        let el = el as AXUIElementRef;
+        AXUIElementSetMessagingTimeout(el, 0.5);
+        let mut cur = el;
+        for level in 0..5 {
+            if let Some((text, bounds, base)) = element_selection(cur) {
+                let source = if level == 0 { base } else { "parent" };
+                return Some(Selection { text, bounds, source });
+            }
+            match ax_get_attr(cur, kAXParentAttribute) {
+                Ok(p) => cur = p as AXUIElementRef,
+                Err(_) => break,
+            }
         }
-        match ax_get_attr(cur, kAXParentAttribute) {
-            Ok(p) => cur = p as AXUIElementRef,
-            Err(_) => break,
+        let mut budget: u32 = 400;
+        if let Some(hit) = tree_selection(el, 0, &mut budget) {
+            return Some(Selection { text: hit.0, bounds: hit.1, source: hit.2 });
         }
     }
-    // 2) 兜底：从焦点元素子树 → 焦点窗口子树里搜。
-    //    Safari / Chromium 的选区挂在 AXWebArea 上，且往往不在焦点元素的子树里，
-    //    所以必须搜到窗口这一层（少了这步，Safari/Muse/Grok Bot 直接弹不出图标）。
-    let mut budget: u32 = 400;
-    if let Some(hit) = tree_selection(el, 0, &mut budget) {
-        return Some(Selection { text: hit.0, bounds: hit.1, source: hit.2 });
-    }
+
+    // 2) 焦点窗口子树：优先 AXWebArea（Safari / Chromium 的选区挂在这里），再退到任意有选区的节点
     if let Ok(win) = ax_get_attr(app, kAXFocusedWindowAttribute) {
         let win = win as AXUIElementRef;
         let mut budget: u32 = 800;
@@ -250,10 +265,10 @@ pub unsafe fn ax_selection() -> Option<Selection> {
             return Some(Selection { text: hit.0, bounds: hit.1, source: hit.2 });
         }
     }
-    // 3) 最后试 app 自己的 AXSelectedText（没有矩形，位置交给鼠标锚点兜底）
+
+    // 3) app 自己的 AXSelectedText（没有矩形，位置交给鼠标锚点兜底）
     if let Ok(v) = ax_get_attr(app, kAXSelectedTextAttribute) {
         if let Some(text) = cfstring_to_string(v) {
-            eprintln!("[beek] 选区文本来自 app 级 AXSelectedText（无矩形，用鼠标锚点定位）");
             return Some(Selection {
                 text,
                 bounds: SelBounds { x: 0., y: 0., w: 0., h: 0. },
@@ -319,4 +334,156 @@ pub unsafe fn prompt_accessibility() {
 pub fn is_url(s: &str) -> bool {
     let t = s.trim();
     t.starts_with("http://") || t.starts_with("https://") || t.starts_with("www.")
+}
+
+// ---------- 诊断探针（BEEK_AX_PROBE=1）----------
+//
+// 用途：某个应用「划词弹不出图标」时，用它把该应用真实的 AX 情况打出来：
+// 焦点元素链上有没有选中文本、有没有 AXWebArea、各节点的 role/frame、
+// AXBoundsForRange 能不能出矩形。不做任何 UI 操作，不翻译，打印完就退出。
+
+unsafe fn el_string(el: AXUIElementRef, attr: &str) -> String {
+    match ax_get_attr(el, attr) {
+        Ok(v) => cfstring_to_string(v).unwrap_or_else(|| "(空)".to_string()),
+        Err(e) => format!("(err {})", e),
+    }
+}
+
+unsafe fn el_frame(el: AXUIElementRef) -> String {
+    let pos = ax_get_attr(el, kAXPositionAttribute).ok();
+    let size = ax_get_attr(el, kAXSizeAttribute).ok();
+    let (mut p, mut z) = ([0f64; 2], [0f64; 2]);
+    let okp = pos.map(|v| AXValueGetValue(v as _, kAXValueTypeCGPoint, p.as_mut_ptr() as *mut c_void)).unwrap_or(false);
+    let okz = size.map(|v| AXValueGetValue(v as _, kAXValueTypeCGSize, z.as_mut_ptr() as *mut c_void)).unwrap_or(false);
+    if okp && okz {
+        format!("({:.0},{:.0} {:.0}x{:.0})", p[0], p[1], z[0], z[1])
+    } else {
+        "(无 frame)".to_string()
+    }
+}
+
+/// 这个节点自己有没有选中文本；有的话顺便试一下矩形
+unsafe fn el_selection_desc(el: AXUIElementRef) -> Option<String> {
+    let direct = match ax_get_attr(el, kAXSelectedTextAttribute) {
+        Ok(v) => cfstring_to_string(v),
+        Err(_) => None,
+    };
+    let marker = match ax_get_attr(el, "AXSelectedTextMarkerRange") {
+        Ok(r) => match ax_param_attr(el, "AXStringForRange", r) {
+            Ok(v) => cfstring_to_string(v),
+            Err(_) => None,
+        },
+        Err(_) => None,
+    };
+    let text = direct.clone().or(marker.clone())?;
+    let bounds = bounds_routes(el)
+        .map(|b| format!("矩形 ok ({:.0},{:.0} {:.0}x{:.0})", b.x, b.y, b.w, b.h))
+        .unwrap_or_else(|| "矩形 失败".to_string());
+    let head: String = text.chars().take(30).collect();
+    Some(format!(
+        "文本={:?}（AXSelectedText={} marker={}）{}",
+        head,
+        if direct.is_some() { "有" } else { "无" },
+        if marker.is_some() { "有" } else { "无" },
+        bounds
+    ))
+}
+
+unsafe fn probe_walk(el: AXUIElementRef, depth: u32, visited: &mut u32, hits: &mut u32) {
+    if depth > 10 || *visited > 300 {
+        return;
+    }
+    *visited += 1;
+    let role = get_role(el).unwrap_or_else(|| "?".to_string());
+    let is_web = role == "AXWebArea";
+    if let Some(desc) = el_selection_desc(el) {
+        *hits += 1;
+        eprintln!("[探针] 有选区的节点：role={} frame={} {}", role, el_frame(el), desc);
+    } else if is_web {
+        eprintln!("[探针] AXWebArea：frame={} 标题={:?}（本身没有选中文本）", el_frame(el), el_string(el, kAXTitleAttribute));
+    }
+    if let Ok(children) = ax_get_attr(el, kAXChildrenAttribute) {
+        let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(children as _);
+        for i in 0..arr.len().min(50) {
+            let child = *arr.get(i).unwrap() as AXUIElementRef;
+            probe_walk(child, depth + 1, visited, hits);
+        }
+    }
+}
+
+pub unsafe fn ax_probe() {
+    eprintln!("[探针] 辅助功能权限：{}", AXIsProcessTrusted());
+    // 可以指定 pid（BEEK_AX_PROBE_PID）去探某个应用；不指定就用当前焦点应用。
+    // 指定 pid 很有用：探针一般是在终端里跑的，那时焦点应用是终端而不是目标应用。
+    let pid: Option<i32> = std::env::var("BEEK_AX_PROBE_PID")
+        .ok()
+        .and_then(|v| v.trim().parse().ok());
+    let (app, focused_el) = match pid {
+        Some(p) => {
+            let app = AXUIElementCreateApplication(p);
+            let el = ax_get_attr(app, kAXFocusedUIElementAttribute)
+                .ok()
+                .map(|v| v as AXUIElementRef);
+            (app, el)
+        }
+        None => match focused_app_and_element() {
+            Some((a, e)) => (a, Some(e)),
+            None => {
+                eprintln!("[探针] 拿不到焦点 app（可用 BEEK_AX_PROBE_PID=<pid> 指定应用）");
+                return;
+            }
+        },
+    };
+    eprintln!(
+        "[探针] app={:?} pid={:?} 焦点元素={:?}",
+        el_string(app, kAXTitleAttribute),
+        pid,
+        focused_el.map(|e| format!("role={} frame={}", get_role(e).unwrap_or_default(), el_frame(e)))
+    );
+
+    if let Some(el) = focused_el {
+        eprintln!("[探针] 焦点元素 selectedText={:?}", el_string(el, kAXSelectedTextAttribute));
+        let mut cur = el;
+        for level in 0..6 {
+            eprintln!(
+                "[探针] 焦点链 {}：role={} frame={} 选区={:?}",
+                level,
+                get_role(cur).unwrap_or_else(|| "?".to_string()),
+                el_frame(cur),
+                el_selection_desc(cur).unwrap_or_else(|| "无".to_string())
+            );
+            match ax_get_attr(cur, kAXParentAttribute) {
+                Ok(p) => cur = p as AXUIElementRef,
+                Err(_) => break,
+            }
+        }
+    }
+
+    // 窗口：优先焦点窗口；拿不到就把该 app 的所有窗口都扫一遍
+    let mut roots: Vec<AXUIElementRef> = Vec::new();
+    match ax_get_attr(app, kAXFocusedWindowAttribute) {
+        Ok(w) => roots.push(w as AXUIElementRef),
+        Err(_) => {
+            if let Ok(ws) = ax_get_attr(app, kAXWindowsAttribute) {
+                let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(ws as _);
+                for i in 0..arr.len().min(8) {
+                    roots.push(*arr.get(i).unwrap() as AXUIElementRef);
+                }
+            }
+        }
+    }
+    if roots.is_empty() {
+        eprintln!("[探针] 该 app 没有可扫的窗口");
+        return;
+    }
+    for win in roots {
+        eprintln!(
+            "[探针] 扫窗口：frame={} title={:?}",
+            el_frame(win),
+            el_string(win, kAXTitleAttribute)
+        );
+        let (mut visited, mut hits) = (0u32, 0u32);
+        probe_walk(win, 0, &mut visited, &mut hits);
+        eprintln!("[探针] 该窗口：访问 {} 个节点，{} 个有选区", visited, hits);
+    }
 }

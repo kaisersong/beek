@@ -1374,6 +1374,11 @@ fn main() {
         translate_selftest();
         return;
     }
+    if std::env::var("BEEK_AX_PROBE").is_ok() {
+        // 诊断模式：把一个应用的 AX 选区情况打出来，不开窗口
+        unsafe { ax::ax_probe() };
+        return;
+    }
 
     Application::new().run(|cx: &mut App| {
         let cfg = config::load();
