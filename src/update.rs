@@ -293,8 +293,10 @@ pub fn install_script(new_app: &Path, version: &str) -> Result<PathBuf, String> 
 LOG=/tmp/beek_update.log
 exec >>"$LOG" 2>&1
 echo "== $(date '+%F %T') 开始替换：{version} =="
-APP=/Applications/BeeK.app
-NEW={new_app}
+APP="/Applications/BeeK.app"
+# 路径必须加引号：解压目录在 ~/Library/Application Support 下，含空格，
+# 不加引号会被 shell 截断（实测：脚本走到 ditto 时源路径为空、替换失败，旧 app 已被删）
+NEW="{new_app}"
 LABEL={label}
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null
 # 等旧进程退出（最多 15 秒）：进程还在就直接删 bundle 会失败
@@ -399,13 +401,19 @@ pub fn selftest_install() {
     match install_script(&fake, "9.9.9") {
         Ok(path) => {
             let body = std::fs::read_to_string(&path).unwrap_or_default();
+            // 路径带引号是硬要求：解压目录在 ~/Library/Application Support 下，含空格
+            let quoted = body.contains("NEW=\"") && body.contains("APP=\"");
             eprintln!(
-                "[自检] 替换脚本已生成：{}（含版本 9.9.9={}，含 bootout={}，含 bootstrap={}）",
+                "[自检] 替换脚本已生成：{}（含版本 9.9.9={}，bootout={}，bootstrap={}，路径已加引号={}）",
                 path.display(),
                 body.contains("9.9.9"),
                 body.contains("launchctl bootout"),
-                body.contains("launchctl bootstrap")
+                body.contains("launchctl bootstrap"),
+                quoted
             );
+            if !quoted {
+                eprintln!("[自检] ⚠️ 替换脚本路径没加引号：含空格的路径会导致替换失败");
+            }
         }
         Err(e) => eprintln!("[自检] 替换脚本生成失败：{}", e),
     }
