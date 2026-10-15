@@ -79,15 +79,38 @@ Key 有两种配置方式，配置文件优先：
 
 ## 取词方式
 
-BeeK 有三条取词路径，按可靠性依次尝试，前一条拿不到才走后面：
+BeeK 按下面的顺序取选中文本，前一条拿不到才走后面。这套顺序参考了开源实现
+[SelectedTextKit](https://github.com/tisfeng/SelectedTextKit)（Easydict 的取词组件），
+并对照豆包的二进制（`libaha_cua.dylib` 导入 `AXUIElementCopyElementAtPosition`、
+`AXObserverAddNotification`、`CGEventTapCreate`）确认过思路。
 
-| 路径 | 触发 | 适用 | 代价 |
+| 顺序 | 路径 | 适用 | 代价 |
 | --- | --- | --- | --- |
-| AX 取词 | 选中文本即出图标 | 备忘录、Chrome、终端、访达、云之家等绝大多数原生/Chromium 应用 | 无（默认路径） |
-| 复制即弹按钮 | 你自己按 ⌘C / 右键复制 | **任何应用**，包括 Safari、Muse、Grok Bot | 多按一次 ⌘C |
-| 剪贴板兜底取词 | 划词手势后 AX 无结果 | AX 取不到、又不想按键时（时灵时不灵） | BeeK 会模拟一次 ⌘C，短暂占用剪贴板（读完全部还原） |
+| 1 | **AX 取词**：按鼠标坐标取元素，读它的 `AXSelectedText` | 备忘录、Chrome、终端、访达、云之家等 | 无（默认路径） |
+| 2 | **浏览器 AppleScript**：`window.getSelection().toString()` | Safari、Chrome、Edge、Brave、Arc、Firefox 等 | 首次需授权「控制浏览器」；不碰剪贴板 |
+| 3 | **菜单拷贝**：在目标应用菜单栏里找到「拷贝」项并按下（`AXPress`），让**应用自己**执行拷贝 | 其余应用，含 Muse、Grok Bot 等 Electron 应用 | 短暂占用剪贴板（读完立即还原） |
+| 4 | **复制即弹按钮**（可关）：你自己按 ⌘C 时弹按钮 | 任何应用，兜底用 | 多按一次 ⌘C |
+| 5 | **剪贴板兜底**（可关）：自动合成一次 ⌘C 去取 | 时灵时不灵，最后手段 | 短暂占用剪贴板 |
 
-实测结论：Safari / Muse / Grok Bot 这类应用**不把选区暴露给 AX**（用 `BEEK_AX_PROBE=1 BEEK_AX_PROBE_PID=<pid>` 探针可以看到整棵 AX 树里 0 个节点有选中文本），所以它们只能靠后两条；其中「复制即弹按钮」是唯一 100% 可靠的。
+说明：
+
+- 第 3 条是这套方案能覆盖 Electron / Safari 的关键。合成 ⌘C（第 5 条）在很多应用上**收不到**，
+  而「按它自己的拷贝菜单项」是让应用自己执行拷贝，不依赖它是否响应合成按键。
+  菜单项定位规则：`AXIdentifier` 恰为动作 selector `copy:`，**或**标题在拷贝标题表（多语言）
+  且（若暴露）快捷键字符为 C。菜单搜索先看第 4 个菜单（通常是「编辑」），再左右交替展开。
+- 第 3、5 条都会先备份剪贴板、读完立刻整体还原（含图片等非文本内容）。
+- 排查某个应用「划词弹不出」时，用探针看它到底暴露了什么：
+
+```bash
+# 看某应用的 AX 选区情况（在目标应用里选好文字后跑）
+BEEK_AX_PROBE=1 BEEK_AX_PROBE_PID=$(pgrep -x Safari | head -1) /Applications/BeeK.app/Contents/MacOS/BeeK
+
+# 看菜单结构（确认「拷贝」项长什么样）
+BEEK_MENU_DUMP=1 BEEK_APPCOPY_SELFTEST=1 /Applications/BeeK.app/Contents/MacOS/BeeK
+
+# 在用户划词的那一刻报告 AX 现场（装 CGEventTap）
+BEEK_AX_WATCH=1 /Applications/BeeK.app/Contents/MacOS/BeeK
+```
 
 ## 权限
 
