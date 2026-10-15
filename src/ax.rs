@@ -46,12 +46,17 @@ fn debug_on() -> bool {
 
 /// 当前焦点元素（取词与取矩形共用同一条链路）
 unsafe fn focused_element() -> Option<AXUIElementRef> {
+    focused_app_and_element().map(|(_, el)| el)
+}
+
+/// 焦点 app + 焦点元素。搜索选区的兜底路线需要 app（拿焦点窗口）
+unsafe fn focused_app_and_element() -> Option<(AXUIElementRef, AXUIElementRef)> {
     let sys = AXUIElementCreateSystemWide();
     AXUIElementSetMessagingTimeout(sys, 0.5);
     let app = ax_get_attr(sys, kAXFocusedApplicationAttribute).ok()? as AXUIElementRef;
     let el = ax_get_attr(app, kAXFocusedUIElementAttribute).ok()? as AXUIElementRef;
     AXUIElementSetMessagingTimeout(el, 0.5);
-    Some(el)
+    Some((app, el))
 }
 
 /// AXBoundsForRange：给一个 range 取屏幕矩形
@@ -157,11 +162,17 @@ unsafe fn element_selection(el: AXUIElementRef) -> Option<(String, SelBounds, &'
     None
 }
 
-/// 子树里找「自己有选中文本」的元素，并把它的文本 + 矩形一起带回来
-unsafe fn tree_selection(el: AXUIElementRef, depth: u32) -> Option<(String, SelBounds, &'static str)> {
-    if depth > 6 {
+/// 子树里找「自己有选中文本」的元素，并把它的文本 + 矩形一起带回来。
+/// 从焦点窗口搜索时树可能很大，用节点预算兜住（选区只在「要显示图标」时查一次）。
+unsafe fn tree_selection(
+    el: AXUIElementRef,
+    depth: u32,
+    budget: &mut u32,
+) -> Option<(String, SelBounds, &'static str)> {
+    if depth > 8 || *budget == 0 {
         return None;
     }
+    *budget -= 1;
     if let Some(hit) = element_selection(el) {
         return Some((hit.0, hit.1, "tree"));
     }
@@ -169,8 +180,37 @@ unsafe fn tree_selection(el: AXUIElementRef, depth: u32) -> Option<(String, SelB
         let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(children as _);
         for i in 0..arr.len().min(50) {
             let child = *arr.get(i).unwrap() as AXUIElementRef;
-            if let Some(hit) = tree_selection(child, depth + 1) {
+            if let Some(hit) = tree_selection(child, depth + 1, budget) {
                 return Some((hit.0, hit.1, "tree"));
+            }
+        }
+    }
+    None
+}
+
+/// 找 AXWebArea 上的选区。
+/// Safari / Chromium（Muse、Grok Bot 这类）把选区文本挂在 AXWebArea 上，
+/// 而不是焦点元素上 —— 丢了这条路，这些应用就完全弹不出图标（实测回归）。
+unsafe fn webarea_selection(
+    el: AXUIElementRef,
+    depth: u32,
+    budget: &mut u32,
+) -> Option<(String, SelBounds, &'static str)> {
+    if depth > 8 || *budget == 0 {
+        return None;
+    }
+    *budget -= 1;
+    if get_role(el).map(|r| r == "AXWebArea").unwrap_or(false) {
+        if let Some((text, bounds, _)) = element_selection(el) {
+            return Some((text, bounds, "webarea"));
+        }
+    }
+    if let Ok(children) = ax_get_attr(el, kAXChildrenAttribute) {
+        let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(children as _);
+        for i in 0..arr.len().min(50) {
+            let child = *arr.get(i).unwrap() as AXUIElementRef;
+            if let Some(hit) = webarea_selection(child, depth + 1, budget) {
+                return Some(hit);
             }
         }
     }
@@ -179,7 +219,8 @@ unsafe fn tree_selection(el: AXUIElementRef, depth: u32) -> Option<(String, SelB
 
 /// 取当前选区（文本 + 矩形，同一个元素）
 pub unsafe fn ax_selection() -> Option<Selection> {
-    let el = focused_element()?;
+    let (app, el) = focused_app_and_element()?;
+    // 1) 焦点元素自己 → 沿父链最多 4 层
     let mut cur = el;
     for level in 0..5 {
         if let Some((text, bounds, base)) = element_selection(cur) {
@@ -191,8 +232,34 @@ pub unsafe fn ax_selection() -> Option<Selection> {
             Err(_) => break,
         }
     }
-    if let Some((text, bounds, source)) = tree_selection(el, 0) {
-        return Some(Selection { text, bounds, source });
+    // 2) 兜底：从焦点元素子树 → 焦点窗口子树里搜。
+    //    Safari / Chromium 的选区挂在 AXWebArea 上，且往往不在焦点元素的子树里，
+    //    所以必须搜到窗口这一层（少了这步，Safari/Muse/Grok Bot 直接弹不出图标）。
+    let mut budget: u32 = 400;
+    if let Some(hit) = tree_selection(el, 0, &mut budget) {
+        return Some(Selection { text: hit.0, bounds: hit.1, source: hit.2 });
+    }
+    if let Ok(win) = ax_get_attr(app, kAXFocusedWindowAttribute) {
+        let win = win as AXUIElementRef;
+        let mut budget: u32 = 800;
+        if let Some(hit) = webarea_selection(win, 0, &mut budget) {
+            return Some(Selection { text: hit.0, bounds: hit.1, source: hit.2 });
+        }
+        let mut budget: u32 = 800;
+        if let Some(hit) = tree_selection(win, 0, &mut budget) {
+            return Some(Selection { text: hit.0, bounds: hit.1, source: hit.2 });
+        }
+    }
+    // 3) 最后试 app 自己的 AXSelectedText（没有矩形，位置交给鼠标锚点兜底）
+    if let Ok(v) = ax_get_attr(app, kAXSelectedTextAttribute) {
+        if let Some(text) = cfstring_to_string(v) {
+            eprintln!("[beek] 选区文本来自 app 级 AXSelectedText（无矩形，用鼠标锚点定位）");
+            return Some(Selection {
+                text,
+                bounds: SelBounds { x: 0., y: 0., w: 0., h: 0. },
+                source: "app",
+            });
+        }
     }
     None
 }

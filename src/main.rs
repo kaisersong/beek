@@ -944,6 +944,8 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
         // 最近一次「鼠标刚按下」的时间与位置：划词是鼠标动作，元素框兜底时用它当锚点
         let mut last_press: Option<(Instant, (f64, f64))> = None;
         let mut prev_buttons: i64 = 0;
+        // 刚松开鼠标、还没判定过的那次「划词动作」：用来在 AX 完全看不到选区时留一行日志
+        let mut pending_selection_check: Option<Instant> = None;
         loop {
             std::thread::sleep(Duration::from_millis(50));
             ticks += 1;
@@ -952,6 +954,9 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
                 let (_, _, buttons) = mouse::state();
                 if prev_buttons == 0 && buttons != 0 {
                     last_press = Some((Instant::now(), mouse::position_topleft()));
+                } else if prev_buttons != 0 && buttons == 0 {
+                    // 松开：这一下很可能就是「划词」动作，给它一次判定机会
+                    pending_selection_check = Some(Instant::now());
                 }
                 prev_buttons = buttons;
             }
@@ -970,6 +975,21 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
             // 文本和矩形必须来自同一个元素（见 ax::ax_selection 的注释），
             // 否则会出现「译文对、图标飘到别处」——云之家这类 AX 树很薄的应用上实测过
             let sel = unsafe { ax_selection() };
+            // 诊断：用户刚做了一次划词动作，但 AX 什么都没给 —— 说明这个应用压根不通过
+            // AX 暴露选区（Safari / Muse / Grok Bot 这类），需要换个取词方式
+            if sel.is_none() {
+                if let Some(at) = pending_selection_check.take() {
+                    if at.elapsed() < Duration::from_millis(1500) {
+                        let (px, py) = last_press.map(|(_, p)| p).unwrap_or((0., 0.));
+                        eprintln!(
+                            "[beek] 取词：AX 没有返回任何选区（鼠标刚在 ({:.0}, {:.0}) 划过；该应用可能不通过 AX 暴露选区）",
+                            px, py
+                        );
+                    }
+                }
+            } else {
+                pending_selection_check = None;
+            }
             let cur = sel.as_ref().map(|s| s.text.clone());
             match cur {
                 Some(t) if is_url(&t) => {
