@@ -226,6 +226,35 @@ unsafe fn search_tree(
     None
 }
 
+/// 给「取词失败」的日志用：当前前台应用叫什么、它的 AX 形态（有没有焦点元素 / 窗口 / WebArea）
+pub unsafe fn describe_frontmost() -> String {
+    let sys = AXUIElementCreateSystemWide();
+    AXUIElementSetMessagingTimeout(sys, 0.5);
+    let app = match ax_get_attr(sys, kAXFocusedApplicationAttribute) {
+        Ok(a) => a as AXUIElementRef,
+        Err(_) => return "拿不到系统级焦点应用".to_string(),
+    };
+    let name = el_string(app, kAXTitleAttribute);
+    let has_el = ax_get_attr(app, kAXFocusedUIElementAttribute).is_ok();
+    let win = ax_get_attr(app, kAXFocusedWindowAttribute)
+        .ok()
+        .map(|v| v as AXUIElementRef);
+    let web = match win {
+        Some(w) => {
+            let mut budget: u32 = 800;
+            has_webarea(w, 0, &mut budget)
+        }
+        None => false,
+    };
+    format!(
+        "app={:?} 焦点元素={} 焦点窗口={} 有WebArea={}",
+        name,
+        if has_el { "有" } else { "无" },
+        if win.is_some() { "有" } else { "无" },
+        if web { "是" } else { "否" }
+    )
+}
+
 /// 取当前选区（文本 + 矩形）。
 ///
 /// 两条硬约束（都是实测踩出来的）：

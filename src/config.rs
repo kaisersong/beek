@@ -24,11 +24,20 @@ pub struct ProviderConfig {
     pub base_url: Option<String>,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct Config {
     /// 是否在 Dock 显示图标，默认 false（只显示菜单栏图标）
     #[serde(default)]
     pub show_in_dock: bool,
+    /// AX 取不到选区时，是否用「模拟 ⌘C + 读剪贴板」兜底。
+    /// 默认开：Safari / Muse / Grok Bot 这类应用根本不把选区暴露给 AX，不开就完全取不到词。
+    /// 复制前会先存原剪贴板，读完立刻还原。
+    #[serde(default = "default_true")]
+    pub clipboard_fallback: bool,
     /// 各翻译服务的配置，键是服务名（见 ARK）
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,

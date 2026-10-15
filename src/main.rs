@@ -1,6 +1,7 @@
 // BeeK v1.0 — GPUI 重写版
 // 选中文本 → 小蜜蜂图标 → 点击翻译 → 弹窗显示（流式增量）
 mod ax;
+mod clipboard;
 mod config;
 mod dialogs;
 mod icons;
@@ -988,17 +989,31 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
             }
             // 文本和矩形必须来自同一个元素（见 ax::ax_selection 的注释），
             // 否则会出现「译文对、图标飘到别处」——云之家这类 AX 树很薄的应用上实测过
-            let sel = unsafe { ax_selection() };
-            // 诊断：用户刚做了一次划词动作，但 AX 什么都没给 —— 说明这个应用压根不通过
-            // AX 暴露选区（Safari / Muse / Grok Bot 这类），需要换个取词方式
+            let mut sel = unsafe { ax_selection() };
+            // AX 什么都没给、而用户刚做了划词动作 → 这类应用（Safari / Muse / Grok Bot）
+            // 不会把选区暴露给 AX，改用「模拟 ⌘C + 读剪贴板」兜底（可在菜单里关掉）。
             if sel.is_none() {
                 if let Some(at) = pending_selection_check.take() {
                     if at.elapsed() < Duration::from_millis(1500) {
                         let (px, py) = last_press.map(|(_, p)| p).unwrap_or((0., 0.));
+                        let who = unsafe { ax::describe_frontmost() };
                         eprintln!(
-                            "[beek] 取词：AX 没有返回任何选区（鼠标刚在 ({:.0}, {:.0}) 划过；该应用可能不通过 AX 暴露选区）",
-                            px, py
+                            "[beek] 取词：AX 没有返回选区（{}；鼠标刚在 ({:.0}, {:.0}) 划过）",
+                            who, px, py
                         );
+                        if config::load().clipboard_fallback {
+                            if let Some(text) = clipboard::copy_selection() {
+                                eprintln!(
+                                    "[beek] 取词：剪贴板兜底拿到 {:?}",
+                                    text.chars().take(20).collect::<String>()
+                                );
+                                sel = Some(ax::Selection {
+                                    text,
+                                    bounds: anchor_at(px, py),
+                                    source: "clipboard",
+                                });
+                            }
+                        }
                     }
                 }
             } else {
@@ -1063,6 +1078,9 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
 /// 用来验证「关思维链 + 流式」到底把等待时间压到了多少。
 fn translate_selftest() {
     anchor_selftest();
+    if std::env::var("BEEK_CLIP_SELFTEST").is_ok() {
+        clipboard::selftest();
+    }
     const SAMPLE: &str = "The quick brown fox jumps over the lazy dog. This sentence is long enough to show how fast the first characters arrive.";
     eprintln!("[自检] 文本 {} 字符", SAMPLE.chars().count());
 
@@ -1396,6 +1414,11 @@ fn main() {
     if std::env::var("BEEK_AX_PROBE").is_ok() {
         // 诊断模式：把一个应用的 AX 选区情况打出来，不开窗口
         unsafe { ax::ax_probe() };
+        return;
+    }
+    if std::env::var("BEEK_CLIP_SELFTEST").is_ok() {
+        // 只验证「模拟 ⌘C + 剪贴板」两个原语（先在前台应用里选好一段文字再跑）
+        clipboard::selftest();
         return;
     }
 

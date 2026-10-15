@@ -242,6 +242,16 @@ extern "C" fn open_accessibility_settings(_this: &Object, _sel: Sel, _sender: id
         .status();
 }
 
+extern "C" fn toggle_clipboard_fallback(_this: &Object, _sel: Sel, sender: id) {
+    unsafe {
+        let state: i64 = msg_send![sender, state];
+        let on = state == 0;
+        let _: () = msg_send![sender, setState: if on { 1i64 } else { 0i64 }];
+        config::update(|c| c.clipboard_fallback = on);
+        eprintln!("[beek] 剪贴板兜底取词：{}", if on { "开" } else { "关" });
+    }
+}
+
 extern "C" fn open_key_settings(_this: &Object, _sel: Sel, _sender: id) {
     send_event(crate::UiEvent::OpenKeySettings);
 }
@@ -282,6 +292,7 @@ pub fn setup_status_item(cfg: &Config) {
         decl.add_method(sel!(openAccessibilitySettings:), open_accessibility_settings as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(quitApp:), quit_app as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(restartApp:), restart_app as extern "C" fn(&Object, Sel, id));
+        decl.add_method(sel!(toggleClipboardFallback:), toggle_clipboard_fallback as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(openKeySettings:), open_key_settings as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(openReadmeKey:), open_readme_key as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(checkUpdate:), check_update as extern "C" fn(&Object, Sel, id));
@@ -345,6 +356,16 @@ pub fn setup_status_item(cfg: &Config) {
         let _: () = msg_send![toggle, setState: if cfg.show_in_dock { 1i64 } else { 0i64 }];
         let _: () = msg_send![menu, addItem: toggle];
         TOGGLE_ITEM.store(toggle as usize, Ordering::SeqCst);
+
+        // 剪贴板兜底：AX 取不到选区时，模拟 ⌘C 读剪贴板（Safari/Muse/Grok Bot 这类应用必须开）
+        let clip_alloc: id = msg_send![class!(NSMenuItem), alloc];
+        let clip_item: id = msg_send![clip_alloc,
+            initWithTitle: nsstr("剪贴板兜底取词")
+            action: sel!(toggleClipboardFallback:)
+            keyEquivalent: nsstr("")];
+        let _: () = msg_send![clip_item, setTarget: handler];
+        let _: () = msg_send![clip_item, setState: if cfg.clipboard_fallback { 1i64 } else { 0i64 }];
+        let _: () = msg_send![menu, addItem: clip_item];
 
         let sep2: id = msg_send![class!(NSMenuItem), separatorItem];
         let _: () = msg_send![menu, addItem: sep2];
