@@ -855,23 +855,27 @@ fn anchor_for(
         if at.elapsed() < Duration::from_secs(2) {
             let near = (px - bounds.x).abs() < 120. && (py - bounds.y).abs() < 120.;
             if !near {
-                // 锚点做成「以鼠标为中心、宽=一个图标」的小矩形：
-                // 图标是按「锚点右边缘对齐 + 上方留间距」摆放的，
-                // 这样算下来图标正好居中压在鼠标（也就是选中词）的正上方。
-                // 若像之前那样把锚点左移 20pt，图标会被推到词的左边。
+                // 锚点做成「以鼠标为中心、宽=一个图标、高=一行的矩形，并整体上移一行」：
+                // 图标是按「右边缘对齐锚点 + 上方留 POPUP_GAP」摆放的，
+                // 这样算下来图标居中落在鼠标所在**那一行的上方**。
+                // 若只上移 POPUP_GAP，而鼠标点在行中间，图标就会压住选中那行（Chrome 实测过）。
+                const LINE_PT: f64 = 18.;
                 return (
                     SelBounds {
                         x: px - ICON_SIZE as f64 / 2.,
-                        y: py,
+                        y: py - LINE_PT,
                         w: ICON_SIZE as f64,
-                        h: 18.,
+                        h: LINE_PT,
                     },
                     "mouse",
                 );
             }
         }
     }
-    (*bounds, if source == "element-frame" { "element-frame" } else { "ax" })
+    // 只有「元素自己给出的 range 矩形」才完全可信；其余（元素框、拿不到矩形、窗口占位）
+    // 都交给上面的鼠标锚点逻辑兜底
+    let trusted = matches!(source, "element" | "parent" | "tree" | "webarea");
+    (*bounds, if trusted { "ax" } else { "soft" })
 }
 
 /// 纯函数自检：元素框退化时的锚点选择。
