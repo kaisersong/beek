@@ -20,6 +20,33 @@ pub const MENUBAR_ICON_PT: f64 = 18.0;
 /// 现在的实际绘制尺寸由悬浮窗口决定（见 main.rs 的 ICON_SIZE / ICON_ZOOM）。
 pub const SELECTION_ICON_PT: f32 = 32.0;
 
+/// 发音按钮的线描喇叭图标（56x56 @4x，透明底、灰描边）。
+/// 素材由 resources/icons/gen_speak_outline.py 生成；不用 emoji 是因为
+/// emoji 是彩色的，和它左边的灰色音标不是一套语言。
+pub const SPEAK_OUTLINE_PNG: &[u8] =
+    include_bytes!("../resources/icons/beek-speak-outline@4x.png");
+
+/// 线描喇叭的绘制尺寸（pt）。跟音标文字（text_sm = 14pt）同高，紧贴在音标右边。
+pub const SPEAK_ICON_PT: f32 = 14.0;
+
+/// 同步解码线描喇叭，整个进程只解一次（同 IconKind::render_image 的理由：
+/// 避免 img(路径) 的异步加载导致首帧空白）。
+pub fn speak_outline(cx: &App) -> Arc<RenderImage> {
+    static SLOT: OnceLock<Arc<RenderImage>> = OnceLock::new();
+    SLOT.get_or_init(|| {
+        let image = Image::from_bytes(ImageFormat::Png, SPEAK_OUTLINE_PNG.to_vec())
+            .to_image_data(cx.svg_renderer())
+            .expect("内嵌发音图标解码失败");
+        let sz = image.size(0);
+        eprintln!(
+            "[beek] 发音图标解码完成：{}x{} px（按 {}pt 绘制）",
+            sz.width.0, sz.height.0, SPEAK_ICON_PT
+        );
+        image
+    })
+    .clone()
+}
+
 /// 悬浮按钮的四种状态，素材均为 64x64（@2x），按 32pt 逻辑尺寸绘制。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IconKind {

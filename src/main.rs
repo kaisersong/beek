@@ -166,7 +166,7 @@ enum PopupContent {
 
 struct PopupView {
     content: PopupContent,
-    /// Some(词) = 单词模式（词典式详解）：卡片顶部显示「词 + 读音 + 🔊」
+    /// Some(词) = 单词模式（词典式详解）：卡片顶部显示「词 + 读音 + 发音图标」
     word: Option<String>,
     /// true = 卡片贴窗口底部。弹窗放在选区上方时用，这样内容变长是向上长，不会压住选区
     anchor_bottom: bool,
@@ -237,7 +237,7 @@ impl Render for PopupView {
         // 单词模式：正文里的「读音：…」那一行抽出来做成标题，不在正文里重复
         let (pron, shown) = self.pron_and_body();
         let body = div()
-            .text_base()
+            .text_size(px(POPUP_FONT_PT))
             .text_color(if matches!(self.content, PopupContent::Error(_)) {
                 rgb(0xcc3333)
             } else if matches!(self.content, PopupContent::Loading) {
@@ -255,29 +255,25 @@ impl Render for PopupView {
                 }
             },
         );
-        // 顶部标题行（只有单词模式才有）：词 + 读音 + 🔊
+        // 顶部标题行（只有单词模式才有）：词 + 读音 + 发音图标
+        // 发音图标紧贴在音标右边（原来甩在卡片最右端，离音标隔着半个卡片），
+        // 并且是线描式的：彩色 emoji 跟灰色的音标不是一套视觉语言。
         let header = self.word.clone().map(|w| {
             div()
                 .flex()
                 .items_center()
-                .justify_between()
+                .gap_1()
                 .mb(px(8.))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child(div().text_lg().font_weight(FontWeight::BOLD).child(w))
-                        .child(match pron.clone() {
-                            Some(p) => div().text_sm().text_color(rgb(0x666666)).child(p),
-                            None => div().text_sm().text_color(rgb(0xcccccc)).child("读音…"),
-                        }),
-                )
+                .child(div().text_lg().font_weight(FontWeight::BOLD).child(w))
+                .child(match pron.clone() {
+                    Some(p) => div().text_sm().text_color(rgb(0x666666)).child(p),
+                    None => div().text_sm().text_color(rgb(0xcccccc)).child("读音…"),
+                })
                 .child(
                     div()
                         .id("beek-speak")
-                        .w(px(20.))
-                        .h(px(20.))
+                        .w(px(icons::SPEAK_ICON_PT + 6.))
+                        .h(px(icons::SPEAK_ICON_PT + 6.))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -285,7 +281,11 @@ impl Render for PopupView {
                         .hover(|s| s.bg(rgb(0xe8e8e8)))
                         .cursor_pointer()
                         .on_mouse_down(MouseButton::Left, on_speak)
-                        .child(div().text_sm().child("🔊")),
+                        .child(
+                            img(icons::speak_outline(cx))
+                                .w(px(icons::SPEAK_ICON_PT))
+                                .h(px(icons::SPEAK_ICON_PT)),
+                        ),
                 )
         });
 
@@ -420,6 +420,9 @@ const POPUP_GAP: f32 = 8.;
 const POPUP_W: f32 = 380.;
 /// 弹窗内边距（点）
 const POPUP_PAD: f32 = 16.;
+/// 译文正文字号（pt）：对齐「备忘录」的标准正文大小（13pt）。
+/// 之前用 text_base（1rem = 16pt）明显偏大，读一段译文像在看标题。
+const POPUP_FONT_PT: f32 = 13.;
 /// 弹窗高度上限（点）：内容超过就内部滚动
 const POPUP_MAX_H: f32 = 320.;
 /// 打开时的起始高度（点）：只用于决定放上方还是下方，随后立刻按内容量准
@@ -666,9 +669,12 @@ fn text_height(
 fn card_height(window: &Window, view: &PopupView) -> f32 {
     let style = window.text_style();
     let rem = window.rem_size();
-    let base = f32::from(style.font_size.to_pixels(rem));
+    let win_base = f32::from(style.font_size.to_pixels(rem));
     let lh = f32::from(style.line_height_in_pixels(rem));
-    let unit = if base > 0. { lh / base } else { 1.2 };
+    // 行高比沿用窗口默认样式的：正文自己定了字号（POPUP_FONT_PT），但行高比不变
+    let unit = if win_base > 0. { lh / win_base } else { 1.2 };
+    // 正文实际字号是 POPUP_FONT_PT（render 里的 text_size），量高度必须用同一个值
+    let base = POPUP_FONT_PT;
     let text_w = POPUP_W - POPUP_PAD * 2.;
     // 单词模式：正文里的「读音：…」那一行会显示在标题里，量高度时要先把它拆出去，
     // 否则会多算一行
@@ -676,7 +682,11 @@ fn card_height(window: &Window, view: &PopupView) -> f32 {
     let body_h = text_height(window, &body, base, base * unit, text_w);
     // 单词模式顶部多一行「词 + 读音」（text_lg = 1.125rem，下边距 8）
     let head_h = match view.word.as_deref() {
-        Some(w) => text_height(window, w, base * 1.125, base * 1.125 * unit, text_w) + 8.,
+        // 标题里的词用 text_lg = 1.125rem，跟正文不是一个号，所以按 rem 基准量
+        Some(w) => {
+            let head_base = win_base * 1.125;
+            text_height(window, w, head_base, head_base * unit, text_w) + 8.
+        }
         None => 0.,
     };
     if std::env::var("BEEK_DEBUG").is_ok() {
@@ -1119,9 +1129,9 @@ fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
             drag_starts(0, 1, mx_, h.1 + h.3 + 5.0, h)
         );
 
-        // ---- 单词模式：单个词应该出「词 + 读音 + 🔊」标题行 ----
+        // ---- 单词模式：单个词应该出「词 + 读音 + 发音图标」标题行 ----
         let wb = SelBounds { x: 600.0, y: 240.0, w: 90.0, h: 20.0 };
-        eprintln!("[自检] 单词模式：注入单个词（serendipity），期望弹窗顶部有「词 + 读音 + 🔊」");
+        eprintln!("[自检] 单词模式：注入单个词（serendipity），期望弹窗顶部有「词 + 读音 + 线描发音图标」");
         let _ = tx.send(UiEvent::StartTranslate("serendipity".to_string(), wb));
         std::thread::sleep(Duration::from_secs(8));
         menubar::dump_windows("自检：单词模式弹窗（应比整句译文多一行标题）");
