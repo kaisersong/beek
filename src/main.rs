@@ -850,6 +850,19 @@ fn sync_popup_geometry(
 /// 把「某个点」变成图标锚点：以它为中心、宽=一个图标、高=一行，并整体上移一行。
 /// 图标是按「右边缘对齐锚点 + 上方留 POPUP_GAP」摆放的，所以图标最终落在该点所在**那一行的上方**。
 /// 若只上移 POPUP_GAP，而点位落在行中间，图标就会压住选中那行（Chrome 实测过）。
+/// 图标窗口实际占用的矩形（与 open_icon_window 的摆放规则一致：锚点上方、右边缘对齐）。
+/// 用来判断「这次按下是不是点在图标上」——点在图标上不能把兜底选区清掉，
+/// 否则按下的一瞬间图标就被收走，点不动。
+fn icon_rect_for(anchor: &SelBounds) -> SelBounds {
+    let w = ICON_SIZE as f64;
+    SelBounds {
+        x: anchor.x + anchor.w - w,
+        y: anchor.y - w - POPUP_GAP as f64,
+        w,
+        h: w,
+    }
+}
+
 fn anchor_at(px: f64, py: f64) -> SelBounds {
     const LINE_PT: f64 = 18.;
     SelBounds {
@@ -945,6 +958,15 @@ fn anchor_selftest() {
         cases.len(),
         if ok { "全部通过" } else { "有失败" }
     );
+    // 图标矩形必须落在锚点上方，且与锚点同宽中心对齐（点图标不能被误判成「点了别处」）
+    let a = anchor_at(400., 600.);
+    let r = icon_rect_for(&a);
+    let ok_rect = (r.y + r.h) <= a.y && (r.x + r.w) == (a.x + a.w);
+    eprintln!(
+        "[自检] 图标矩形：锚点 ({:.0},{:.0} {:.0}x{:.0}) → 图标 ({:.0},{:.0} {:.0}x{:.0})，在锚点上方={} → {}",
+        a.x, a.y, a.w, a.h, r.x, r.y, r.w, r.h, ok_rect,
+        if ok_rect { "通过" } else { "失败" }
+    );
 }
 
 // ---------- 鼠标跟踪线程 ----------
@@ -957,10 +979,16 @@ fn anchor_selftest() {
 struct MouseTrack {
     /// 最近一次「按下」的时间与位置（屏幕左上原点）
     press: Option<(Instant, (f64, f64))>,
-    /// 最近一次「松开」的时间：代表刚完成一次可能的划词动作
+    /// 最近一次「松开」的时间
     release: Option<Instant>,
     /// 当前是否按着
     down: bool,
+    /// 按下期间指针是否移动过（拖动选词）
+    moved: bool,
+    /// 上一次「按下」的时间，用来识别双击
+    last_press_at: Option<Instant>,
+    /// 最近一次「像划词」的手势（双击或拖动）的时间
+    gesture: Option<Instant>,
 }
 
 static MOUSE_TRACK: std::sync::OnceLock<std::sync::Mutex<MouseTrack>> = std::sync::OnceLock::new();
@@ -975,30 +1003,51 @@ fn spawn_mouse_tracker() {
         loop {
             let (_, _, buttons) = mouse::state();
             if buttons != prev {
+                let now = Instant::now();
+                let pos = mouse::position_topleft();
                 let mut t = mouse_track().lock().unwrap();
                 if prev == 0 && buttons != 0 {
-                    t.press = Some((Instant::now(), mouse::position_topleft()));
+                    // 按下：记位置，并用上一次按下的时间判断是不是双击
+                    let double = t
+                        .last_press_at
+                        .map(|at| now.duration_since(at) < Duration::from_millis(400))
+                        .unwrap_or(false);
+                    t.press = Some((now, pos));
+                    t.moved = false;
+                    if double {
+                        t.gesture = Some(now);
+                    }
+                    t.last_press_at = Some(now);
                 } else if prev != 0 && buttons == 0 {
-                    t.release = Some(Instant::now());
+                    // 松开：拖动过也算划词手势
+                    if t.moved {
+                        t.gesture = Some(now);
+                    }
+                    t.release = Some(now);
                 }
                 t.down = buttons != 0;
                 prev = buttons;
+            } else if buttons != 0 {
+                // 按住期间看指针有没有动（拖动选词）
+                let start = mouse_track().lock().unwrap().press.map(|(_, p)| p);
+                if let Some((px, py)) = start {
+                    let (x, y) = mouse::position_topleft();
+                    if (x - px).abs() > 3. || (y - py).abs() > 3. {
+                        mouse_track().lock().unwrap().moved = true;
+                    }
+                }
             }
             std::thread::sleep(Duration::from_millis(5));
         }
     });
 }
 
-/// 刚发生过一次「按下又松开」（2 秒内）→ 认为用户可能刚划完词
+/// 刚发生过一次「像划词」的手势（双击或拖动，2 秒内）
 fn gesture_recent(track: &MouseTrack) -> bool {
     track
-        .release
+        .gesture
         .map(|at| at.elapsed() < Duration::from_secs(2))
         .unwrap_or(false)
-        || track
-            .press
-            .map(|(at, _)| at.elapsed() < Duration::from_secs(2))
-            .unwrap_or(false)
 }
 
 // ---------- AX 监控后台线程 ----------
@@ -1012,6 +1061,10 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
         let mut icon_shown = false;
         // 鼠标状态全部来自独立的跟踪线程（见 spawn_mouse_tracker）
         let mut handled_release: Option<Instant> = None;
+        // 剪贴板兜底得到的选区。AX 一直看不到它，所以必须自己记着，
+        // 否则下一 tick 的「AX 没有选区」分支会立刻把图标收掉（实测：按钮一闪就没）。
+        // (文本, 锚点, 图标矩形, 时间)
+        let mut clip_selection: Option<(String, SelBounds, SelBounds, Instant)> = None;
         loop {
             std::thread::sleep(Duration::from_millis(50));
             ticks += 1;
@@ -1019,17 +1072,44 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
                 let t = mouse_track().lock().unwrap();
                 (t.press, gesture_recent(&t))
             };
-            // 这一次「松开」还没判定过 → 给它一次取词机会（AX 拿不到时就走剪贴板兜底）
+            // 只有「双击 / 拖动」这种像划词的手势才考虑走剪贴板兜底。
+            // 普通单击也发 ⌘C 会把用户刚复制的东西（例如截图）覆盖掉，实测踩过。
             #[allow(unused_mut)]
             let mut pending_selection_check = {
                 let t = mouse_track().lock().unwrap();
-                match t.release {
-                    Some(at) if Some(at) != handled_release && at.elapsed() < Duration::from_millis(1500) => {
+                match t.gesture {
+                    Some(at)
+                        if Some(at) != handled_release
+                            && at.elapsed() < Duration::from_millis(1200) =>
+                    {
                         Some(at)
                     }
                     _ => None,
                 }
             };
+            // 用户又开始一次新的点击 → 上一轮的剪贴板选区作废（否则按钮不会消失）；
+            // 但点在图标本身上不算（否则按下的瞬间图标就被收走，点不动）
+            if mouse_track().lock().unwrap().down {
+                let on_icon = mouse_track()
+                    .lock()
+                    .unwrap()
+                    .press
+                    .map(|(_, (px, py))| {
+                        clip_selection
+                            .as_ref()
+                            .map(|(_, _, rect, _)| {
+                                px >= rect.x - 2.
+                                    && px <= rect.x + rect.w + 2.
+                                    && py >= rect.y - 2.
+                                    && py <= rect.y + rect.h + 2.
+                            })
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                if !on_icon {
+                    clip_selection = None;
+                }
+            }
             if !trusted {
                 // 未授权时不做无意义的 AX 轮询；每 2 秒复查一次授权状态
                 if ticks % 40 == 0 {
@@ -1064,9 +1144,13 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
                                         "[beek] 取词：剪贴板兜底拿到 {:?}",
                                         text.chars().take(20).collect::<String>()
                                     );
+                                    let b = anchor_at(px, py);
+                                    let rect = icon_rect_for(&b);
+                                    clip_selection =
+                                        Some((text.clone(), b, rect, Instant::now()));
                                     sel = Some(ax::Selection {
                                         text,
-                                        bounds: anchor_at(px, py),
+                                        bounds: b,
                                         source: "clipboard",
                                     });
                                 }
@@ -1081,7 +1165,12 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
             } else {
                 pending_selection_check = None;
             }
-            let cur = sel.as_ref().map(|s| s.text.clone());
+            let cur = sel.as_ref().map(|s| s.text.clone()).or_else(|| {
+                clip_selection
+                    .as_ref()
+                    .filter(|(_, _, _, at)| at.elapsed() < Duration::from_secs(8))
+                    .map(|(t, _, _, _)| t.clone())
+            });
             match cur {
                 Some(t) if is_url(&t) => {
                     if icon_shown {
