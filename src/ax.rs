@@ -266,23 +266,31 @@ static LAST_APP_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32
 /// "AXManualAccessibility" 两个字符串 —— 就是靠这两个应用级开关
 /// 让 WebKit / Electron 把完整 AX 树（含选区）暴露出来。
 /// 不设这两个开关时，Safari 这种应用整棵树里连一个「有选区的节点」都没有（实测）。
-static AX_TREE_ENABLED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<i32>>> =
-    std::sync::OnceLock::new();
+/// pid → 上次尝试打开 AX 树的时间。成功过的不再尝试；失败过的隔一段时间才再试
+/// （不能让失败的 pid 每个 tick 都重试一次 —— 那样 20 次/秒地打 AX 接口，还会刷屏日志）
+static AX_TREE_TRIED: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<i32, (std::time::Instant, bool)>>,
+> = std::sync::OnceLock::new();
 
-fn enabled_set() -> &'static std::sync::Mutex<std::collections::HashSet<i32>> {
-    AX_TREE_ENABLED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+fn tried_map(
+) -> &'static std::sync::Mutex<std::collections::HashMap<i32, (std::time::Instant, bool)>> {
+    AX_TREE_TRIED.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 该不该现在再尝试一次：从没试过 → 试；试过且成功 → 不再试；失败过 → 隔 60 秒再试
+fn should_try(pid: i32) -> bool {
+    let map = tried_map().lock().unwrap();
+    match map.get(&pid) {
+        None => true,
+        Some((_, true)) => false,
+        Some((at, false)) => at.elapsed() > std::time::Duration::from_secs(60),
+    }
 }
 
 /// 给某个应用打开完整 AX 树。返回 true 表示这次是新开的（调用方可能要等一下再查）。
 pub unsafe fn enable_ax_tree(pid: i32) -> bool {
-    if pid <= 0 {
+    if pid <= 0 || !should_try(pid) {
         return false;
-    }
-    {
-        let set = enabled_set().lock().unwrap();
-        if set.contains(&pid) {
-            return false;
-        }
     }
     use core_foundation::boolean::CFBoolean;
     use core_foundation::base::TCFType;
@@ -314,9 +322,9 @@ pub unsafe fn enable_ax_tree(pid: i32) -> bool {
     if !ok {
         eprintln!("[beek] 打开 AX 树失败：该应用两个属性都不支持（可能是非 WebKit/Chromium 应用）");
     }
+    tried_map().lock().unwrap().insert(pid, (std::time::Instant::now(), ok));
     if ok {
-        enabled_set().lock().unwrap().insert(pid);
-        eprintln!("[beek] 已打开 pid {} 的完整 AX 树（AXEnhancedUserInterface / AXManualAccessibility）", pid);
+        eprintln!("[beek] 已打开 pid {} 的完整 AX 树（AXManualAccessibility）", pid);
     }
     ok
 }

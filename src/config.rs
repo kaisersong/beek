@@ -38,6 +38,11 @@ pub struct Config {
     /// 复制前会先存原剪贴板，读完立刻还原。
     #[serde(default = "default_true")]
     pub clipboard_fallback: bool,
+    /// 「复制即弹按钮」：你自己按 ⌘C 复制时，在鼠标旁弹小蜜蜂。
+    /// 默认开：Safari / Muse / Grok 这类应用 AX 取不到选区、合成 ⌘C 也不稳，
+    /// 这条是唯一 100% 可靠的取词方式（代价是多按一次 ⌘C）。
+    #[serde(default = "default_true")]
+    pub copy_to_popup: bool,
     /// 各翻译服务的配置，键是服务名（见 ARK）
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,

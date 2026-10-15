@@ -209,6 +209,24 @@ pub fn restore(snap: &Snapshot) {
     }
 }
 
+/// 我们自己写剪贴板（弹窗里的「复制」按钮）之后记一下这次的 changeCount，
+/// 剪贴板监听要忽略它，否则会把自己的复制当成「用户复制」再弹一次按钮
+static OWN_WRITE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+
+pub fn note_own_write() {
+    OWN_WRITE.store(change_count(), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn is_own_write(count: i64) -> bool {
+    OWN_WRITE.load(std::sync::atomic::Ordering::Relaxed) == count
+}
+
+/// 剪贴板监听（方案 A：用户自己按 ⌘C，我们就弹按钮）。
+/// 返回 true 表示这次变化是我们自己的复制造成的，应当忽略。
+pub fn is_self_inflicted(count: i64) -> bool {
+    is_own_write(count)
+}
+
 /// 清空剪贴板（复制前它是空的，还原时就应该还是空的）
 pub fn clear() {
     unsafe {
@@ -230,7 +248,7 @@ unsafe fn cstring(v: id) -> String {
 /// 剪贴板变更计数：用它判断「内容到底变没变」。
 /// 不能靠比较字符串 —— 如果 ⌘C 复制的是文件/图片（非文本内容），字符串读出来是空的，
 /// 会被误判成「没变化」而跳过还原，剪贴板照样被覆盖（实测踩过：截图粘不出来）。
-fn change_count() -> i64 {
+pub fn change_count() -> i64 {
     unsafe {
         let pb = pasteboard();
         msg_send![pb, changeCount]

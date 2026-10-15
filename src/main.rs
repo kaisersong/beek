@@ -232,6 +232,9 @@ impl PopupView {
             return;
         }
         cx.write_to_clipboard(ClipboardItem::new_string(self.copy_text()));
+        // 记一下「这次剪贴板是我们自己写的」：剪贴板监听要忽略它，
+        // 否则点一次弹窗的复制按钮，会把自己的复制当成用户复制、又弹一个按钮出来
+        clipboard::note_own_write();
         self.copied = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -1065,6 +1068,8 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
         // 否则下一 tick 的「AX 没有选区」分支会立刻把图标收掉（实测：按钮一闪就没）。
         // (文本, 锚点, 图标矩形, 时间)
         let mut clip_selection: Option<(String, SelBounds, SelBounds, Instant)> = None;
+        // 剪贴板监听（方案 A）：只认「用户自己复制」造成的变化
+        let mut last_clip_count = clipboard::change_count();
         loop {
             std::thread::sleep(Duration::from_millis(50));
             ticks += 1;
@@ -1132,7 +1137,37 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
                     None
                 }
             });
+            // ---- 方案 A：剪贴板监听 ----
+            // 用户自己按 ⌘C（或右键复制）时，直接拿剪贴板内容弹按钮。
+            // 不合成输入、不依赖 AX，任何应用都成立。
             let mut sel = unsafe { ax_selection(gesture, probe_point) };
+            {
+                let count = clipboard::change_count();
+                if count != last_clip_count {
+                    last_clip_count = count;
+                    if !clipboard::is_self_inflicted(count) && config::load().copy_to_popup {
+                        if let Some(text) = clipboard::read_string() {
+                            let text = text.trim().to_string();
+                            if !text.is_empty() && !is_url(&text) {
+                                let (px, py) = mouse::position_topleft();
+                                let b = anchor_at(px, py);
+                                let rect = icon_rect_for(&b);
+                                eprintln!(
+                                    "[beek] 剪贴板监听：拿到 {:?}（{} 字符）→ 在鼠标旁弹按钮",
+                                    text.chars().take(20).collect::<String>(),
+                                    text.chars().count()
+                                );
+                                clip_selection = Some((text.clone(), b, rect, Instant::now()));
+                                sel = Some(ax::Selection {
+                                    text,
+                                    bounds: b,
+                                    source: "clipboard-watch",
+                                });
+                            }
+                        }
+                    }
+                }
+            }
             // AX 什么都没给、而用户刚做了划词动作 → 这类应用（Safari / Muse / Grok Bot）
             // 不会把选区暴露给 AX，改用「模拟 ⌘C + 读剪贴板」兜底（可在菜单里关掉）。
             if sel.is_none() {
