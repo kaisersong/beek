@@ -855,8 +855,17 @@ fn anchor_for(
         if at.elapsed() < Duration::from_secs(2) {
             let near = (px - bounds.x).abs() < 120. && (py - bounds.y).abs() < 120.;
             if !near {
+                // 锚点做成「以鼠标为中心、宽=一个图标」的小矩形：
+                // 图标是按「锚点右边缘对齐 + 上方留间距」摆放的，
+                // 这样算下来图标正好居中压在鼠标（也就是选中词）的正上方。
+                // 若像之前那样把锚点左移 20pt，图标会被推到词的左边。
                 return (
-                    SelBounds { x: px - 20., y: py, w: 20., h: 18. },
+                    SelBounds {
+                        x: px - ICON_SIZE as f64 / 2.,
+                        y: py,
+                        w: ICON_SIZE as f64,
+                        h: 18.,
+                    },
                     "mouse",
                 );
             }
