@@ -349,14 +349,41 @@ unsafe fn focused_app() -> Option<AXUIElementRef> {
     // 重试仍失败（正在切焦点）→ 用上次成功的那个应用
     let pid = LAST_APP_PID.load(std::sync::atomic::Ordering::Relaxed);
     if pid > 0 {
-        eprintln!(
-            "[beek] 取词：系统级焦点应用暂时取不到（焦点切换中），沿用上次的 pid {}",
-            pid
+        log_throttled(
+            "沿用上次 pid",
+            5,
+            &format!(
+                "[beek] 取词：系统级焦点应用暂时取不到（焦点切换中），沿用上次的 pid {}",
+                pid
+            ),
         );
         return Some(AXUIElementCreateApplication(pid));
     }
-    eprintln!("[beek] 取词：拿不到系统级焦点应用，也没有可沿用的应用");
+    // 注意：这个函数每 50ms 被调一次，消息必须节流，否则会在日志里刷屏
+    // （实测：前台没有「别人的应用」时——比如我们自己的面板在最前面——会一直走到这里）
+    log_throttled(
+        "无焦点应用",
+        5,
+        "[beek] 取词：拿不到系统级焦点应用，也没有可沿用的应用",
+    );
     None
+}
+
+/// 同一条消息最多每 `secs` 秒打一次
+fn log_throttled(key: &'static str, secs: u64, msg: &str) {
+    use std::sync::{Mutex, OnceLock};
+    static LAST: OnceLock<Mutex<std::collections::HashMap<&'static str, std::time::Instant>>> =
+        OnceLock::new();
+    let map = LAST.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut guard = map.lock().unwrap();
+    let now = std::time::Instant::now();
+    if let Some(at) = guard.get(key) {
+        if at.elapsed() < std::time::Duration::from_secs(secs) {
+            return;
+        }
+    }
+    guard.insert(key, now);
+    eprintln!("{}", msg);
 }
 
 /// 按屏幕坐标取元素：`AXUIElementCopyElementAtPosition`。
