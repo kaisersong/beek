@@ -291,6 +291,25 @@ unsafe fn focused_app() -> Option<AXUIElementRef> {
     None
 }
 
+/// 按屏幕坐标取元素：`AXUIElementCopyElementAtPosition`。
+///
+/// 这条是参考豆包实现学来的（它的 libaha_cua.dylib 导入了这个 API）：
+/// 不用去问「系统级焦点元素」——Safari 这类应用根本不提供 app 级焦点元素
+/// （实测返回 nil），只问「鼠标下面是谁」就绕开了这个坑。
+/// 坐标是 AX 屏幕坐标：左上原点、y 向下，与 mouse::position_topleft() 一致。
+unsafe fn element_at_position(x: f64, y: f64) -> Option<AXUIElementRef> {
+    let sys = AXUIElementCreateSystemWide();
+    AXUIElementSetMessagingTimeout(sys, 0.5);
+    let mut el: AXUIElementRef = std::ptr::null_mut();
+    let err = AXUIElementCopyElementAtPosition(sys, x as f32, y as f32, &mut el);
+    if err == 0 && !el.is_null() {
+        AXUIElementSetMessagingTimeout(el, 0.5);
+        Some(el)
+    } else {
+        None
+    }
+}
+
 /// 取当前选区（文本 + 矩形）。
 ///
 /// 两条硬约束（都是实测踩出来的）：
@@ -302,7 +321,44 @@ unsafe fn focused_app() -> Option<AXUIElementRef> {
 /// `deep` = 是否允许做「焦点窗口级的深层搜索」（遍历上百个 AX 节点，比较贵）。
 /// 监视器每 tick 都调这个函数，所以平时靠 `deep=false` 只走便宜的路
 /// （焦点元素 → 父链 → 焦点元素子树）；只有刚发生过划词动作时才放开深层搜索。
-pub unsafe fn ax_selection(deep: bool) -> Option<Selection> {
+pub unsafe fn ax_selection(deep: bool, point: Option<(f64, f64)>) -> Option<Selection> {
+    // ① 先问「鼠标下面是谁」——豆包的路线。这一条不依赖焦点元素，
+    //    对 Safari 这类不提供焦点元素的应用是唯一可行的 AX 路子。
+    if let Some((x, y)) = point {
+        if let Some(el) = element_at_position(x, y) {
+            let mut cur = el;
+            for level in 0..5 {
+                let base: &'static str = if level == 0 { "at-position" } else { "at-position-parent" };
+                if let Some(hit) = node_hit(cur, base, false) {
+                    match hit.bounds {
+                        // 有文本也有矩形：直接用
+                        Some(bounds) => {
+                            return Some(Selection { text: hit.text, bounds, source: base })
+                        }
+                        // 只有文本：也认（位置交给鼠标锚点兜底）
+                        None => {
+                            let win = ax_get_attr(cur, kAXWindowAttribute)
+                                .ok()
+                                .map(|v| v as AXUIElementRef);
+                            let bounds = win
+                                .and_then(|w| element_frame(w))
+                                .unwrap_or(SelBounds { x, y, w: 0., h: 0. });
+                            return Some(Selection {
+                                text: hit.text,
+                                bounds,
+                                source: "at-position",
+                            });
+                        }
+                    }
+                }
+                match ax_get_attr(cur, kAXParentAttribute) {
+                    Ok(p) => cur = p as AXUIElementRef,
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+
     // 前台应用统一走 focused_app()：它带重试，并在焦点切换瞬间沿用上次的应用
     let app = focused_app()?;
     let focused_el = ax_get_attr(app, kAXFocusedUIElementAttribute)
@@ -398,12 +454,12 @@ pub unsafe fn ax_selection(deep: bool) -> Option<Selection> {
 
 /// 兼容旧入口：只要文本
 pub unsafe fn ax_selected_text() -> Option<String> {
-    ax_selection(true).map(|s| s.text)
+    ax_selection(true, None).map(|s| s.text)
 }
 
 /// 兼容旧入口：只要矩形
 pub unsafe fn ax_selection_bounds() -> Option<SelBounds> {
-    ax_selection(true).map(|s| s.bounds)
+    ax_selection(true, None).map(|s| s.bounds)
 }
 
 unsafe fn get_role(el: AXUIElementRef) -> Option<String> {
@@ -599,7 +655,7 @@ pub unsafe fn ax_probe() {
     } else {
         eprintln!("[探针] 系统级焦点 app 取不到");
     }
-    match ax_selection(true) {
+    match ax_selection(true, None) {
         Some(s) => eprintln!(
             "[探针] ax_selection() = Some(来源={} 文本={:?})",
             s.source,

@@ -1124,7 +1124,15 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
             }
             // 文本和矩形必须来自同一个元素（见 ax::ax_selection 的注释），
             // 否则会出现「译文对、图标飘到别处」——云之家这类 AX 树很薄的应用上实测过
-            let mut sel = unsafe { ax_selection(gesture) };
+            // 取词锚点：优先「刚按下的点」（选区就在那儿），否则用当前指针位置
+            let probe_point = last_press.map(|(_, p)| p).or_else(|| {
+                if gesture {
+                    Some(mouse::position_topleft())
+                } else {
+                    None
+                }
+            });
+            let mut sel = unsafe { ax_selection(gesture, probe_point) };
             // AX 什么都没给、而用户刚做了划词动作 → 这类应用（Safari / Muse / Grok Bot）
             // 不会把选区暴露给 AX，改用「模拟 ⌘C + 读剪贴板」兜底（可在菜单里关掉）。
             if sel.is_none() {
