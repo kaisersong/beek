@@ -947,6 +947,60 @@ fn anchor_selftest() {
     );
 }
 
+// ---------- 鼠标跟踪线程 ----------
+//
+// 为什么单独开一个线程：AX 查询一次可能要上百毫秒（要走树），如果在 AX 线程里顺带采样
+// 鼠标，双击那种几十毫秒的按下/抬起就会掉进 AX 查询的空档里，永远采不到
+// （「刚做过划词动作」这个前置条件因此不成立，剪贴板兜底和鼠标锚点全部失效）。
+// NSEvent 读按键是纯内存操作，5ms 一次的开销可以忽略。
+#[derive(Default)]
+struct MouseTrack {
+    /// 最近一次「按下」的时间与位置（屏幕左上原点）
+    press: Option<(Instant, (f64, f64))>,
+    /// 最近一次「松开」的时间：代表刚完成一次可能的划词动作
+    release: Option<Instant>,
+    /// 当前是否按着
+    down: bool,
+}
+
+static MOUSE_TRACK: std::sync::OnceLock<std::sync::Mutex<MouseTrack>> = std::sync::OnceLock::new();
+
+fn mouse_track() -> &'static std::sync::Mutex<MouseTrack> {
+    MOUSE_TRACK.get_or_init(|| std::sync::Mutex::new(MouseTrack::default()))
+}
+
+fn spawn_mouse_tracker() {
+    std::thread::spawn(|| {
+        let mut prev: i64 = 0;
+        loop {
+            let (_, _, buttons) = mouse::state();
+            if buttons != prev {
+                let mut t = mouse_track().lock().unwrap();
+                if prev == 0 && buttons != 0 {
+                    t.press = Some((Instant::now(), mouse::position_topleft()));
+                } else if prev != 0 && buttons == 0 {
+                    t.release = Some(Instant::now());
+                }
+                t.down = buttons != 0;
+                prev = buttons;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    });
+}
+
+/// 刚发生过一次「按下又松开」（2 秒内）→ 认为用户可能刚划完词
+fn gesture_recent(track: &MouseTrack) -> bool {
+    track
+        .release
+        .map(|at| at.elapsed() < Duration::from_secs(2))
+        .unwrap_or(false)
+        || track
+            .press
+            .map(|(at, _)| at.elapsed() < Duration::from_secs(2))
+            .unwrap_or(false)
+}
+
 // ---------- AX 监控后台线程 ----------
 fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
     std::thread::spawn(move || {
@@ -956,25 +1010,26 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
         let mut last = String::new();
         let mut stable_since: Option<Instant> = None;
         let mut icon_shown = false;
-        // 最近一次「鼠标刚按下」的时间与位置：划词是鼠标动作，元素框兜底时用它当锚点
-        let mut last_press: Option<(Instant, (f64, f64))> = None;
-        let mut prev_buttons: i64 = 0;
-        // 刚松开鼠标、还没判定过的那次「划词动作」：用来在 AX 完全看不到选区时留一行日志
-        let mut pending_selection_check: Option<Instant> = None;
+        // 鼠标状态全部来自独立的跟踪线程（见 spawn_mouse_tracker）
+        let mut handled_release: Option<Instant> = None;
         loop {
             std::thread::sleep(Duration::from_millis(50));
             ticks += 1;
-            // 采样鼠标按键：只在「空 → 按下」那一刻记录位置
-            {
-                let (_, _, buttons) = mouse::state();
-                if prev_buttons == 0 && buttons != 0 {
-                    last_press = Some((Instant::now(), mouse::position_topleft()));
-                } else if prev_buttons != 0 && buttons == 0 {
-                    // 松开：这一下很可能就是「划词」动作，给它一次判定机会
-                    pending_selection_check = Some(Instant::now());
+            let (last_press, gesture) = {
+                let t = mouse_track().lock().unwrap();
+                (t.press, gesture_recent(&t))
+            };
+            // 这一次「松开」还没判定过 → 给它一次取词机会（AX 拿不到时就走剪贴板兜底）
+            #[allow(unused_mut)]
+            let mut pending_selection_check = {
+                let t = mouse_track().lock().unwrap();
+                match t.release {
+                    Some(at) if Some(at) != handled_release && at.elapsed() < Duration::from_millis(1500) => {
+                        Some(at)
+                    }
+                    _ => None,
                 }
-                prev_buttons = buttons;
-            }
+            };
             if !trusted {
                 // 未授权时不做无意义的 AX 轮询；每 2 秒复查一次授权状态
                 if ticks % 40 == 0 {
@@ -989,12 +1044,13 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
             }
             // 文本和矩形必须来自同一个元素（见 ax::ax_selection 的注释），
             // 否则会出现「译文对、图标飘到别处」——云之家这类 AX 树很薄的应用上实测过
-            let mut sel = unsafe { ax_selection() };
+            let mut sel = unsafe { ax_selection(gesture) };
             // AX 什么都没给、而用户刚做了划词动作 → 这类应用（Safari / Muse / Grok Bot）
             // 不会把选区暴露给 AX，改用「模拟 ⌘C + 读剪贴板」兜底（可在菜单里关掉）。
             if sel.is_none() {
-                if let Some(at) = pending_selection_check.take() {
-                    if at.elapsed() < Duration::from_millis(1500) {
+                if let Some(at) = pending_selection_check {
+                    handled_release = Some(at);
+                    {
                         let (px, py) = last_press.map(|(_, p)| p).unwrap_or((0., 0.));
                         let who = unsafe { ax::describe_frontmost() };
                         eprintln!(
@@ -1002,16 +1058,22 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
                             who, px, py
                         );
                         if config::load().clipboard_fallback {
-                            if let Some(text) = clipboard::copy_selection() {
-                                eprintln!(
-                                    "[beek] 取词：剪贴板兜底拿到 {:?}",
-                                    text.chars().take(20).collect::<String>()
-                                );
-                                sel = Some(ax::Selection {
-                                    text,
-                                    bounds: anchor_at(px, py),
-                                    source: "clipboard",
-                                });
+                            match clipboard::copy_selection() {
+                                Some(text) => {
+                                    eprintln!(
+                                        "[beek] 取词：剪贴板兜底拿到 {:?}",
+                                        text.chars().take(20).collect::<String>()
+                                    );
+                                    sel = Some(ax::Selection {
+                                        text,
+                                        bounds: anchor_at(px, py),
+                                        source: "clipboard",
+                                    });
+                                }
+                                // 兜底跑了但没拿到内容：留日志，否则分不清是「没触发」还是「复制为空」
+                                None => eprintln!(
+                                    "[beek] 取词：剪贴板兜底也没拿到内容（该应用可能没响应 ⌘C）"
+                                ),
                             }
                         }
                     }
@@ -1445,6 +1507,7 @@ fn main() {
         if selftest_mode {
             spawn_selftest(tx.clone(), cfg.show_in_dock);
         }
+        spawn_mouse_tracker();
         spawn_ax_monitor(tx.clone());
 
         cx.spawn(async move |cx| {

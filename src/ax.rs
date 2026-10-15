@@ -263,7 +263,10 @@ pub unsafe fn describe_frontmost() -> String {
 /// 2. **有文本但没矩形也要算命中**：终端、Safari、Chromium 常常给不出 range 矩形
 ///    （AXBoundsForRange 直接失败）。早期版本要求同一元素既能给文本又能给矩形，
 ///    结果这些应用一个都取不到词。
-pub unsafe fn ax_selection() -> Option<Selection> {
+/// `deep` = 是否允许做「焦点窗口级的深层搜索」（遍历上百个 AX 节点，比较贵）。
+/// 监视器每 tick 都调这个函数，所以平时靠 `deep=false` 只走便宜的路
+/// （焦点元素 → 父链 → 焦点元素子树）；只有刚发生过划词动作时才放开深层搜索。
+pub unsafe fn ax_selection(deep: bool) -> Option<Selection> {
     let sys = AXUIElementCreateSystemWide();
     AXUIElementSetMessagingTimeout(sys, 0.5);
     let app = match ax_get_attr(sys, kAXFocusedApplicationAttribute) {
@@ -313,7 +316,7 @@ pub unsafe fn ax_selection() -> Option<Selection> {
             record(search_tree(el, 0, &mut budget, false), &mut candidates, &mut text_only);
         }
     }
-    if candidates.is_empty() {
+    if candidates.is_empty() && deep {
         if let Some(win) = win {
             let mut budget: u32 = 800;
             record(search_tree(win, 0, &mut budget, true), &mut candidates, &mut text_only);
@@ -348,13 +351,15 @@ pub unsafe fn ax_selection() -> Option<Selection> {
                     });
                 }
             }
-            if let Some(win) = win {
-                let mut budget: u32 = 800;
-                if has_webarea(win, 0, &mut budget) {
+            if deep {
+                if let Some(win) = win {
+                    let mut budget: u32 = 800;
+                    if has_webarea(win, 0, &mut budget) {
                     eprintln!(
                         "[beek] 取词：焦点窗口里有 AXWebArea，但它没有任何选中文本 \
                          → 该应用这次没有把选区暴露给 AX"
-                    );
+                        );
+                    }
                 }
             }
             None
@@ -364,12 +369,12 @@ pub unsafe fn ax_selection() -> Option<Selection> {
 
 /// 兼容旧入口：只要文本
 pub unsafe fn ax_selected_text() -> Option<String> {
-    ax_selection().map(|s| s.text)
+    ax_selection(true).map(|s| s.text)
 }
 
 /// 兼容旧入口：只要矩形
 pub unsafe fn ax_selection_bounds() -> Option<SelBounds> {
-    ax_selection().map(|s| s.bounds)
+    ax_selection(true).map(|s| s.bounds)
 }
 
 unsafe fn get_role(el: AXUIElementRef) -> Option<String> {
@@ -565,7 +570,7 @@ pub unsafe fn ax_probe() {
     } else {
         eprintln!("[探针] 系统级焦点 app 取不到");
     }
-    match ax_selection() {
+    match ax_selection(true) {
         Some(s) => eprintln!(
             "[探针] ax_selection() = Some(来源={} 文本={:?})",
             s.source,
