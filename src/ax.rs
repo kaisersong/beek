@@ -261,6 +261,66 @@ pub unsafe fn describe_frontmost() -> String {
 /// 沿用它 —— 用户刚在哪个应用里划词，那个应用就是我们要找的。
 static LAST_APP_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
+/// 已经打开过完整 AX 树的应用（pid → 已设置），避免每次都重复设置。
+/// 参考豆包实现：它的 libaha_cua.dylib 里同时有 "AXEnhancedUserInterface" 和
+/// "AXManualAccessibility" 两个字符串 —— 就是靠这两个应用级开关
+/// 让 WebKit / Electron 把完整 AX 树（含选区）暴露出来。
+/// 不设这两个开关时，Safari 这种应用整棵树里连一个「有选区的节点」都没有（实测）。
+static AX_TREE_ENABLED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<i32>>> =
+    std::sync::OnceLock::new();
+
+fn enabled_set() -> &'static std::sync::Mutex<std::collections::HashSet<i32>> {
+    AX_TREE_ENABLED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// 给某个应用打开完整 AX 树。返回 true 表示这次是新开的（调用方可能要等一下再查）。
+pub unsafe fn enable_ax_tree(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    {
+        let set = enabled_set().lock().unwrap();
+        if set.contains(&pid) {
+            return false;
+        }
+    }
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::base::TCFType;
+    use core_foundation::string::CFString;
+    let app = AXUIElementCreateApplication(pid);
+    AXUIElementSetMessagingTimeout(app, 0.5);
+    // Chromium / Electron 是「懒开启」：第一次设置 AXManualAccessibility 会返回
+    // 不支持(-25205)或未实现，**应用收到这次调用后才去建 AX 树**，再设一次就成了（实测 Chrome/Muse）。
+    // 所以这里每个属性都试两轮，中间等一下。
+    // 另外实测 AXEnhancedUserInterface 在本机对所有应用都是 -25208（未实现），
+    // 真正起作用的是 AXManualAccessibility —— 两个都试，哪个成都算。
+    let mut ok = false;
+    for round in 0..2 {
+        for attr in ["AXManualAccessibility", "AXEnhancedUserInterface"] {
+            let key = CFString::new(attr);
+            let val = CFBoolean::true_value().as_CFType();
+            let err =
+                AXUIElementSetAttributeValue(app, key.as_concrete_TypeRef(), val.as_CFTypeRef());
+            if err == 0 {
+                ok = true;
+                eprintln!("[beek] 打开 AX 树：{} 第 {} 轮成功", attr, round + 1);
+            }
+        }
+        if ok {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(120));
+    }
+    if !ok {
+        eprintln!("[beek] 打开 AX 树失败：该应用两个属性都不支持（可能是非 WebKit/Chromium 应用）");
+    }
+    if ok {
+        enabled_set().lock().unwrap().insert(pid);
+        eprintln!("[beek] 已打开 pid {} 的完整 AX 树（AXEnhancedUserInterface / AXManualAccessibility）", pid);
+    }
+    ok
+}
+
 /// pid_t 就是 i32；只为 AXUIElementGetPid 的签名服务，避免为它引 libc
 type LibcPid = i32;
 
@@ -310,6 +370,20 @@ unsafe fn element_at_position(x: f64, y: f64) -> Option<AXUIElementRef> {
     }
 }
 
+/// 给「取词失败」日志用：鼠标位置那个元素是什么、它有没有选中文本。
+/// 注意：这条信息只有在**目标应用处于活动状态**时才有意义 ——
+/// 从终端里跑探针时目标应用往往不是活动应用，那时它不会报选区（会误导判断）。
+pub unsafe fn describe_at_position(x: f64, y: f64) -> String {
+    match element_at_position(x, y) {
+        Some(el) => format!(
+            "鼠标处 role={} 选区={}",
+            get_role(el).unwrap_or_else(|| "?".to_string()),
+            el_selection_desc(el).unwrap_or_else(|| "无".to_string())
+        ),
+        None => "鼠标处取不到元素".to_string(),
+    }
+}
+
 /// 取当前选区（文本 + 矩形）。
 ///
 /// 两条硬约束（都是实测踩出来的）：
@@ -322,6 +396,11 @@ unsafe fn element_at_position(x: f64, y: f64) -> Option<AXUIElementRef> {
 /// 监视器每 tick 都调这个函数，所以平时靠 `deep=false` 只走便宜的路
 /// （焦点元素 → 父链 → 焦点元素子树）；只有刚发生过划词动作时才放开深层搜索。
 pub unsafe fn ax_selection(deep: bool, point: Option<(f64, f64)>) -> Option<Selection> {
+    // 先确保前台应用的完整 AX 树是打开的（WebKit/Electron 不打开就一个选区都读不到）
+    let last = LAST_APP_PID.load(std::sync::atomic::Ordering::Relaxed);
+    if last > 0 {
+        enable_ax_tree(last);
+    }
     // ① 先问「鼠标下面是谁」——豆包的路线。这一条不依赖焦点元素，
     //    对 Safari 这类不提供焦点元素的应用是唯一可行的 AX 路子。
     if let Some((x, y)) = point {
@@ -361,6 +440,8 @@ pub unsafe fn ax_selection(deep: bool, point: Option<(f64, f64)>) -> Option<Sele
 
     // 前台应用统一走 focused_app()：它带重试，并在焦点切换瞬间沿用上次的应用
     let app = focused_app()?;
+    let pid_now = LAST_APP_PID.load(std::sync::atomic::Ordering::Relaxed);
+    let just_enabled = pid_now > 0 && enable_ax_tree(pid_now);
     let focused_el = ax_get_attr(app, kAXFocusedUIElementAttribute)
         .ok()
         .map(|v| v as AXUIElementRef);
@@ -430,7 +511,25 @@ pub unsafe fn ax_selection(deep: bool, point: Option<(f64, f64)>) -> Option<Sele
             }
         }
         if candidates.is_empty() && deep {
-            eprintln!("[beek] 取词：扫了 {} 个窗口都没有 AX 选区", windows.len());
+            // 刚给这个应用打开 AX 树时，它重建树需要一点时间 → 等 200ms 再查一次
+            if just_enabled {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                for w in windows.iter() {
+                    let mut budget: u32 = 800;
+                    record(search_tree(*w, 0, &mut budget, true), &mut candidates, &mut text_only);
+                    if candidates.is_empty() {
+                        let mut budget: u32 = 800;
+                        record(search_tree(*w, 0, &mut budget, false), &mut candidates, &mut text_only);
+                    }
+                    if !candidates.is_empty() {
+                        eprintln!("[beek] 取词：打开 AX 树后重查，拿到了选区");
+                        break;
+                    }
+                }
+            }
+            if candidates.is_empty() {
+                eprintln!("[beek] 取词：扫了 {} 个窗口都没有 AX 选区", windows.len());
+            }
         }
     }
 
@@ -615,6 +714,11 @@ pub unsafe fn ax_probe() {
         .and_then(|v| v.trim().parse().ok());
     let (app, focused_el) = match pid {
         Some(p) => {
+            let newly = enable_ax_tree(p);
+            if newly {
+                eprintln!("[探针] 已打开该应用的完整 AX 树，等 250ms 让它重建…");
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
             let app = AXUIElementCreateApplication(p);
             let el = ax_get_attr(app, kAXFocusedUIElementAttribute)
                 .ok()

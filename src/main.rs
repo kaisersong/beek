@@ -1141,9 +1141,10 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
                     {
                         let (px, py) = last_press.map(|(_, p)| p).unwrap_or((0., 0.));
                         let who = unsafe { ax::describe_frontmost() };
+                        let at = unsafe { ax::describe_at_position(px, py) };
                         eprintln!(
-                            "[beek] 取词：AX 没有返回选区（{}；鼠标刚在 ({:.0}, {:.0}) 划过）",
-                            who, px, py
+                            "[beek] 取词：AX 没有返回选区（{}；{}；鼠标刚在 ({:.0}, {:.0}) 划过）",
+                            who, at, px, py
                         );
                         if config::load().clipboard_fallback {
                             match clipboard::copy_selection() {
