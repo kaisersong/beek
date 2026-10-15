@@ -242,6 +242,16 @@ extern "C" fn open_accessibility_settings(_this: &Object, _sel: Sel, _sender: id
         .status();
 }
 
+extern "C" fn toggle_copy_to_popup(_this: &Object, _sel: Sel, sender: id) {
+    unsafe {
+        let state: i64 = msg_send![sender, state];
+        let on = state == 0;
+        let _: () = msg_send![sender, setState: if on { 1i64 } else { 0i64 }];
+        config::update(|c| c.copy_to_popup = on);
+        eprintln!("[beek] 复制即弹按钮：{}", if on { "开" } else { "关" });
+    }
+}
+
 extern "C" fn toggle_clipboard_fallback(_this: &Object, _sel: Sel, sender: id) {
     unsafe {
         let state: i64 = msg_send![sender, state];
@@ -293,6 +303,7 @@ pub fn setup_status_item(cfg: &Config) {
         decl.add_method(sel!(quitApp:), quit_app as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(restartApp:), restart_app as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(toggleClipboardFallback:), toggle_clipboard_fallback as extern "C" fn(&Object, Sel, id));
+        decl.add_method(sel!(toggleCopyToPopup:), toggle_copy_to_popup as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(openKeySettings:), open_key_settings as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(openReadmeKey:), open_readme_key as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(checkUpdate:), check_update as extern "C" fn(&Object, Sel, id));
@@ -356,6 +367,16 @@ pub fn setup_status_item(cfg: &Config) {
         let _: () = msg_send![toggle, setState: if cfg.show_in_dock { 1i64 } else { 0i64 }];
         let _: () = msg_send![menu, addItem: toggle];
         TOGGLE_ITEM.store(toggle as usize, Ordering::SeqCst);
+
+        // 复制即弹按钮：你自己按 ⌘C 时在鼠标旁弹小蜜蜂（不合成输入、不依赖 AX，最可靠）
+        let c2p_alloc: id = msg_send![class!(NSMenuItem), alloc];
+        let c2p_item: id = msg_send![c2p_alloc,
+            initWithTitle: nsstr("复制即弹按钮（自己按 ⌘C）")
+            action: sel!(toggleCopyToPopup:)
+            keyEquivalent: nsstr("")];
+        let _: () = msg_send![c2p_item, setTarget: handler];
+        let _: () = msg_send![c2p_item, setState: if cfg.copy_to_popup { 1i64 } else { 0i64 }];
+        let _: () = msg_send![menu, addItem: c2p_item];
 
         // 剪贴板兜底：AX 取不到选区时，模拟 ⌘C 读剪贴板（Safari/Muse/Grok Bot 这类应用必须开）
         let clip_alloc: id = msg_send![class!(NSMenuItem), alloc];

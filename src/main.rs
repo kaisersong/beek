@@ -1237,16 +1237,30 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
                         }
                     } else if let Some(since) = stable_since {
                         if !icon_shown && since.elapsed() >= Duration::from_millis(300) {
-                            if let Some(s) = sel.as_ref() {
-                                let (b, anchor) = anchor_for(
-                                    &s.bounds,
-                                    s.source,
-                                    last_press,
-                                    mouse::position_topleft(),
-                                );
+                            // 位置来源：AX 当刻给的就用它；否则用记住的剪贴板选区。
+                            // （剪贴板监听只在自己那一 tick 里设置 sel，之后 AX 依然读不到，
+                            //   只看 sel 会导致「粘住」的选区永远弹不出按钮 —— 实测踩过）
+                            let pos = match sel.as_ref() {
+                                Some(s) => Some((s.bounds, s.source, false)),
+                                None => clip_selection
+                                    .as_ref()
+                                    .map(|(_, b, _, _)| (*b, "clipboard-watch", true)),
+                            };
+                            if let Some((bounds, source, preset)) = pos {
+                                let (b, anchor) = if preset {
+                                    // clip_selection 里存的就是算好的锚点，直接用
+                                    (bounds, "clipboard-watch")
+                                } else {
+                                    anchor_for(
+                                        &bounds,
+                                        source,
+                                        last_press,
+                                        mouse::position_topleft(),
+                                    )
+                                };
                                 eprintln!(
                                     "[beek] 选区矩形（来源={}，锚点={}）：x={:.0} y={:.0} w={:.0} h={:.0}",
-                                    s.source, anchor, b.x, b.y, b.w, b.h
+                                    source, anchor, b.x, b.y, b.w, b.h
                                 );
                                 let _ = tx.send(UiEvent::ShowIcon(b, last.clone()));
                                 icon_shown = true;
