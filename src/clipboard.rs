@@ -26,10 +26,26 @@ extern "C" {
     fn CFRelease(cf: *const std::ffi::c_void);
 }
 
-/// 'C' 键的虚拟键码；kCGEventFlagMaskCommand；kCGHIDEventTap
+/// 'C' 键的虚拟键码；kCGEventFlagMaskCommand
 const KEY_C: u16 = 8;
 const FLAG_COMMAND: u64 = 1 << 20;
+/// kCGHIDEventTap / kCGSessionEventTap：两种投递层级，
+/// 有些应用只认其中一种（实测 ⌘C 时灵时不灵就是这个原因之一）
 const HID_TAP: u32 = 0;
+const SESSION_TAP: u32 = 1;
+/// 按键按下到抬起的间隔：太短（原来是 15ms）时部分应用会忽略这次按键
+const KEY_DWELL_MS: u64 = 40;
+
+/// ⌘C 的三种投递方式，按「最像真人」到「最定向」依次尝试
+#[derive(Clone, Copy)]
+enum CopyRoute {
+    /// HID 层：等价于用户真的按了键
+    Hid,
+    /// 直接投给前台进程：Electron 类应用常常只认这条
+    Pid(i32),
+    /// Session 层：个别应用只认这条
+    Session,
+}
 
 fn pasteboard() -> id {
     unsafe { msg_send![class!(NSPasteboard), generalPasteboard] }
@@ -85,7 +101,7 @@ pub fn frontmost_pid() -> Option<i32> {
     }
 }
 
-fn post_copy(target: Option<i32>) {
+fn post_copy(route: CopyRoute) {
     unsafe {
         for down in [true, false] {
             let ev = CGEventCreateKeyboardEvent(std::ptr::null(), KEY_C, down);
@@ -93,20 +109,20 @@ fn post_copy(target: Option<i32>) {
                 continue;
             }
             CGEventSetFlags(ev, FLAG_COMMAND);
-            match target {
-                // 投给指定进程：Electron 类应用更认这条
-                Some(pid) => CGEventPostToPid(pid, ev),
-                None => CGEventPost(HID_TAP, ev),
+            match route {
+                CopyRoute::Hid => CGEventPost(HID_TAP, ev),
+                CopyRoute::Session => CGEventPost(SESSION_TAP, ev),
+                CopyRoute::Pid(pid) => CGEventPostToPid(pid, ev),
             }
             CFRelease(ev as *const std::ffi::c_void);
-            std::thread::sleep(std::time::Duration::from_millis(15));
+            std::thread::sleep(std::time::Duration::from_millis(KEY_DWELL_MS));
         }
     }
 }
 
 /// 给当前前台应用发一次 ⌘C（HID 层，等于用户真的按了）
 pub fn send_copy() {
-    post_copy(None);
+    post_copy(CopyRoute::Hid);
 }
 
 /// 等剪贴板变化（复制是异步写盘的，Safari 这种可能要几百毫秒）
@@ -226,19 +242,39 @@ fn change_count() -> i64 {
 pub fn copy_selection() -> Option<String> {
     let before_items = snapshot();
     let before_count = change_count();
-    // 第一发：HID 层（绝大多数应用够用）
-    send_copy();
-    let mut changed = wait_change(before_count, 240);
-    if !changed {
-        // 第二发：直接投给前台进程（Electron 类应用往往只认这条）
-        if let Some(pid) = frontmost_pid() {
-            eprintln!("[beek] 取词：HID 层的 ⌘C 没反应，改为直接投递给 pid {}", pid);
-            post_copy(Some(pid));
-            changed = wait_change(before_count, 560);
+    let pid = frontmost_pid();
+    // 依次尝试三种投递方式。每种的等待都放宽：复制是异步写剪贴板的，
+    // 短了会把「其实成功了」误判成「没反应」（实测 Safari 就这样）。
+    let routes: [CopyRoute; 3] = [
+        CopyRoute::Hid,
+        match pid {
+            Some(p) => CopyRoute::Pid(p),
+            None => CopyRoute::Session,
+        },
+        CopyRoute::Session,
+    ];
+    let mut changed = false;
+    for (i, route) in routes.iter().enumerate() {
+        post_copy(*route);
+        if wait_change(before_count, 500) {
+            changed = true;
+            if i > 0 {
+                eprintln!("[beek] 取词：第 {} 种 ⌘C 投递方式生效", i + 1);
+            }
+            break;
         }
+        eprintln!(
+            "[beek] 取词：第 {} 种 ⌘C 投递方式（{:?}）没反应",
+            i + 1,
+            match route {
+                CopyRoute::Hid => "HID",
+                CopyRoute::Session => "Session",
+                CopyRoute::Pid(_) => "投递给进程",
+            }
+        );
     }
     if !changed {
-        return None; // 还是没变 → 不动剪贴板
+        return None; // 三种都没反应 → 不动剪贴板
     }
     // 变了 → 先把文本读出来，然后无论文本有没有，都把剪贴板整体还原
     let text = read_string();
