@@ -42,8 +42,19 @@ cp "$ROOT/resources/icons/BeeK.icns" "$APP/Contents/Resources/BeeK.icns"
 echo "App 图标: $(ls -l "$APP/Contents/Resources/BeeK.icns" | awk '{print $5" 字节"}')"
 echo "CFBundleIconFile: $(/usr/libexec/PlistBuddy -c Print:CFBundleIconFile "$APP/Contents/Info.plist")"
 
-echo "== 4/5 ad-hoc 重签名 =="
-codesign --force --sign - --identifier com.kaisersong.beek "$APP" 2>&1 | tail -2
+echo "== 4/5 重签名 =="
+# 为什么优先用证书而不是默认的 ad-hoc：TCC 把「辅助功能」授权记在签名身份上，
+# ad-hoc 身份每次重编译都会变 → 每次更新后取词都会失效，用户得再去系统设置里勾一次。
+# 用稳定的 Apple Development 证书签名，授权就能跨更新保留。
+DEVID=$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)
+if [ -n "$DEVID" ]; then
+    echo "签名身份：$DEVID"
+    codesign --force --sign "$DEVID" --identifier com.kaisersong.beek "$APP" 2>&1 | tail -2
+else
+    echo "⚠️ 没找到 Apple Development 证书，退回 ad-hoc："
+    echo "   这会让「辅助功能」授权在本次更新后失效，需要在系统设置里重新勾选 BeeK。"
+    codesign --force --sign - --identifier com.kaisersong.beek "$APP" 2>&1 | tail -2
+fi
 codesign --verify --strict --verbose=2 "$APP" 2>&1 | tail -2 || echo "⚠️ 签名校验未通过"
 
 echo "== 5/5 启动并刷新图标缓存 =="
