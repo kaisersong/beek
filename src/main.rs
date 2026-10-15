@@ -2,10 +2,12 @@
 // 选中文本 → 小蜜蜂图标 → 点击翻译 → 弹窗显示（流式增量）
 mod ax;
 mod config;
+mod dialogs;
 mod icons;
 mod menubar;
 mod mouse;
 mod translate;
+mod update;
 
 use ax::{ax_selected_text, ax_selection_bounds, is_url, SelBounds};
 use gpui::*;
@@ -28,6 +30,19 @@ enum UiEvent {
     /// 自检用：在主线程把弹窗挪到指定位置（AppKit 只能在主线程动窗口）
     DragTest(f64, f64),
     ClosePopup,
+    // ---- 菜单栏动作（菜单在主线程，但开户/发请求的活儿交给主循环）----
+    /// 「设置 API Key…」
+    OpenKeySettings,
+    /// 「关于 BeeK」
+    OpenAbout,
+    /// 「检查更新…」
+    CheckUpdate,
+    /// 检查更新的结果（None = 仓库还没发布过 release）
+    UpdateChecked(Result<Option<update::Release>, String>),
+    /// 升级包已下载并解压好：(解压出来的新 app, 版本号)
+    UpdatePrepared(std::path::PathBuf, String),
+    /// 更新过程中的失败（下载 / 解压 / 替换脚本）
+    UpdateFailed(String),
 }
 
 /// 朗读一个词：用系统自带的 /usr/bin/say，不联网也不需要额外权限。
@@ -1036,6 +1051,55 @@ fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
         );
         menubar::dump_windows("自检：请求途中关闭弹窗 10 秒后");
         menubar::dump_menu();
+        // 版本比较是纯函数，顺带断言一遍（更新功能最容易错的就是这里）
+        update::selftest();
+
+        // ---- 菜单功能：设置 API Key → 检查更新 → 关于 ----
+        // 配置写入这块会动真实 config.json，所以先快照、跑完恢复
+        // （不用假 HOME：换掉 HOME 会让 AppKit 在某些阶段抛异常，自检跑不完）
+        let cfg_path = config::config_path();
+        let cfg_backup = std::fs::read(&cfg_path).ok();
+        eprintln!(
+            "[自检] 菜单功能：触发「设置 API Key…」（原配置已快照：{} 字节）",
+            cfg_backup.as_ref().map(|b| b.len()).unwrap_or(0)
+        );
+        let _ = tx.send(UiEvent::OpenKeySettings);
+        std::thread::sleep(Duration::from_millis(400));
+        let saved = config::load().provider(config::ARK);
+        eprintln!(
+            "[自检] 配置回读：api_key 长度={}（期望 21）model={:?}（期望 selftest-model）配置路径={}",
+            saved.api_key.chars().count(),
+            saved.model,
+            config::config_path().display()
+        );
+
+        eprintln!("[自检] 菜单功能：触发「检查更新…」（会真的请求 GitHub API）");
+        let _ = tx.send(UiEvent::CheckUpdate);
+        std::thread::sleep(Duration::from_secs(6));
+
+        eprintln!("[自检] 菜单功能：触发「关于 BeeK」（自检模式走「检查更新」分支）");
+        let _ = tx.send(UiEvent::OpenAbout);
+        std::thread::sleep(Duration::from_secs(6));
+        update::selftest_install();
+        if let Ok(url) = std::env::var("BEEK_UPDATE_SELFTEST_URL") {
+            update::selftest_download(&url);
+        }
+        // 恢复用户原配置（快照是什么就写回什么）
+        match &cfg_backup {
+            Some(bytes) => match std::fs::write(&cfg_path, bytes) {
+                Ok(_) => eprintln!(
+                    "[自检] 已恢复原配置（{} 字节）→ {}",
+                    bytes.len(),
+                    cfg_path.display()
+                ),
+                Err(e) => eprintln!("[自检] ⚠️ 恢复配置失败：{}", e),
+            },
+            None => {
+                let _ = std::fs::remove_file(&cfg_path);
+                eprintln!("[自检] 原本没有配置文件，已删除自检写入的 config.json");
+            }
+        }
+        eprintln!("[自检] 菜单功能验证结束");
 
         // ---- 定位回归：弹窗不得盖住选区 ----
         // 用 dh=982 的屏幕算纯函数，覆盖「下方放得下 / 放不下要转上方」两种情形
@@ -1171,7 +1235,7 @@ fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
 
         // 恢复用户原本的设置（自检不应该改动用户配置）
         if config::load().show_in_dock != orig_show_in_dock {
-            config::save(&config::Config { show_in_dock: orig_show_in_dock });
+            config::update(|c| c.show_in_dock = orig_show_in_dock);
             menubar::set_dock_visible(orig_show_in_dock);
         }
         eprintln!("[自检] 完成，show_in_dock 已恢复为 {}", orig_show_in_dock);
@@ -1188,6 +1252,10 @@ fn main() {
     Application::new().run(|cx: &mut App| {
         let cfg = config::load();
         menubar::set_dock_visible(cfg.show_in_dock);
+        // 事件通道先于菜单创建：菜单里的「设置 API Key / 检查更新 / 关于」
+        // 都要把动作转回主循环执行
+        let (tx, rx) = mpsc::channel::<UiEvent>();
+        menubar::set_ui_sender(tx.clone());
         menubar::setup_status_item(&cfg);
 
         let trusted = unsafe { accessibility_sys::AXIsProcessTrusted() };
@@ -1200,7 +1268,6 @@ fn main() {
             unsafe { ax::prompt_accessibility() };
         }
 
-        let (tx, rx) = mpsc::channel::<UiEvent>();
         let selftest_mode = std::env::var("BEEK_SELFTEST").is_ok();
         if selftest_mode {
             spawn_selftest(tx.clone(), cfg.show_in_dock);
@@ -1392,6 +1459,236 @@ fn main() {
                                 ok
                             );
                             menubar::dump_windows("自检：真实拖动之后（期望 x=520、frame 上沿=700）");
+                        }
+                        UiEvent::OpenKeySettings => {
+                            // AppKit 对话框只能在主线程弹，这里就是主线程
+                            let cur = config::load().provider(config::ARK);
+                            let cur_model = cur.model.clone().unwrap_or_default();
+                            match dialogs::key_settings_dialog(cur.api_key.clone(), cur_model) {
+                                Some(input) => {
+                                    let key = input.api_key.clone();
+                                    let model = input.model.clone();
+                                    config::update(|c| {
+                                        c.set_provider(
+                                            config::ARK,
+                                            config::ProviderConfig {
+                                                api_key: key.clone(),
+                                                model: if model.is_empty() { None } else { Some(model.clone()) },
+                                                base_url: None,
+                                            },
+                                        );
+                                    });
+                                    eprintln!(
+                                        "[beek] +{}ms 已保存 API Key（长度 {}，模型 {}）到 {}",
+                                        ms(t0),
+                                        key.chars().count(),
+                                        if model.is_empty() { "默认".to_string() } else { model.clone() },
+                                        config::config_path().display()
+                                    );
+                                    if key.is_empty() {
+                                        dialogs::alert(
+                                            "已清空 API Key",
+                                            "配置里没有 Key 了。取词翻译将回落到环境变量 BEEK_ARK_KEY；\
+                                             两者都没有时会提示「未配置 API Key」。",
+                                            &["好"],
+                                        );
+                                    } else {
+                                        dialogs::alert(
+                                            "已保存",
+                                            "翻译会立即使用新的 Key，不需要重启。",
+                                            &["好"],
+                                        );
+                                    }
+                                }
+                                None => eprintln!("[beek] +{}ms 设置 API Key：用户取消", ms(t0)),
+                            }
+                        }
+                        UiEvent::OpenAbout => {
+                            match dialogs::about_dialog() {
+                                0 => {
+                                    let _ = tx.send(UiEvent::CheckUpdate);
+                                }
+                                1 => update::open_url(update::README_URL),
+                                _ => {}
+                            }
+                        }
+                        UiEvent::CheckUpdate => {
+                            eprintln!(
+                                "[beek] +{}ms 检查更新（当前 v{}，仓库 {}）",
+                                ms(t0),
+                                update::CURRENT_VERSION,
+                                update::REPO
+                            );
+                            let tx2 = tx.clone();
+                            std::thread::spawn(move || {
+                                let r = update::check();
+                                match &r {
+                                    Ok(Some(rel)) => eprintln!(
+                                        "[beek] 检查更新：远端 {}（资产 {}）",
+                                        rel.tag,
+                                        rel.asset_url.as_deref().unwrap_or("无")
+                                    ),
+                                    Ok(None) => eprintln!("[beek] 检查更新：远端还没有任何 release"),
+                                    Err(e) => eprintln!("[beek] 检查更新失败：{}", e),
+                                }
+                                let _ = tx2.send(UiEvent::UpdateChecked(r));
+                            });
+                        }
+                        UiEvent::UpdateChecked(result) => match result {
+                            Err(e) => {
+                                if dialogs::alert(
+                                    "检查更新失败",
+                                    &format!("{}\n\n当前版本 v{}。", e, update::CURRENT_VERSION),
+                                    &["打开 Release 页面", "好"],
+                                ) == 0
+                                {
+                                    update::open_url(update::RELEASES_URL);
+                                }
+                            }
+                            Ok(None) => {
+                                if dialogs::alert(
+                                    "暂时没有可用的新版本",
+                                    &format!(
+                                        "仓库 {} 还没有发布过 release。\n\n当前版本 v{}。\
+                                         发布页：{}",
+                                        update::REPO,
+                                        update::CURRENT_VERSION,
+                                        update::RELEASES_URL
+                                    ),
+                                    &["打开 Release 页面", "好"],
+                                ) == 0
+                                {
+                                    update::open_url(update::RELEASES_URL);
+                                }
+                            }
+                            Ok(Some(rel)) => {
+                                if !update::is_newer(&rel.version, update::CURRENT_VERSION) {
+                                    dialogs::alert(
+                                        "已是最新版本",
+                                        &format!(
+                                            "当前 v{}，远端最新 {}。",
+                                            update::CURRENT_VERSION, rel.tag
+                                        ),
+                                        &["好"],
+                                    );
+                                } else {
+                                    let notes: String = rel
+                                        .notes
+                                        .lines()
+                                        .take(12)
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    let can_auto = rel.asset_url.is_some();
+                                    let body = format!(
+                                        "当前 v{} → 新版本 {}\n\n{}{}",
+                                        update::CURRENT_VERSION,
+                                        rel.tag,
+                                        if notes.trim().is_empty() {
+                                            "（这条 release 没写说明）\n".to_string()
+                                        } else {
+                                            format!("{}\n", notes.trim())
+                                        },
+                                        if can_auto {
+                                            ""
+                                        } else {
+                                            "\n注意：这条 release 没有附带升级包，只能手动下载。"
+                                        }
+                                    );
+                                    let choice = if can_auto {
+                                        dialogs::alert(
+                                            &format!("发现新版本 {}", rel.tag),
+                                            &body,
+                                            &["下载并更新", "打开 Release 页面", "稍后"],
+                                        )
+                                    } else {
+                                        dialogs::alert(
+                                            &format!("发现新版本 {}", rel.tag),
+                                            &body,
+                                            &["打开 Release 页面", "稍后"],
+                                        ) + 1
+                                    };
+                                    match choice {
+                                        // 下载并更新 → 后台下载 + 解压，回来再确认一次
+                                        0 => {
+                                            eprintln!(
+                                                "[beek] +{}ms 开始下载升级包 {}",
+                                                ms(t0),
+                                                update::asset_name(&rel.version)
+                                            );
+                                            let tx2 = tx.clone();
+                                            let rel2 = rel.clone();
+                                            std::thread::spawn(move || {
+                                                match update::prepare(&rel2) {
+                                                    Ok(app) => {
+                                                        let _ = tx2.send(UiEvent::UpdatePrepared(
+                                                            app,
+                                                            rel2.version.clone(),
+                                                        ));
+                                                    }
+                                                    Err(e) => {
+                                                        let _ =
+                                                            tx2.send(UiEvent::UpdateFailed(e));
+                                                    }
+                                                }
+                                            });
+                                        }
+                                        1 => update::open_url(&rel.page_url),
+                                        _ => eprintln!("[beek] +{}ms 用户选择稍后更新", ms(t0)),
+                                    }
+                                }
+                            }
+                        },
+                        UiEvent::UpdatePrepared(new_app, version) => {
+                            eprintln!(
+                                "[beek] +{}ms 升级包已就绪：{} → v{}",
+                                ms(t0),
+                                new_app.display(),
+                                version
+                            );
+                            let script = update::install_script(&new_app, &version);
+                            match script {
+                                Err(e) => {
+                                    dialogs::alert("更新失败", &e, &["好"]);
+                                }
+                                Ok(path) => {
+                                    let go = dialogs::alert(
+                                        &format!("已下载 v{}，现在更新？", version),
+                                        "点「立即更新」后 BeeK 会退出，替换 /Applications/BeeK.app \
+                                         并在几秒后自动启动新版本。",
+                                        &["立即更新", "稍后"],
+                                    ) == 0;
+                                    if go {
+                                        eprintln!(
+                                            "[beek] +{}ms 执行替换脚本 {}，准备退出",
+                                            ms(t0),
+                                            path.display()
+                                        );
+                                        if let Err(e) = update::run_script(&path) {
+                                            dialogs::alert("更新失败", &e, &["好"]);
+                                        } else {
+                                            // 脚本会等这个进程退出后再替换 bundle
+                                            std::process::exit(0);
+                                        }
+                                    } else {
+                                        eprintln!(
+                                            "[beek] +{}ms 用户选择稍后替换（升级包留在 {}）",
+                                            ms(t0),
+                                            new_app.display()
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        UiEvent::UpdateFailed(e) => {
+                            eprintln!("[beek] +{}ms 更新失败：{}", ms(t0), e);
+                            if dialogs::alert(
+                                "更新失败",
+                                &format!("{}\n\n可以从 Release 页面手动下载安装。", e),
+                                &["打开 Release 页面", "好"],
+                            ) == 0
+                            {
+                                update::open_url(update::RELEASES_URL);
+                            }
                         }
                         UiEvent::ClosePopup => {
                             let was = shown.take();

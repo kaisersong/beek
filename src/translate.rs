@@ -12,7 +12,10 @@
 use serde::{Deserialize, Serialize};
 
 const ARK_URL: &str = "https://ark.cn-beijing.volces.com/api/v3/chat/completions";
-const MODEL: &str = "doubao-seed-2-0-mini-260428";
+/// 默认模型（可在「设置 API Key…」里改 providers.ark.model 覆盖）
+const DEFAULT_MODEL: &str = "doubao-seed-2-0-mini-260428";
+/// 服务名：对应 config.json 里 providers 的键
+const PROVIDER: &str = crate::config::ARK;
 const TIMEOUT_SECS: u64 = 60;
 
 #[derive(Serialize, Deserialize)]
@@ -81,7 +84,7 @@ fn explain_prompt(text: &str) -> String {
 
 fn build_body(prompt: String, stream: bool) -> Req {
     Req {
-        model: MODEL.to_string(),
+        model: model(),
         messages: vec![Msg { role: "user".into(), content: prompt }],
         stream,
         // 关掉思维链：这个模型默认会先“想”几秒，用户等的是译文而不是推理过程
@@ -96,14 +99,47 @@ fn client() -> Result<reqwest::blocking::Client, String> {
         .map_err(|e| e.to_string())
 }
 
+/// 生效的模型：配置里填了就用配置的，否则用内置默认
+fn model() -> String {
+    crate::config::load()
+        .provider(PROVIDER)
+        .model
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string())
+}
+
+/// 生效的 API Key：配置文件优先，环境变量兜底。
+///
+/// 两种情况都给：图形界面配的（菜单栏「设置 API Key…」→ config.json）
+/// 和命令行/LaunchAgent 配的（BEEK_ARK_KEY），谁方便用谁。
 fn api_key() -> Result<String, String> {
-    std::env::var("BEEK_ARK_KEY").map_err(|_| "未设置 BEEK_ARK_KEY".to_string())
+    let from_config = crate::config::load().provider(PROVIDER).api_key;
+    if !from_config.trim().is_empty() {
+        return Ok(from_config.trim().to_string());
+    }
+    std::env::var("BEEK_ARK_KEY")
+        .map(|k| k.trim().to_string())
+        .ok()
+        .filter(|k| !k.is_empty())
+        .ok_or_else(|| {
+            "未配置 API Key：点菜单栏 BeeK →「设置 API Key…」，或设置环境变量 BEEK_ARK_KEY".to_string()
+        })
+}
+
+/// 生效的端点：配置里填了 base_url 就用它（可接任意 OpenAI 兼容服务），否则用方舟默认地址
+fn endpoint() -> String {
+    crate::config::load()
+        .provider(PROVIDER)
+        .base_url
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| ARK_URL.to_string())
 }
 
 fn start(prompt: String, stream: bool) -> Result<reqwest::blocking::Response, String> {
     let key = api_key()?;
     let resp = client()?
-        .post(ARK_URL)
+        .post(endpoint())
         .header("Authorization", format!("Bearer {}", key))
         .json(&build_body(prompt, stream))
         .send()

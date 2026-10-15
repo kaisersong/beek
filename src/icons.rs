@@ -47,6 +47,14 @@ pub fn speak_outline(cx: &App) -> Arc<RenderImage> {
     .clone()
 }
 
+/// 「如何获取 API Key…」菜单项左边的小图标：圆圈里加 i（64x64 @4x，template 图）。
+/// 素材由 resources/icons/gen_circle_i.py 生成；template 表示纯黑 + alpha，
+/// AppKit 会按菜单明暗自动反色，不用准备深浅两套。
+pub const CIRCLE_I_PNG: &[u8] = include_bytes!("../resources/icons/beek-circle-i@4x.png");
+
+/// 菜单项图标的绘制尺寸（pt）：和菜单项文字同高
+pub const MENU_ICON_PT: f64 = 16.0;
+
 /// 悬浮按钮的四种状态，素材均为 64x64（@2x），按 32pt 逻辑尺寸绘制。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IconKind {

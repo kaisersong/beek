@@ -7,12 +7,33 @@ use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Sel, YES};
 use objc::{class, msg_send, sel, sel_impl};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, OnceLock};
 
 const POLICY_REGULAR: i64 = 0;
 const POLICY_ACCESSORY: i64 = 1;
 
 /// 「在 Dock 中显示」菜单项地址，供自检时模拟点击（0 表示尚未创建）
 static TOGGLE_ITEM: AtomicUsize = AtomicUsize::new(0);
+
+/// 主循环的事件发送端：菜单里那些「要开窗口 / 要发网络请求」的动作
+/// （设置 Key、检查更新、关于）都通过它转交给主循环执行。
+/// 菜单动作本身就在主线程，但需要 GPUI 上下文或后台线程的活儿不能直接干。
+static UI_TX: OnceLock<mpsc::Sender<crate::UiEvent>> = OnceLock::new();
+
+/// 由 main 在创建完通道后调用一次
+pub fn set_ui_sender(tx: mpsc::Sender<crate::UiEvent>) {
+    let _ = UI_TX.set(tx);
+}
+
+/// 把菜单动作转成主循环事件；通道还没就绪时只记日志（不应发生）
+fn send_event(ev: crate::UiEvent) {
+    match UI_TX.get() {
+        Some(tx) => {
+            let _ = tx.send(ev);
+        }
+        None => eprintln!("[beek] ⚠️ 主循环通道尚未就绪，菜单动作被丢弃"),
+    }
+}
 
 /// 当前激活策略：0=Regular（有 Dock 图标）1=Accessory（仅菜单栏）
 pub fn activation_policy() -> i64 {
@@ -72,12 +93,16 @@ pub fn dump_menu() {
             };
             let state: i64 = msg_send![mi, state];
             let enabled: i8 = msg_send![mi, isEnabled];
+            // 图标也报出来：菜单项上是真挂了图（而不是只写了标题）
+            let img: id = msg_send![mi, image];
+            let has_img = if img == nil { "无" } else { "有" };
             eprintln!(
-                "[beek]   [{}] 「{}」勾选={} 可用={}",
+                "[beek]   [{}] 「{}」勾选={} 可用={} 图标={}",
                 i,
                 title_s,
                 state,
-                enabled != 0
+                enabled != 0,
+                has_img
             );
         }
     }
@@ -205,7 +230,8 @@ extern "C" fn toggle_dock(_this: &Object, _sel: Sel, sender: id) {
         let show = state == 0;
         let _: () = msg_send![sender, setState: if show { 1i64 } else { 0i64 }];
         set_dock_visible(show);
-        config::save(&Config { show_in_dock: show });
+        // 读-改-写：不能整份覆盖，否则会把 providers 里配好的 key 抹掉
+        config::update(|c| c.show_in_dock = show);
     }
 }
 
@@ -214,6 +240,23 @@ extern "C" fn open_accessibility_settings(_this: &Object, _sel: Sel, _sender: id
     let _ = std::process::Command::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
         .status();
+}
+
+extern "C" fn open_key_settings(_this: &Object, _sel: Sel, _sender: id) {
+    send_event(crate::UiEvent::OpenKeySettings);
+}
+
+extern "C" fn open_readme_key(_this: &Object, _sel: Sel, _sender: id) {
+    // 纯跳转，不需要主循环：直接开浏览器到 README 的「获取 API Key」章节
+    crate::update::open_url(crate::update::README_KEY_URL);
+}
+
+extern "C" fn check_update(_this: &Object, _sel: Sel, _sender: id) {
+    send_event(crate::UiEvent::CheckUpdate);
+}
+
+extern "C" fn open_about(_this: &Object, _sel: Sel, _sender: id) {
+    send_event(crate::UiEvent::OpenAbout);
 }
 
 extern "C" fn restart_app(_this: &Object, _sel: Sel, _sender: id) {
@@ -239,6 +282,10 @@ pub fn setup_status_item(cfg: &Config) {
         decl.add_method(sel!(openAccessibilitySettings:), open_accessibility_settings as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(quitApp:), quit_app as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(restartApp:), restart_app as extern "C" fn(&Object, Sel, id));
+        decl.add_method(sel!(openKeySettings:), open_key_settings as extern "C" fn(&Object, Sel, id));
+        decl.add_method(sel!(openReadmeKey:), open_readme_key as extern "C" fn(&Object, Sel, id));
+        decl.add_method(sel!(checkUpdate:), check_update as extern "C" fn(&Object, Sel, id));
+        decl.add_method(sel!(openAbout:), open_about as extern "C" fn(&Object, Sel, id));
         let cls = decl.register();
         let handler: id = msg_send![cls, new];
 
@@ -275,7 +322,7 @@ pub fn setup_status_item(cfg: &Config) {
 
         let title_alloc: id = msg_send![class!(NSMenuItem), alloc];
         let title: id = msg_send![title_alloc,
-            initWithTitle: nsstr("BeeK 划词翻译")
+            initWithTitle: nsstr(&format!("BeeK 划词翻译 v{}", crate::update::CURRENT_VERSION))
             action: sel!(noop:)
             keyEquivalent: nsstr("")];
         let _: () = msg_send![title, setEnabled: false];
@@ -298,6 +345,61 @@ pub fn setup_status_item(cfg: &Config) {
         let _: () = msg_send![toggle, setState: if cfg.show_in_dock { 1i64 } else { 0i64 }];
         let _: () = msg_send![menu, addItem: toggle];
         TOGGLE_ITEM.store(toggle as usize, Ordering::SeqCst);
+
+        let sep2: id = msg_send![class!(NSMenuItem), separatorItem];
+        let _: () = msg_send![menu, addItem: sep2];
+
+        // 设置 API Key：弹出的对话框由主循环用 AppKit 的 NSAlert 呈现
+        let key_alloc: id = msg_send![class!(NSMenuItem), alloc];
+        let key_item: id = msg_send![key_alloc,
+            initWithTitle: nsstr("设置 API Key…")
+            action: sel!(openKeySettings:)
+            keyEquivalent: nsstr("")];
+        let _: () = msg_send![key_item, setTarget: handler];
+        let _: () = msg_send![menu, addItem: key_item];
+
+        // 「如何获取 API Key…」：带一个圆圈 i 图标，点开 README 对应章节
+        let help_alloc: id = msg_send![class!(NSMenuItem), alloc];
+        let help_item: id = msg_send![help_alloc,
+            initWithTitle: nsstr("如何获取 API Key…")
+            action: sel!(openReadmeKey:)
+            keyEquivalent: nsstr("")];
+        let _: () = msg_send![help_item, setTarget: handler];
+        let png = icons::CIRCLE_I_PNG;
+        let data: id = msg_send![class!(NSData),
+            dataWithBytes: png.as_ptr() as *const std::os::raw::c_void
+            length: png.len() as NSUInteger];
+        let img_alloc: id = msg_send![class!(NSImage), alloc];
+        let circle: id = msg_send![img_alloc, initWithData: data];
+        if circle == nil {
+            eprintln!("[beek] ⚠️ 圆圈 i 图标解码失败，菜单项将没有图标");
+        } else {
+            let sz = NSSize::new(icons::MENU_ICON_PT, icons::MENU_ICON_PT);
+            let _: () = msg_send![circle, setSize: sz];
+            // template：交给 AppKit 按菜单明暗自动反色
+            let _: () = msg_send![circle, setTemplate: YES];
+            let _: () = msg_send![help_item, setImage: circle];
+        }
+        let _: () = msg_send![menu, addItem: help_item];
+
+        let sep3: id = msg_send![class!(NSMenuItem), separatorItem];
+        let _: () = msg_send![menu, addItem: sep3];
+
+        let upd_alloc: id = msg_send![class!(NSMenuItem), alloc];
+        let upd_item: id = msg_send![upd_alloc,
+            initWithTitle: nsstr("检查更新…")
+            action: sel!(checkUpdate:)
+            keyEquivalent: nsstr("")];
+        let _: () = msg_send![upd_item, setTarget: handler];
+        let _: () = msg_send![menu, addItem: upd_item];
+
+        let about_alloc: id = msg_send![class!(NSMenuItem), alloc];
+        let about_item: id = msg_send![about_alloc,
+            initWithTitle: nsstr("关于 BeeK")
+            action: sel!(openAbout:)
+            keyEquivalent: nsstr("")];
+        let _: () = msg_send![about_item, setTarget: handler];
+        let _: () = msg_send![menu, addItem: about_item];
 
         let sep: id = msg_send![class!(NSMenuItem), separatorItem];
         let _: () = msg_send![menu, addItem: sep];
