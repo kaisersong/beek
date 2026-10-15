@@ -840,57 +840,85 @@ fn sync_popup_geometry(
 /// 图标锚点。AX 直接给出的 range 矩形直接用；只有退化成「元素框」时才另做判断：
 /// 元素框可能很大（整块文档区），把图标放在它的左上角同样会离选区很远。
 /// 这时如果鼠标还在元素框里，说明用户刚用鼠标选的词 —— 用鼠标位置当锚点最接近真相。
-fn anchor_for(bounds: &SelBounds, source: &str, pointer: (f64, f64)) -> SelBounds {
-    if source != "element-frame" {
-        return *bounds;
+/// 图标锚点：
+/// - AX 给的矩形和「刚按下的鼠标点」位置一致（<120pt）→ 用 AX 的，更精确
+/// - 差得很远 → 信鼠标。云之家这类应用会把选中文本挂在一个大容器上，
+///   容器自己的矩形（或退化成元素框的左上角）离真正的选区几百像素，
+///   而鼠标按下的那个点就是用户实际选中的地方（实测：选区在 y≈800，容器却在 y≈150）
+/// - 没有鼠标动作（键盘选词）→ 用 AX 矩形；矩形退化时用元素框兜底
+fn anchor_for(
+    bounds: &SelBounds,
+    source: &str,
+    press: Option<(Instant, (f64, f64))>,
+) -> (SelBounds, &'static str) {
+    if let Some((at, (px, py))) = press {
+        if at.elapsed() < Duration::from_secs(2) {
+            let near = (px - bounds.x).abs() < 120. && (py - bounds.y).abs() < 120.;
+            if !near {
+                return (
+                    SelBounds { x: px - 20., y: py, w: 20., h: 18. },
+                    "mouse",
+                );
+            }
+        }
     }
-    let (mx, my) = pointer;
-    let inside = mx >= bounds.x - 4.
-        && mx <= bounds.x + bounds.w + 4.
-        && my >= bounds.y - 4.
-        && my <= bounds.y + bounds.h + 4.;
-    if inside {
-        SelBounds { x: mx - 20., y: my, w: 20., h: 18. }
-    } else {
-        *bounds
-    }
+    (*bounds, if source == "element-frame" { "element-frame" } else { "ax" })
 }
 
 /// 纯函数自检：元素框退化时的锚点选择。
 /// 这是云之家那类「AX 很薄」的应用里图标飘走的根因所在，所以要能断言。
 fn anchor_selftest() {
-    let web_area = SelBounds { x: 0., y: 60., w: 1512., h: 800. };
-    let cases: [(&str, SelBounds, (f64, f64), bool); 4] = [
-        // 大元素框（整块 web 区）+ 鼠标在里面 → 贴鼠标（真实选区就在鼠标附近）
-        ("web 区 + 鼠标在内", web_area, (420., 838.), true),
-        // 鼠标在元素外（键盘选词）→ 用元素框，不乱猜
-        ("web 区 + 鼠标在外", web_area, (2000., 100.), false),
-        // AX 直接给了 range 矩形 → 原样使用，不做任何替换
+    let now = Instant::now();
+    // 云之家真实数据：元素框 x=386 y=149（被截断成 40x20），用户实际在 (420,838) 划词
+    let element_frame = SelBounds { x: 386., y: 149., w: 40., h: 20. };
+    let range_rect = SelBounds { x: 231., y: 173., w: 33., h: 13. };
+    let cases: [(&str, SelBounds, &str, Option<(Instant, (f64, f64))>, &str); 5] = [
+        // 云之家场景：元素框离鼠标 600+，信鼠标
         (
-            "range 矩形保持原样",
-            SelBounds { x: 231., y: 173., w: 33., h: 13. },
-            (100., 100.),
-            false,
+            "元素框 + 鼠标在别处（云之家）",
+            element_frame,
+            "element-frame",
+            Some((now, (420., 838.))),
+            "mouse",
         ),
-        // 小元素框（正好一行文本）+ 鼠标在内 → 也贴鼠标（更准）
-        ("单行元素框 + 鼠标在内", SelBounds { x: 231., y: 173., w: 33., h: 13. }, (240., 180.), true),
+        // 键盘选词（很久没按鼠标）→ 用元素框兜底
+        (
+            "元素框 + 无鼠标动作",
+            element_frame,
+            "element-frame",
+            Some((now - Duration::from_secs(30), (420., 838.))),
+            "element-frame",
+        ),
+        // 正常应用：AX 矩形就在鼠标位置附近 → 用 AX 的（更精确）
+        (
+            "range 矩形 + 鼠标就在附近",
+            range_rect,
+            "element",
+            Some((now, (240., 180.))),
+            "ax",
+        ),
+        // AX 矩形和刚按下的点差很远 → 判为可疑，信鼠标
+        (
+            "range 矩形 + 鼠标在别处",
+            range_rect,
+            "element",
+            Some((now, (900., 900.))),
+            "mouse",
+        ),
+        // 没有鼠标信息（例如启动后第一次键盘选词）→ 用 AX 矩形
+        ("range 矩形 + 无鼠标信息", range_rect, "element", None, "ax"),
     ];
     let mut ok = true;
-    for (name, b, pointer, expect_pointer) in cases {
-        let source = if name.starts_with("range") { "element" } else { "element-frame" };
-        let got = anchor_for(&b, source, pointer);
-        let moved = (got.x - b.x).abs() > 0.5 || (got.w - b.w).abs() > 0.5;
-        if moved != expect_pointer {
+    for (name, b, source, press, want) in cases {
+        let (_, got) = anchor_for(&b, source, press);
+        if got != want {
             ok = false;
-            eprintln!(
-                "[自检] 锚点判定失败：{} → 用了鼠标={}（期望 {}）",
-                name, moved, expect_pointer
-            );
+            eprintln!("[自检] 锚点判定失败：{} → {}（期望 {}）", name, got, want);
         }
     }
     eprintln!(
-        "[自检] 图标锚点 {} 例：{}（元素框退化时贴鼠标，range 矩形原样用）",
-        4,
+        "[自检] 图标锚点 {} 例：{}（ax=AX 矩形；mouse=刚按下的点；element-frame=元素框兜底）",
+        cases.len(),
         if ok { "全部通过" } else { "有失败" }
     );
 }
@@ -904,9 +932,20 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
         let mut last = String::new();
         let mut stable_since: Option<Instant> = None;
         let mut icon_shown = false;
+        // 最近一次「鼠标刚按下」的时间与位置：划词是鼠标动作，元素框兜底时用它当锚点
+        let mut last_press: Option<(Instant, (f64, f64))> = None;
+        let mut prev_buttons: i64 = 0;
         loop {
             std::thread::sleep(Duration::from_millis(50));
             ticks += 1;
+            // 采样鼠标按键：只在「空 → 按下」那一刻记录位置
+            {
+                let (_, _, buttons) = mouse::state();
+                if prev_buttons == 0 && buttons != 0 {
+                    last_press = Some((Instant::now(), mouse::position_topleft()));
+                }
+                prev_buttons = buttons;
+            }
             if !trusted {
                 // 未授权时不做无意义的 AX 轮询；每 2 秒复查一次授权状态
                 if ticks % 40 == 0 {
@@ -946,10 +985,10 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
                     } else if let Some(since) = stable_since {
                         if !icon_shown && since.elapsed() >= Duration::from_millis(300) {
                             if let Some(s) = sel.as_ref() {
-                                let b = anchor_for(&s.bounds, s.source, mouse::position_topleft());
+                                let (b, anchor) = anchor_for(&s.bounds, s.source, last_press);
                                 eprintln!(
-                                    "[beek] 选区矩形（来源={}）：x={:.0} y={:.0} w={:.0} h={:.0}",
-                                    s.source, b.x, b.y, b.w, b.h
+                                    "[beek] 选区矩形（来源={}，锚点={}）：x={:.0} y={:.0} w={:.0} h={:.0}",
+                                    s.source, anchor, b.x, b.y, b.w, b.h
                                 );
                                 let _ = tx.send(UiEvent::ShowIcon(b, last.clone()));
                                 icon_shown = true;
