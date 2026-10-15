@@ -937,3 +937,180 @@ pub unsafe fn ax_watch() {
         }
     }
 }
+
+
+// ---------- 菜单拷贝（参考 SelectedTextKit / Copi 的做法）----------
+//
+// 为什么不只是合成 ⌘C：Electron / Safari 这类应用经常收不到合成按键，
+// 但「按它自己的『拷贝』菜单项」是让**应用自己**执行拷贝 —— 走的是它的菜单体系，
+// 不依赖它是否响应合成键。实测这也是开机就稳定的那条路。
+
+unsafe fn identifier_of(el: AXUIElementRef) -> Option<String> {
+    let v = ax_get_attr(el, "AXIdentifier").ok()?;
+    cfstring_to_string(v)
+}
+
+unsafe fn children_of(el: AXUIElementRef) -> Vec<AXUIElementRef> {
+    let mut out = Vec::new();
+    if let Ok(children) = ax_get_attr(el, kAXChildrenAttribute) {
+        let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(children as _);
+        for i in 0..arr.len().min(60) {
+            out.push(*arr.get(i).unwrap() as AXUIElementRef);
+        }
+    }
+    out
+}
+
+/// 「拷贝」菜单项的多语言标题（取自 SelectedTextKit 的本地化表，取常见语言）
+const COPY_TITLES: &[&str] = &[
+    "Copy", "拷贝", "复制", "拷貝", "複製", "コピー", "복사", "Copier", "Copiar", "Copia",
+    "Kopieren", "Копировать", "Kopiëren", "Kopiera", "Kopioi", "Kopyala", "Salin", "Sao chép",
+    "Kopiuj", "Másolás", "Kopírovat", "Копирај", "העתק", "نسخ", "کپی",
+];
+
+/// 这个元素是不是「拷贝」菜单项？
+/// 两条匹配规则：identifier 恰好是动作 selector `copy:`，**或者**
+/// 标题在拷贝标题表里且快捷键字符是 C。
+/// 为什么需要第二条：AppKit 应用（如 Ghostty/TextEdit）的菜单项 identifier 是
+/// 自动生成的 `_NS:63` 这种，根本不叫 `copy:`（实测）。
+unsafe fn is_copy_item(el: AXUIElementRef) -> bool {
+    if identifier_of(el).map(|i| i == "copy:").unwrap_or(false) {
+        return true;
+    }
+    let title = match ax_get_attr(el, kAXTitleAttribute) {
+        Ok(v) => match cfstring_to_string(v) {
+            Some(t) => t,
+            None => return false,
+        },
+        Err(_) => return false,
+    };
+    if !COPY_TITLES.iter().any(|t| *t == title) {
+        return false;
+    }
+    // 有快捷键字符时必须就是 C（排除同名的其它项）；
+    // 但不少应用（实测 Ghostty）根本不暴露 cmdChar，所以「没有」也算通过。
+    match ax_get_attr(el, "AXMenuItemCmdChar")
+        .ok()
+        .and_then(|v| cfstring_to_string(v))
+    {
+        Some(c) => c.eq_ignore_ascii_case("C"),
+        None => true,
+    }
+}
+
+/// 深度优先找「拷贝」菜单项
+unsafe fn find_copy_item(el: AXUIElementRef, depth: u32, budget: &mut u32) -> Option<AXUIElementRef> {
+    if depth > 6 || *budget == 0 {
+        return None;
+    }
+    *budget -= 1;
+    if is_copy_item(el) {
+        return Some(el);
+    }
+    for child in children_of(el) {
+        if let Some(hit) = find_copy_item(child, depth + 1, budget) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+/// 在目标应用的菜单栏里找「拷贝」菜单项，返回 (菜单项, 是否可用)。
+/// 菜单顺序按 SelectedTextKit 的策略：先第 4 个（通常是「编辑」），再左右交替展开，
+/// 最后整棵菜单兜底 —— 这样既快又不依赖菜单标题的本地化文本。
+pub unsafe fn menu_copy_item(pid: i32) -> Option<(AXUIElementRef, bool)> {
+    let app = AXUIElementCreateApplication(pid);
+    AXUIElementSetMessagingTimeout(app, 0.5);
+    let menubar = ax_get_attr(app, kAXMenuBarAttribute).ok()? as AXUIElementRef;
+    let items = children_of(menubar);
+    if items.is_empty() {
+        return None;
+    }
+    let mut order: Vec<usize> = Vec::new();
+    let start = 3usize;
+    if items.len() > start {
+        order.push(start);
+        let mut offset = 1usize;
+        loop {
+            let mut pushed = false;
+            if start >= offset {
+                order.push(start - offset);
+                pushed = true;
+            }
+            if start + offset < items.len() {
+                order.push(start + offset);
+                pushed = true;
+            }
+            if !pushed {
+                break;
+            }
+            offset += 1;
+        }
+        for i in 0..items.len() {
+            if !order.contains(&i) {
+                order.push(i);
+            }
+        }
+    } else {
+        order.extend(0..items.len());
+    }
+    // 找不到时把菜单结构打出来（identifier / 标题 / cmd 字符），便于对齐匹配规则
+    let debug_menu = std::env::var("BEEK_MENU_DUMP").is_ok();
+    for idx in order {
+        let mut budget: u32 = 400;
+        if let Some(item) = find_copy_item(items[idx], 0, &mut budget) {
+            // 可用性：菜单项灰掉 = 当前没有可拷贝的内容（也就是没选中）
+            let enabled = ax_get_attr(item, kAXEnabledAttribute)
+                .ok()
+                .map(|v| {
+                    core_foundation::boolean::CFBoolean::wrap_under_get_rule(v as _)
+                        == core_foundation::boolean::CFBoolean::true_value()
+                })
+                .unwrap_or(true);
+            return Some((item, enabled));
+        }
+    }
+    if debug_menu {
+        for (i, bar_item) in items.iter().enumerate() {
+            eprintln!(
+                "[菜单] 菜单栏项 {}：title={:?} identifier={:?}",
+                i,
+                ax_get_attr(*bar_item, kAXTitleAttribute)
+                    .ok()
+                    .and_then(|v| cfstring_to_string(v)),
+                identifier_of(*bar_item)
+            );
+        }
+        for (i, bar_item) in items.iter().enumerate() {
+            let subs = children_of(*bar_item);
+            for sub in subs {
+                let entries = children_of(sub);
+                if entries.is_empty() {
+                    continue;
+                }
+                eprintln!("[菜单] 菜单栏项 {} 下的菜单（{} 项）：", i, entries.len());
+                for (k, e) in entries.iter().enumerate().take(24) {
+                    eprintln!(
+                        "[菜单]   {}: title={:?} cmdChar={:?} identifier={:?} role={}",
+                        k,
+                        ax_get_attr(*e, kAXTitleAttribute)
+                            .ok()
+                            .and_then(|v| cfstring_to_string(v)),
+                        ax_get_attr(*e, "AXMenuItemCmdChar")
+                            .ok()
+                            .and_then(|v| cfstring_to_string(v)),
+                        identifier_of(*e),
+                        get_role(*e).unwrap_or_default()
+                    );
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 对元素执行 AXPress（等于用户点了它）
+pub unsafe fn press(el: AXUIElementRef) -> bool {
+    let action = CFString::new("AXPress");
+    AXUIElementPerformAction(el, action.as_concrete_TypeRef()) == 0
+}

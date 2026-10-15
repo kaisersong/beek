@@ -1,5 +1,6 @@
 // BeeK v1.0 — GPUI 重写版
 // 选中文本 → 小蜜蜂图标 → 点击翻译 → 弹窗显示（流式增量）
+mod appcopy;
 mod ax;
 mod clipboard;
 mod config;
@@ -1182,7 +1183,35 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
                             "[beek] 取词：AX 没有返回选区（{}；{}；鼠标刚在 ({:.0}, {:.0}) 划过）",
                             who, at, px, py
                         );
-                        if config::load().clipboard_fallback {
+                        // 先走「让应用自己交出来」：AppleScript（浏览器）+ 按它的「拷贝」菜单项。
+                        // 这是 SelectedTextKit/Easydict 的主路线，比合成按键可靠得多。
+                        let mut got: Option<String> = None;
+                        // 应用明确说「没选中」时，就别再去合成 ⌘C 了 —— 那是权威答案
+                        let mut app_says_no_selection = false;
+                        {
+                            let pid = appcopy::frontmost_pid();
+                            if let Some(pid) = pid {
+                                let bid = appcopy::frontmost_bundle_id();
+                                match appcopy::selected_text_via_app(pid, &bid) {
+                                    appcopy::Outcome::Copied(t) => got = Some(t),
+                                    appcopy::Outcome::NoSelection => {
+                                        app_says_no_selection = true;
+                                        eprintln!("[beek] 取词：应用说没有可拷贝的内容（没选中），不弹按钮");
+                                    }
+                                    appcopy::Outcome::Unavailable => {}
+                                }
+                            }
+                        }
+                        if let Some(text) = got {
+                            let b = anchor_at(px, py);
+                            let rect = icon_rect_for(&b);
+                            clip_selection = Some((text.clone(), b, rect, Instant::now()));
+                            sel = Some(ax::Selection {
+                                text,
+                                bounds: b,
+                                source: "app-copy",
+                            });
+                        } else if !app_says_no_selection && config::load().clipboard_fallback {
                             match clipboard::copy_selection() {
                                 Some(text) => {
                                     eprintln!(
@@ -1631,6 +1660,23 @@ fn main() {
         // 在用户划词的**那一刻**报告 AX 现场 —— 这样采集到的证据才是有效的
         // （从终端里跑普通探针时目标应用不是活动应用，它不会报选区）
         unsafe { ax::ax_watch() };
+        return;
+    }
+    if std::env::var("BEEK_APPCOPY_SELFTEST").is_ok() {
+        // 直接验证「让应用自己交选区」这两条路（AppleScript / 菜单拷贝）。
+        // 用法：先在目标应用里选好文字、让它保持前台，再跑这个。
+        let pid = appcopy::frontmost_pid().unwrap_or(0);
+        let bid = appcopy::frontmost_bundle_id();
+        eprintln!("[自检] 前台 pid={} bundle={:?}", pid, bid);
+        match appcopy::selected_text_via_app(pid, &bid) {
+            appcopy::Outcome::Copied(t) => eprintln!(
+                "[自检] 拿到文本：{:?}（{} 字符）→ 通过",
+                t.chars().take(40).collect::<String>(),
+                t.chars().count()
+            ),
+            appcopy::Outcome::NoSelection => eprintln!("[自检] 应用说没选中（拷贝菜单项是灰的）"),
+            appcopy::Outcome::Unavailable => eprintln!("[自检] 两条路都走不通"),
+        }
         return;
     }
     if std::env::var("BEEK_CLIP_SELFTEST").is_ok() {
