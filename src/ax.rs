@@ -845,3 +845,95 @@ pub unsafe fn ax_probe() {
         eprintln!("[探针] 该窗口：访问 {} 个节点，{} 个有选区", visited, hits);
     }
 }
+
+/// 监听模式（BEEK_AX_WATCH=1）：装 CGEventTap，在用户划词的**那一刻**报告 AX 现场。
+///
+/// 为什么需要它：从终端里跑一次探针得到的结论是无效的 —— 那时目标应用不是活动应用，
+/// 它不会报选区。这个模式在用户真正操作（目标应用处于活动状态）的瞬间采集证据。
+pub unsafe fn ax_watch() {
+    eprintln!("[监听] 辅助功能权限：{}", AXIsProcessTrusted());
+    if !crate::eventtap::spawn_listener() {
+        eprintln!("[监听] 事件监听没装上，退出");
+        return;
+    }
+    eprintln!("[监听] 请在目标应用里划一次词（双击 / 拖选 / 键盘选都行），我在那一刻报告现场…");
+    let mut seen_seq = 0u64;
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let Some((seq, kind, x, y, _at)) = crate::eventtap::last_event() else {
+            continue;
+        };
+        if seq == seen_seq {
+            continue;
+        }
+        seen_seq = seq;
+        // 只在「鼠标抬起 / 键盘抬起」那一刻看：那时选区刚形成
+        let interesting =
+            kind == crate::eventtap::EV_LEFT_MOUSE_UP || kind == crate::eventtap::EV_KEY_UP;
+        if !interesting {
+            continue;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        let sys = AXUIElementCreateSystemWide();
+        AXUIElementSetMessagingTimeout(sys, 0.5);
+        let app = ax_get_attr(sys, kAXFocusedApplicationAttribute)
+            .ok()
+            .map(|a| a as AXUIElementRef);
+        let who = app
+            .map(|a| el_string(a, kAXTitleAttribute))
+            .unwrap_or_else(|| "?".to_string());
+        let pid = app.and_then(|a| {
+            let mut p: i32 = 0;
+            if AXUIElementGetPid(a, &mut p) == 0 && p > 0 {
+                Some(p)
+            } else {
+                None
+            }
+        });
+        eprintln!(
+            "[监听] {} event：坐标 ({:.0},{:.0}) app={:?} pid={:?}",
+            if kind == crate::eventtap::EV_KEY_UP { "键盘抬起" } else { "鼠标抬起" },
+            x,
+            y,
+            who,
+            pid
+        );
+        if let Some(p) = pid {
+            enable_ax_tree(p);
+        }
+        if let Some(el) = element_at_position(x, y) {
+            eprintln!(
+                "[监听]   坐标处：role={} frame={} 选区={:?}",
+                get_role(el).unwrap_or_else(|| "?".to_string()),
+                el_frame(el),
+                el_selection_desc(el).unwrap_or_else(|| "无".to_string())
+            );
+            let mut cur = el;
+            for level in 0..4 {
+                match ax_get_attr(cur, kAXParentAttribute) {
+                    Ok(pp) => {
+                        cur = pp as AXUIElementRef;
+                        eprintln!(
+                            "[监听]     父层 {}：role={} frame={} 选区={:?}",
+                            level + 1,
+                            get_role(cur).unwrap_or_else(|| "?".to_string()),
+                            el_frame(cur),
+                            el_selection_desc(cur).unwrap_or_else(|| "无".to_string())
+                        );
+                    }
+                    Err(_) => break,
+                }
+            }
+        } else {
+            eprintln!("[监听]   坐标处取不到元素");
+        }
+        match ax_selection(true, Some((x, y))) {
+            Some(s) => eprintln!(
+                "[监听]   ax_selection() = Some(来源={} 文本={:?})",
+                s.source,
+                s.text.chars().take(20).collect::<String>()
+            ),
+            None => eprintln!("[监听]   ax_selection() = None"),
+        }
+    }
+}

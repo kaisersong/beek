@@ -3,6 +3,7 @@
 mod ax;
 mod clipboard;
 mod config;
+mod eventtap;
 mod dialogs;
 mod icons;
 mod menubar;
@@ -1623,6 +1624,13 @@ fn main() {
     if std::env::var("BEEK_AX_PROBE").is_ok() {
         // 诊断模式：把一个应用的 AX 选区情况打出来，不开窗口
         unsafe { ax::ax_probe() };
+        return;
+    }
+    if std::env::var("BEEK_AX_WATCH").is_ok() {
+        // 监听模式：装全局事件 tap（照豆包的做法用 CGEventTap），
+        // 在用户划词的**那一刻**报告 AX 现场 —— 这样采集到的证据才是有效的
+        // （从终端里跑普通探针时目标应用不是活动应用，它不会报选区）
+        unsafe { ax::ax_watch() };
         return;
     }
     if std::env::var("BEEK_CLIP_SELFTEST").is_ok() {
