@@ -9,7 +9,7 @@ mod mouse;
 mod translate;
 mod update;
 
-use ax::{ax_selected_text, ax_selection_bounds, is_url, SelBounds};
+use ax::{ax_selection, is_url, SelBounds};
 use gpui::*;
 use icons::IconKind;
 use std::sync::mpsc;
@@ -837,6 +837,64 @@ fn sync_popup_geometry(
     out
 }
 
+/// 图标锚点。AX 直接给出的 range 矩形直接用；只有退化成「元素框」时才另做判断：
+/// 元素框可能很大（整块文档区），把图标放在它的左上角同样会离选区很远。
+/// 这时如果鼠标还在元素框里，说明用户刚用鼠标选的词 —— 用鼠标位置当锚点最接近真相。
+fn anchor_for(bounds: &SelBounds, source: &str, pointer: (f64, f64)) -> SelBounds {
+    if source != "element-frame" {
+        return *bounds;
+    }
+    let (mx, my) = pointer;
+    let inside = mx >= bounds.x - 4.
+        && mx <= bounds.x + bounds.w + 4.
+        && my >= bounds.y - 4.
+        && my <= bounds.y + bounds.h + 4.;
+    if inside {
+        SelBounds { x: mx - 20., y: my, w: 20., h: 18. }
+    } else {
+        *bounds
+    }
+}
+
+/// 纯函数自检：元素框退化时的锚点选择。
+/// 这是云之家那类「AX 很薄」的应用里图标飘走的根因所在，所以要能断言。
+fn anchor_selftest() {
+    let web_area = SelBounds { x: 0., y: 60., w: 1512., h: 800. };
+    let cases: [(&str, SelBounds, (f64, f64), bool); 4] = [
+        // 大元素框（整块 web 区）+ 鼠标在里面 → 贴鼠标（真实选区就在鼠标附近）
+        ("web 区 + 鼠标在内", web_area, (420., 838.), true),
+        // 鼠标在元素外（键盘选词）→ 用元素框，不乱猜
+        ("web 区 + 鼠标在外", web_area, (2000., 100.), false),
+        // AX 直接给了 range 矩形 → 原样使用，不做任何替换
+        (
+            "range 矩形保持原样",
+            SelBounds { x: 231., y: 173., w: 33., h: 13. },
+            (100., 100.),
+            false,
+        ),
+        // 小元素框（正好一行文本）+ 鼠标在内 → 也贴鼠标（更准）
+        ("单行元素框 + 鼠标在内", SelBounds { x: 231., y: 173., w: 33., h: 13. }, (240., 180.), true),
+    ];
+    let mut ok = true;
+    for (name, b, pointer, expect_pointer) in cases {
+        let source = if name.starts_with("range") { "element" } else { "element-frame" };
+        let got = anchor_for(&b, source, pointer);
+        let moved = (got.x - b.x).abs() > 0.5 || (got.w - b.w).abs() > 0.5;
+        if moved != expect_pointer {
+            ok = false;
+            eprintln!(
+                "[自检] 锚点判定失败：{} → 用了鼠标={}（期望 {}）",
+                name, moved, expect_pointer
+            );
+        }
+    }
+    eprintln!(
+        "[自检] 图标锚点 {} 例：{}（元素框退化时贴鼠标，range 矩形原样用）",
+        4,
+        if ok { "全部通过" } else { "有失败" }
+    );
+}
+
 // ---------- AX 监控后台线程 ----------
 fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
     std::thread::spawn(move || {
@@ -861,7 +919,10 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
                 }
                 continue;
             }
-            let cur = unsafe { ax_selected_text() };
+            // 文本和矩形必须来自同一个元素（见 ax::ax_selection 的注释），
+            // 否则会出现「译文对、图标飘到别处」——云之家这类 AX 树很薄的应用上实测过
+            let sel = unsafe { ax_selection() };
+            let cur = sel.as_ref().map(|s| s.text.clone());
             match cur {
                 Some(t) if is_url(&t) => {
                     if icon_shown {
@@ -884,18 +945,14 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
                         }
                     } else if let Some(since) = stable_since {
                         if !icon_shown && since.elapsed() >= Duration::from_millis(300) {
-                            if let Some(b) = unsafe { ax_selection_bounds() } {
+                            if let Some(s) = sel.as_ref() {
+                                let b = anchor_for(&s.bounds, s.source, mouse::position_topleft());
+                                eprintln!(
+                                    "[beek] 选区矩形（来源={}）：x={:.0} y={:.0} w={:.0} h={:.0}",
+                                    s.source, b.x, b.y, b.w, b.h
+                                );
                                 let _ = tx.send(UiEvent::ShowIcon(b, last.clone()));
-                                if debug {
-                                    eprintln!("[beek] 选区矩形(屏幕左上原点): x={} y={} w={} h={}", b.x, b.y, b.w, b.h);
-                                }
                                 icon_shown = true;
-                                stable_since = None;
-                            } else if since.elapsed() >= Duration::from_millis(3000) {
-                                // 3 秒都取不到矩形就不再重试，避免每个 tick 反复查 AX
-                                if debug {
-                                    eprintln!("[beek] 选区矩形取不到，跳过本次选区：{:?}", last);
-                                }
                                 stable_since = None;
                             }
                         }
@@ -918,6 +975,7 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
 /// 不需要辅助功能权限、不需要图形界面，直接量接口耗时。
 /// 用来验证「关思维链 + 流式」到底把等待时间压到了多少。
 fn translate_selftest() {
+    anchor_selftest();
     const SAMPLE: &str = "The quick brown fox jumps over the lazy dog. This sentence is long enough to show how fast the first characters arrive.";
     eprintln!("[自检] 文本 {} 字符", SAMPLE.chars().count());
 
@@ -1301,6 +1359,24 @@ fn main() {
                             popup_geom = None;
                             if icon_win.is_none() {
                                 icon_win = open_icon_window(cx, b, text, tx.clone());
+                                // 记下窗口真实的 frame：算出来的位置和系统实际摆放的位置
+                                // 可能不一致（比如被 AppKit 挪走），排查「图标飘走」时要能分辨
+                                if let Some(w) = icon_win.as_ref() {
+                                    if let Ok(actual) = w.update(cx, |_v, window, _cx| {
+                                        let bo = window.bounds();
+                                        (
+                                            f32::from(bo.origin.x),
+                                            f32::from(bo.origin.y),
+                                            f32::from(bo.size.width),
+                                            f32::from(bo.size.height),
+                                        )
+                                    }) {
+                                        eprintln!(
+                                            "[beek] 图标窗口实际 frame：({:.0}, {:.0}) {:.0}x{:.0}",
+                                            actual.0, actual.1, actual.2, actual.3
+                                        );
+                                    }
+                                }
                             }
                         }
                         UiEvent::HideIcon => {

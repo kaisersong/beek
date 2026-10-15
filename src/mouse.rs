@@ -7,8 +7,32 @@
 // 「拖动弹窗」为什么也走这里：gpui 0.2.2 在 macOS 上没有任何移动窗口的 API
 // （Div::window_control_area 在 mac 平台上是空实现），所以拖动只能自己算偏移、
 // 再对 AppKit 的 NSPanel 调 setFrameTopLeftPoint（见 menubar::popup_window_move）。
+use cocoa::base::{id, nil};
 use cocoa::foundation::NSPoint;
 use objc::{class, msg_send, sel, sel_impl};
+
+/// 主屏高度（Cocoa 点）。用来把鼠标的 Cocoa 坐标（左下原点）翻成
+/// 与 AX / GPUI 一致的「左上原点、y 向下」坐标系。
+pub fn screen_height() -> f64 {
+    unsafe {
+        let screen: id = msg_send![class!(NSScreen), mainScreen];
+        if screen == nil {
+            return 0.0;
+        }
+        let frame: cocoa::foundation::NSRect = msg_send![screen, frame];
+        frame.size.height
+    }
+}
+
+/// 鼠标位置，屏幕左上原点、y 向下（与 AX 选区矩形同一坐标系）
+pub fn position_topleft() -> (f64, f64) {
+    let (x, y, _) = state();
+    let h = screen_height();
+    if h <= 0.0 {
+        return (x, y);
+    }
+    (x, h - y)
+}
 
 /// 返回 (x, y, 按下的按键掩码)。
 /// x/y 是 Cocoa 屏幕坐标（主屏左下角为原点、y 向上），与 GPUI 的左上原点坐标系相差一次 y 翻转。
