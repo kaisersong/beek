@@ -402,13 +402,35 @@ pub unsafe fn ax_selection(deep: bool, point: Option<(f64, f64)>) -> Option<Sele
         }
     }
     if candidates.is_empty() && deep {
-        if let Some(win) = win {
+        // 先焦点窗口，再（找不到时）该应用的其它窗口：
+        // Safari / Muse 这类应用可能开了多个窗口或标签页，选区不一定在焦点窗口里
+        let mut windows: Vec<AXUIElementRef> = Vec::new();
+        if let Some(w) = win {
+            windows.push(w);
+        }
+        if let Ok(ws) = ax_get_attr(app, kAXWindowsAttribute) {
+            let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(ws as _);
+            for i in 0..arr.len().min(6) {
+                let w = *arr.get(i).unwrap() as AXUIElementRef;
+                if Some(w) != win {
+                    windows.push(w);
+                }
+            }
+        }
+        for (idx, w) in windows.iter().enumerate() {
             let mut budget: u32 = 800;
-            record(search_tree(win, 0, &mut budget, true), &mut candidates, &mut text_only);
+            record(search_tree(*w, 0, &mut budget, true), &mut candidates, &mut text_only);
             if candidates.is_empty() {
                 let mut budget: u32 = 800;
-                record(search_tree(win, 0, &mut budget, false), &mut candidates, &mut text_only);
+                record(search_tree(*w, 0, &mut budget, false), &mut candidates, &mut text_only);
             }
+            if !candidates.is_empty() {
+                eprintln!("[beek] 取词：选区在第 {} 个窗口里找到（共扫 {} 个）", idx + 1, windows.len());
+                break;
+            }
+        }
+        if candidates.is_empty() && deep {
+            eprintln!("[beek] 取词：扫了 {} 个窗口都没有 AX 选区", windows.len());
         }
     }
 
@@ -654,6 +676,39 @@ pub unsafe fn ax_probe() {
         );
     } else {
         eprintln!("[探针] 系统级焦点 app 取不到");
+    }
+    // 鼠标位置的元素（豆包那条路）：用户保持选中时跑探针，就能看出这条路通不通
+    {
+        let (mx, my) = crate::mouse::position_topleft();
+        if let Some(el) = element_at_position(mx, my) {
+            eprintln!(
+                "[探针] 鼠标位置 ({:.0},{:.0}) 的元素：role={} frame={} 选区={:?}",
+                mx,
+                my,
+                get_role(el).unwrap_or_else(|| "?".to_string()),
+                el_frame(el),
+                el_selection_desc(el).unwrap_or_else(|| "无".to_string())
+            );
+            // 往上找 3 层，看有没有哪一层带选区
+            let mut cur = el;
+            for level in 0..3 {
+                match ax_get_attr(cur, kAXParentAttribute) {
+                    Ok(p) => {
+                        cur = p as AXUIElementRef;
+                        eprintln!(
+                            "[探针]   父层 {}：role={} frame={} 选区={:?}",
+                            level + 1,
+                            get_role(cur).unwrap_or_else(|| "?".to_string()),
+                            el_frame(cur),
+                            el_selection_desc(cur).unwrap_or_else(|| "无".to_string())
+                        );
+                    }
+                    Err(_) => break,
+                }
+            }
+        } else {
+            eprintln!("[探针] 鼠标位置取不到元素");
+        }
     }
     match ax_selection(true, None) {
         Some(s) => eprintln!(
