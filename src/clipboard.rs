@@ -20,6 +20,9 @@ extern "C" {
         -> *mut std::ffi::c_void;
     fn CGEventSetFlags(event: *mut std::ffi::c_void, flags: u64);
     fn CGEventPost(tap: u32, event: *mut std::ffi::c_void);
+    /// 直接把事件投给某个进程：Electron 类应用（Muse、Grok Bot）常常收不到
+    /// HID 层投递的按键，但对「投给自己进程」的事件会正常处理
+    fn CGEventPostToPid(pid: i32, event: *mut std::ffi::c_void);
     fn CFRelease(cf: *const std::ffi::c_void);
 }
 
@@ -65,8 +68,24 @@ fn nsstr(s: &str) -> id {
     unsafe { NSString::alloc(nil).init_str(s) }
 }
 
-/// 给当前前台应用发一次 ⌘C
-pub fn send_copy() {
+/// 当前前台应用的 pid（给 CGEventPostToPid 用）
+pub fn frontmost_pid() -> Option<i32> {
+    unsafe {
+        let ws: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let app: id = msg_send![ws, frontmostApplication];
+        if app == nil {
+            return None;
+        }
+        let pid: i32 = msg_send![app, processIdentifier];
+        if pid <= 0 {
+            None
+        } else {
+            Some(pid)
+        }
+    }
+}
+
+fn post_copy(target: Option<i32>) {
     unsafe {
         for down in [true, false] {
             let ev = CGEventCreateKeyboardEvent(std::ptr::null(), KEY_C, down);
@@ -74,11 +93,33 @@ pub fn send_copy() {
                 continue;
             }
             CGEventSetFlags(ev, FLAG_COMMAND);
-            CGEventPost(HID_TAP, ev);
+            match target {
+                // 投给指定进程：Electron 类应用更认这条
+                Some(pid) => CGEventPostToPid(pid, ev),
+                None => CGEventPost(HID_TAP, ev),
+            }
             CFRelease(ev as *const std::ffi::c_void);
             std::thread::sleep(std::time::Duration::from_millis(15));
         }
     }
+}
+
+/// 给当前前台应用发一次 ⌘C（HID 层，等于用户真的按了）
+pub fn send_copy() {
+    post_copy(None);
+}
+
+/// 等剪贴板变化（复制是异步写盘的，Safari 这种可能要几百毫秒）
+fn wait_change(before: i64, budget_ms: u64) -> bool {
+    let mut waited = 0;
+    while waited < budget_ms {
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        waited += 40;
+        if change_count() != before {
+            return true;
+        }
+    }
+    false
 }
 
 /// 剪贴板整体快照（所有条目 × 所有类型，连图片/文件一起）。
@@ -185,11 +226,19 @@ fn change_count() -> i64 {
 pub fn copy_selection() -> Option<String> {
     let before_items = snapshot();
     let before_count = change_count();
+    // 第一发：HID 层（绝大多数应用够用）
     send_copy();
-    // 给应用一点时间写剪贴板
-    std::thread::sleep(std::time::Duration::from_millis(120));
-    if change_count() == before_count {
-        return None; // 没变 → 不动剪贴板
+    let mut changed = wait_change(before_count, 240);
+    if !changed {
+        // 第二发：直接投给前台进程（Electron 类应用往往只认这条）
+        if let Some(pid) = frontmost_pid() {
+            eprintln!("[beek] 取词：HID 层的 ⌘C 没反应，改为直接投递给 pid {}", pid);
+            post_copy(Some(pid));
+            changed = wait_change(before_count, 560);
+        }
+    }
+    if !changed {
+        return None; // 还是没变 → 不动剪贴板
     }
     // 变了 → 先把文本读出来，然后无论文本有没有，都把剪贴板整体还原
     let text = read_string();
@@ -245,4 +294,18 @@ pub fn selftest() {
         original,
         if back == original { "通过" } else { "失败" }
     );
+    // 端到端验一次「模拟 ⌘C 取选中文本」：先在某个应用里选好文字再跑这个自检。
+    eprintln!(
+        "[自检] 前台进程 pid={:?}，开始走两段式 ⌘C…",
+        frontmost_pid()
+    );
+    match copy_selection() {
+        Some(t) => eprintln!(
+            "[自检] 两段式 ⌘C 取到：{:?}（{} 字符）→ 通过",
+            t.chars().take(30).collect::<String>(),
+            t.chars().count()
+        ),
+        None => eprintln!("[自检] 两段式 ⌘C 没取到内容（当时可能没有选中文字）"),
+    }
+    eprintln!("[自检] 结束，剪贴板内容：{:?}", read_string());
 }
