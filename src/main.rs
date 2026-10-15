@@ -1662,6 +1662,56 @@ fn main() {
         unsafe { ax::ax_watch() };
         return;
     }
+    if std::env::var("BEEK_UPDATE_CHECK").is_ok() {
+        // 只查一次更新并打印结果（不需要点菜单，便于验证）
+        match update::check() {
+            Ok(Some(rel)) => {
+                eprintln!(
+                    "[自检] 远端最新 {}（资产 {}），当前 v{}，有新版本={}",
+                    rel.tag,
+                    rel.asset_url.as_deref().unwrap_or("无"),
+                    update::CURRENT_VERSION,
+                    update::is_newer(&rel.version, update::CURRENT_VERSION)
+                );
+                eprintln!("[自检] 版本说明前 3 行：");
+                for line in rel.notes.lines().take(3) {
+                    eprintln!("[自检]   {}", line);
+                }
+            }
+            Ok(None) => eprintln!("[自检] 远端还没有 release"),
+            Err(e) => eprintln!("[自检] 检查更新失败：{}", e),
+        }
+        return;
+    }
+    if std::env::var("BEEK_UPDATE_APPLY").is_ok() {
+        // 全流程：查更新 → 下载 → 解压 → 生成替换脚本 → 启动脚本 → 退出自己。
+        // 用来端到端验证「自动更新」这条路（正常用户是点菜单里的「下载并更新」）。
+        match update::check() {
+            Ok(Some(rel)) if update::is_newer(&rel.version, update::CURRENT_VERSION) => {
+                eprintln!("[自检] 发现新版本 {}，开始下载…", rel.tag);
+                match update::prepare(&rel) {
+                    Ok(new_app) => match update::install_script(&new_app, &rel.version) {
+                        Ok(script) => {
+                            eprintln!("[自检] 替换脚本：{}", script.display());
+                            match update::run_script(&script) {
+                                Ok(_) => {
+                                    eprintln!("[自检] 脚本已启动，本进程退出，等待被替换");
+                                    std::process::exit(0);
+                                }
+                                Err(e) => eprintln!("[自检] 启动替换脚本失败：{}", e),
+                            }
+                        }
+                        Err(e) => eprintln!("[自检] 生成替换脚本失败：{}", e),
+                    },
+                    Err(e) => eprintln!("[自检] 下载/解压失败：{}", e),
+                }
+            }
+            Ok(Some(rel)) => eprintln!("[自检] 已是最新（远端 {}）", rel.tag),
+            Ok(None) => eprintln!("[自检] 远端还没有 release"),
+            Err(e) => eprintln!("[自检] 检查更新失败：{}", e),
+        }
+        return;
+    }
     if std::env::var("BEEK_APPCOPY_SELFTEST").is_ok() {
         // 直接验证「让应用自己交选区」这两条路（AppleScript / 菜单拷贝）。
         // 用法：先在目标应用里选好文字、让它保持前台，再跑这个。

@@ -98,9 +98,17 @@ fn href_after(hay: &str, anchor: &str) -> Option<String> {
 
 /// 把 release 说明里的 HTML 粗粗转成纯文本（GitHub 的 atom 里 content 是 HTML）
 fn strip_html(html: &str) -> String {
+    // 必须先反转义、再删标签：atom 里的正文是**转义过的 HTML**（&lt;h2&gt;…），
+    // 先删标签的话删不到，反转义后标签就露出来了（实测踩过）
+    let unescaped = html
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'");
     let mut out = String::new();
     let mut in_tag = false;
-    for c in html.chars() {
+    for c in unescaped.chars() {
         match c {
             '<' => in_tag = true,
             '>' => in_tag = false,
@@ -108,11 +116,7 @@ fn strip_html(html: &str) -> String {
             _ => {}
         }
     }
-    out.replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
+    out
         .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
@@ -159,8 +163,18 @@ pub fn check() -> Result<Option<Release>, String> {
         };
         rest = &tail[entry.len().min(tail.len())..];
 
-        let tag = match between(entry, "<title>", "</title>") {
-            Some(t) => t.trim().to_string(),
+        // 版本号要从 link 里的 tag 取：GitHub 的 atom 里 <title> 是**发布标题**
+        // （我们发布时写的是 "BeeK v1.0.0"），不是 tag。实测踩过这个坑：
+        // 拿标题当版本号会解析失败，于是整条 release 被当成「无法识别的 tag」跳过。
+        let page_url = href_after(entry, "rel=\"alternate\"").unwrap_or_default();
+        let tag = page_url
+            .split("/releases/tag/")
+            .nth(1)
+            .map(|t| t.trim_matches('/').to_string())
+            .filter(|t| !t.is_empty())
+            .or_else(|| between(entry, "<title>", "</title>").map(|t| t.trim().to_string()));
+        let tag = match tag {
+            Some(t) => t,
             None => continue,
         };
         let version = tag.trim_start_matches(['v', 'V']).to_string();
@@ -169,8 +183,11 @@ pub fn check() -> Result<Option<Release>, String> {
             eprintln!("[beek] 跳过预发布/无法识别的 tag：{}", tag);
             continue;
         }
-        let page_url = href_after(entry, "rel=\"alternate\"")
-            .unwrap_or_else(|| format!("{}/{}", RELEASES_URL, tag));
+        let page_url = if page_url.is_empty() {
+            format!("{}/{}", RELEASES_URL, tag)
+        } else {
+            page_url
+        };
         let notes = between(entry, "<content type=\"html\">", "</content>")
             .map(|c| strip_html(&c))
             .unwrap_or_default();
