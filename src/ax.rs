@@ -179,6 +179,27 @@ unsafe fn node_hit(el: AXUIElementRef, base: &'static str, want_webarea: bool) -
     Some(Hit { text, bounds, source })
 }
 
+/// 树里有没有 AXWebArea（用来区分「这个应用压根不用 WebArea」和「有 WebArea 但没选中文本」）
+unsafe fn has_webarea(el: AXUIElementRef, depth: u32, budget: &mut u32) -> bool {
+    if depth > 8 || *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
+    if get_role(el).map(|r| r == "AXWebArea").unwrap_or(false) {
+        return true;
+    }
+    if let Ok(children) = ax_get_attr(el, kAXChildrenAttribute) {
+        let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(children as _);
+        for i in 0..arr.len().min(50) {
+            let child = *arr.get(i).unwrap() as AXUIElementRef;
+            if has_webarea(child, depth + 1, budget) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// 子树搜索。`want_webarea` = 只认 AXWebArea（Safari / Chromium 的选区挂在那里）。
 unsafe fn search_tree(
     el: AXUIElementRef,
@@ -296,6 +317,15 @@ pub unsafe fn ax_selection() -> Option<Selection> {
                             .unwrap_or(SelBounds { x: 0., y: 0., w: 0., h: 0. }),
                         source: "no-rect",
                     });
+                }
+            }
+            if let Some(win) = win {
+                let mut budget: u32 = 800;
+                if has_webarea(win, 0, &mut budget) {
+                    eprintln!(
+                        "[beek] 取词：焦点窗口里有 AXWebArea，但它没有任何选中文本 \
+                         → 该应用这次没有把选区暴露给 AX"
+                    );
                 }
             }
             None

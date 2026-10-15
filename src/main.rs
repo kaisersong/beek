@@ -846,35 +846,40 @@ fn sync_popup_geometry(
 ///   容器自己的矩形（或退化成元素框的左上角）离真正的选区几百像素，
 ///   而鼠标按下的那个点就是用户实际选中的地方（实测：选区在 y≈800，容器却在 y≈150）
 /// - 没有鼠标动作（键盘选词）→ 用 AX 矩形；矩形退化时用元素框兜底
+/// 把「某个点」变成图标锚点：以它为中心、宽=一个图标、高=一行，并整体上移一行。
+/// 图标是按「右边缘对齐锚点 + 上方留 POPUP_GAP」摆放的，所以图标最终落在该点所在**那一行的上方**。
+/// 若只上移 POPUP_GAP，而点位落在行中间，图标就会压住选中那行（Chrome 实测过）。
+fn anchor_at(px: f64, py: f64) -> SelBounds {
+    const LINE_PT: f64 = 18.;
+    SelBounds {
+        x: px - ICON_SIZE as f64 / 2.,
+        y: py - LINE_PT,
+        w: ICON_SIZE as f64,
+        h: LINE_PT,
+    }
+}
+
+/// 图标锚点。只有「元素自己给出的 range 矩形」完全可信；其余（元素框 / 拿不到矩形 / 窗口占位）
+/// 都要靠鼠标来定位，按可靠性依次取：
+///   1. 刚按下的点（最准；但双击的按下/抬起只隔几十毫秒，50ms 轮询可能漏掉）
+///   2. **决定弹按钮这一刻的鼠标位置**（用户刚选完词，指针基本还在选区上；兜住上面漏掉的情况）
+/// 都没有才退回 AX 给的那个不可信矩形（会落在元素左上角，也就是之前「图标飘到角落」的现象）。
 fn anchor_for(
     bounds: &SelBounds,
     source: &str,
     press: Option<(Instant, (f64, f64))>,
+    pointer: (f64, f64),
 ) -> (SelBounds, &'static str) {
-    if let Some((at, (px, py))) = press {
-        if at.elapsed() < Duration::from_secs(2) {
-            let near = (px - bounds.x).abs() < 120. && (py - bounds.y).abs() < 120.;
-            if !near {
-                // 锚点做成「以鼠标为中心、宽=一个图标、高=一行的矩形，并整体上移一行」：
-                // 图标是按「右边缘对齐锚点 + 上方留 POPUP_GAP」摆放的，
-                // 这样算下来图标居中落在鼠标所在**那一行的上方**。
-                // 若只上移 POPUP_GAP，而鼠标点在行中间，图标就会压住选中那行（Chrome 实测过）。
-                const LINE_PT: f64 = 18.;
-                return (
-                    SelBounds {
-                        x: px - ICON_SIZE as f64 / 2.,
-                        y: py - LINE_PT,
-                        w: ICON_SIZE as f64,
-                        h: LINE_PT,
-                    },
-                    "mouse",
-                );
-            }
+    let trusted = matches!(source, "element" | "parent" | "tree" | "webarea");
+    let far = |p: (f64, f64)| (p.0 - bounds.x).abs() >= 120. || (p.1 - bounds.y).abs() >= 120.;
+    if let Some((at, p)) = press {
+        if at.elapsed() < Duration::from_secs(3) && far(p) {
+            return (anchor_at(p.0, p.1), "mouse");
         }
     }
-    // 只有「元素自己给出的 range 矩形」才完全可信；其余（元素框、拿不到矩形、窗口占位）
-    // 都交给上面的鼠标锚点逻辑兜底
-    let trusted = matches!(source, "element" | "parent" | "tree" | "webarea");
+    if !trusted && far(pointer) {
+        return (anchor_at(pointer.0, pointer.1), "pointer");
+    }
     (*bounds, if trusted { "ax" } else { "soft" })
 }
 
@@ -885,22 +890,25 @@ fn anchor_selftest() {
     // 云之家真实数据：元素框 x=386 y=149（被截断成 40x20），用户实际在 (420,838) 划词
     let element_frame = SelBounds { x: 386., y: 149., w: 40., h: 20. };
     let range_rect = SelBounds { x: 231., y: 173., w: 33., h: 13. };
-    let cases: [(&str, SelBounds, &str, Option<(Instant, (f64, f64))>, &str); 5] = [
+    let cases: [(&str, SelBounds, &str, Option<(Instant, (f64, f64))>, (f64, f64), &str); 5] = [
         // 云之家场景：元素框离鼠标 600+，信鼠标
         (
             "元素框 + 鼠标在别处（云之家）",
             element_frame,
             "element-frame",
             Some((now, (420., 838.))),
+            (420., 838.),
             "mouse",
         ),
         // 键盘选词（很久没按鼠标）→ 用元素框兜底
+        // 没抓到按下点（双击漏采样），但当前指针还在选区上 → 用指针
         (
-            "元素框 + 无鼠标动作",
+            "元素框 + 只有当前指针",
             element_frame,
             "element-frame",
-            Some((now - Duration::from_secs(30), (420., 838.))),
-            "element-frame",
+            None,
+            (420., 838.),
+            "pointer",
         ),
         // 正常应用：AX 矩形就在鼠标位置附近 → 用 AX 的（更精确）
         (
@@ -908,6 +916,7 @@ fn anchor_selftest() {
             range_rect,
             "element",
             Some((now, (240., 180.))),
+            (240., 180.),
             "ax",
         ),
         // AX 矩形和刚按下的点差很远 → 判为可疑，信鼠标
@@ -916,14 +925,15 @@ fn anchor_selftest() {
             range_rect,
             "element",
             Some((now, (900., 900.))),
+            (900., 900.),
             "mouse",
         ),
         // 没有鼠标信息（例如启动后第一次键盘选词）→ 用 AX 矩形
-        ("range 矩形 + 无鼠标信息", range_rect, "element", None, "ax"),
+        ("range 矩形 + 无鼠标信息", range_rect, "element", None, (240., 180.), "ax"),
     ];
     let mut ok = true;
-    for (name, b, source, press, want) in cases {
-        let (_, got) = anchor_for(&b, source, press);
+    for (name, b, source, press, pointer, want) in cases {
+        let (_, got) = anchor_for(&b, source, press, pointer);
         if got != want {
             ok = false;
             eprintln!("[自检] 锚点判定失败：{} → {}（期望 {}）", name, got, want);
@@ -1018,7 +1028,12 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
                     } else if let Some(since) = stable_since {
                         if !icon_shown && since.elapsed() >= Duration::from_millis(300) {
                             if let Some(s) = sel.as_ref() {
-                                let (b, anchor) = anchor_for(&s.bounds, s.source, last_press);
+                                let (b, anchor) = anchor_for(
+                                    &s.bounds,
+                                    s.source,
+                                    last_press,
+                                    mouse::position_topleft(),
+                                );
                                 eprintln!(
                                     "[beek] 选区矩形（来源={}，锚点={}）：x={:.0} y={:.0} w={:.0} h={:.0}",
                                     s.source, anchor, b.x, b.y, b.w, b.h
