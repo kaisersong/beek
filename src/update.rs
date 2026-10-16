@@ -314,7 +314,7 @@ xattr -dr com.apple.quarantine "$APP" 2>/dev/null
 # 而且公证 staple 也跟着失效。只有本地/临时包才需要重签。
 INCOMING_ID=$(codesign -dv --verbose=4 "$NEW" 2>&1 | sed -n 's/^Authority=\(Developer ID Application.*\)/\1/p' | head -1)
 if [ -n "$INCOMING_ID" ]; then
-    echo "新包已是 Developer ID 签名（$INCOMING_ID）→ 保留原签名与公证"
+    echo "新包已是 Developer ID 签名（${{INCOMING_ID}}）→ 保留原签名与公证"
 else
     DEVID=$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)
     if [ -n "$DEVID" ]; then

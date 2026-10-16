@@ -51,7 +51,7 @@ jobs:
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then TAG="${GITHUB_REF_NAME}"; else TAG="v$V"; fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "版本 $V，tag $TAG（资产名 BeeK-v$V.zip，app 的检查更新按这个名字找）"
+          echo "版本 ${V}，tag ${TAG}（资产名 BeeK-v$V.zip，app 的检查更新按这个名字找）"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -75,7 +75,7 @@ jobs:
           done
           [ "$missing" = 0 ] || exit 1
           if [ "$APPLE_TEAM_ID" != "$EXPECTED_TEAM_ID" ]; then
-            echo "::error::APPLE_TEAM_ID 必须是 $EXPECTED_TEAM_ID（与 bundle 的签名身份一致）"
+            echo "::error::APPLE_TEAM_ID 必须是 ${EXPECTED_TEAM_ID}（与 bundle 的签名身份一致）"
             exit 1
           fi
 
@@ -161,7 +161,7 @@ jobs:
           rm -f "$ZIP"
           ditto -c -k --keepParent "$APP" "$ZIP"
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
-          echo "$ZIP（$(ls -lh "$ZIP" | awk '{print $5}')）"
+          echo "${ZIP}（$(ls -lh "$ZIP" | awk '{print $5}')）"
           shasum -a 256 "$ZIP" | tee "$ZIP.sha256"
 
       - name: 上传 artifact（无论发不发布都留一份，便于人工验证）

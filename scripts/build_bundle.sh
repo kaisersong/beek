@@ -16,7 +16,7 @@ BIN_SRC="$ROOT/target/release/beek"
 VERSION=$(sed -n 's/^version = "\(.*\)".*/\1/p' "$ROOT/Cargo.toml" | head -1)
 [ -n "$VERSION" ] || { echo "读不到 Cargo.toml 里的 version"; exit 1; }
 
-echo "== 构建 release（版本 $VERSION）=="
+echo "== 构建 release（版本 ${VERSION}）=="
 PATH="$HOME/.cargo/bin:$PATH" cargo build --release --manifest-path "$ROOT/Cargo.toml"
 echo "构建产物：$(shasum -a 256 "$BIN_SRC" | cut -c1-16)"
 

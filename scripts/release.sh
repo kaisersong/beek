@@ -23,7 +23,7 @@ ZIP="$ROOT/dist/BeeK-v$VERSION.zip"
 # 版本号必须在 package_app.sh **之前**写：那个脚本会把这份 Info.plist 装进 bundle、然后启动 app。
 # 反过来（先启动、再改 plist）会让进程里的 NSBundle 缓存住旧版本，于是出现
 # 「菜单栏显示新版本、关于窗口显示旧版本」的不一致 —— 1.0.5 就是这么翻的。
-echo "== 1/6 版本号写进 resources/Info.plist（版本 $VERSION）=="
+echo "== 1/6 版本号写进 resources/Info.plist（版本 ${VERSION}）=="
 BUILD=$(/usr/libexec/PlistBuddy -c Print:CFBundleVersion "$ROOT/resources/Info.plist" 2>/dev/null || echo 1)
 BUILD=$((BUILD + 1))
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$ROOT/resources/Info.plist"
@@ -48,7 +48,7 @@ echo "== 4/6 打包 zip（ditto 保留 bundle 元数据与签名）=="
 mkdir -p "$ROOT/dist"
 rm -f "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"
-echo "   $ZIP（$(ls -lh "$ZIP" | awk '{print $5}')）"
+echo "   ${ZIP}（$(ls -lh "$ZIP" | awk '{print $5}')）"
 echo "   资产名约定：BeeK-v$VERSION.zip（app 的检查更新按这个名字找）"
 
 echo "== 5/6 冒烟：点 Dock 图标（重新打开）不能崩 =="
@@ -62,7 +62,7 @@ open -a "$APP"
 sleep 5
 pid_after=$(pgrep -f "$APP/Contents/MacOS/BeeK" | head -1)
 crashes_after=$(ls "$CRASH_DIR" 2>/dev/null | grep -c '^BeeK-' || true)
-echo "   pid $pid_before → $pid_after；崩溃报告 $crashes_before → $crashes_after"
+echo "   pid $pid_before → ${pid_after}；崩溃报告 $crashes_before → $crashes_after"
 if [ "$pid_before" != "$pid_after" ] || [ "$crashes_after" != "$crashes_before" ]; then
     echo "❌ 触发「重新打开」后进程重启或新增崩溃报告 —— 不发布"
     exit 1
