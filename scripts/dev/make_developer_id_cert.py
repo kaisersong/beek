@@ -94,6 +94,59 @@ def api(token: str, method: str, path: str, body=None):
         raise SystemExit(f"API {method} {path} 失败：HTTP {e.code}\n{detail}")
 
 
+def pack_p12_from_cer(workdir: Path, p12: Path) -> None:
+    """从开发者后台下载的 .cer + 本机私钥打包出 CI 用的 p12。
+
+    为什么不用 `security export -t identities`：那会把登录钥匙串里**所有**身份一起导出，
+    等于把 Apple Development 私钥也塞进 CI 的 secret。这里只打包这张证书 + 它的私钥 + 中间证书。
+    """
+    key = workdir / "beek-developer-id.key"
+    cer = workdir / "beek-developer-id.cer"
+    cert_pem = workdir / "beek-developer-id.cert.pem"
+    chain_pem = workdir / "developer-id-ca.pem"
+    if not cer.exists():
+        raise SystemExit(f"没有证书文件：{cer}（从开发者后台下载 Developer ID Application 证书后放这里）")
+    subprocess.run(["openssl", "x509", "-inform", "DER", "-in", str(cer),
+                    "-out", str(cert_pem)], check=True, timeout=60)
+    # 中间证书：从系统钥匙串里取 Developer ID Certification Authority
+    chain = subprocess.run(["security", "find-certificate", "-a", "-c",
+                            "Developer ID Certification Authority", "-p"],
+                           capture_output=True, text=True, timeout=60).stdout
+    certfile_args = []
+    if "BEGIN CERTIFICATE" in chain:
+        chain_pem.write_text(chain)
+        certfile_args = ["-certfile", str(chain_pem)]
+        print("   已带上中间证书 Developer ID Certification Authority")
+    else:
+        print("   ⚠️ 系统钥匙串里没找到中间证书，p12 里只有叶子证书（CI 上可能链不完整）")
+
+    print("== 把证书 + 私钥装进登录钥匙串（方便以后核对/重导）==")
+    login = str(Path.home() / "Library/Keychains/login.keychain-db")
+    subprocess.run(["security", "import", str(key), "-k", login,
+                    "-T", "/usr/bin/codesign", "-T", "/usr/bin/security"],
+                   check=True, timeout=120)
+    subprocess.run(["security", "import", str(cer), "-k", login,
+                    "-T", "/usr/bin/codesign", "-T", "/usr/bin/security"],
+                   check=True, timeout=120)
+    listed = subprocess.run(["security", "find-identity", "-v", "-p", "codesigning"],
+                            capture_output=True, text=True, timeout=60).stdout
+    identity = next((l.strip() for l in listed.splitlines()
+                     if "Developer ID Application" in l and "valid identities" not in l), None)
+    print(f"   钥匙串身份：{identity.split('"')[1] if identity else '⚠️ 看不到，仍继续打包'}")
+
+    print("== 打包 p12（只含这张证书）==")
+    p12_password = secrets.token_urlsafe(24)
+    if p12.exists():
+        p12.unlink()
+    subprocess.run(["openssl", "pkcs12", "-export", "-inkey", str(key),
+                    "-in", str(cert_pem), *certfile_args,
+                    "-out", str(p12), "-passout", f"pass:{p12_password}",
+                    "-name", "Developer ID Application"], check=True, timeout=120)
+    os.chmod(p12, 0o600)
+    print(f"   {p12}（{p12.stat().st_size} 字节）")
+    print(f"P12_PASSWORD={p12_password}")
+
+
 def export_identity(workdir: Path, p12: Path) -> None:
     """把钥匙串里已有的 Developer ID 身份导出成 CI 用的 p12（密码随机，打印在最后一行）。"""
     listed = subprocess.run(["security", "find-identity", "-v", "-p", "codesigning"],
@@ -117,6 +170,8 @@ def export_identity(workdir: Path, p12: Path) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--from-cer", action="store_true",
+                    help="用开发者后台下载的 beek-developer-id.cer + 本机私钥打包 p12")
     ap.add_argument("--export-only", action="store_true",
                     help="跳过 API，直接把钥匙串里已有的 Developer ID 身份导出成 p12")
     ap.add_argument("--issuer", required=True, help="App Store Connect 的 Issuer ID")
@@ -136,6 +191,8 @@ def main() -> None:
     if not csr.exists():
         raise SystemExit(f"没有 CSR：{csr}（先用 openssl 生成私钥和 CSR）")
 
+    if args.from_cer:
+        return pack_p12_from_cer(workdir, p12)
     if args.export_only:
         return export_identity(workdir, p12)
 
