@@ -49,6 +49,12 @@ jobs:
           V=$(sed -n 's/^version = "\(.*\)".*/\1/p' Cargo.toml | head -1)
           [ -n "$V" ] || { echo "::error::读不到 Cargo.toml 里的 version"; exit 1; }
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then TAG="${GITHUB_REF_NAME}"; else TAG="v$V"; fi
+          # 防呆：tag 必须与 Cargo.toml 的版本一致。资产名是 BeeK-v$V.zip，
+          # 而 app 的检查更新按「远端版本号」找这个文件名 —— 对不上就是 404。
+          if [ "$TAG" != "v$V" ]; then
+            echo "::error::tag($TAG) 与 Cargo.toml 的版本(v$V) 不一致，拒绝发布"
+            exit 1
+          fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "版本 ${V}，tag ${TAG}（资产名 BeeK-v$V.zip，app 的检查更新按这个名字找）"
