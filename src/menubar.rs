@@ -341,7 +341,15 @@ pub fn popup_status_menu() -> bool {
         if item == nil || menu == nil {
             return false;
         }
-        // popUpStatusItemMenu: 虽然被标记为 deprecated，但仍是程序化弹出状态项菜单的做法
+        // popUpStatusItemMenu: 虽然被标记为 deprecated，但仍是程序化弹出状态项菜单的做法。
+        // 先问 respondsToSelector:：对着不响应的对象发消息会直接把进程打崩
+        // （而这段代码只在用户点 Dock 图标时跑，崩在那里很难排查）。
+        let sel_pop = sel!(popUpStatusItemMenu:);
+        let responds: i8 = msg_send![item, respondsToSelector: sel_pop];
+        if responds == 0 {
+            eprintln!("[beek] ⚠️ 状态项不支持 popUpStatusItemMenu:，无法弹出菜单");
+            return false;
+        }
         let _: () = msg_send![item, popUpStatusItemMenu: menu];
         true
     }
@@ -409,6 +417,16 @@ pub fn dump_app_menus() {
         }
         let dock: id = msg_send![delegate, applicationDockMenu: app];
         dump_menu_desc("Dock 右键（delegate 实际返回的）", dock);
+
+        // 点 Dock 图标要弹菜单，先确认这条消息系统认（不认就只记日志，别崩）
+        let item = STATUS_ITEM.load(Ordering::SeqCst) as id;
+        if item != nil {
+            let responds: i8 = msg_send![item, respondsToSelector: sel!(popUpStatusItemMenu:)];
+            eprintln!(
+                "[beek] 点 Dock 图标弹菜单：状态项支持 popUpStatusItemMenu: = {}",
+                responds != 0
+            );
+        }
     }
 }
 
