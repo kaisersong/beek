@@ -251,9 +251,12 @@ pub fn flip_clipboard_fallback() -> bool {
 
 /// 直接打开「辅助功能」授权面板，方便用户勾选 BeeK
 pub fn open_accessibility_panel() {
+    // 用 spawn 不用 status：这个函数会被 gpui 的菜单动作调用，而那时 gpui 正持有
+    // 整份 App 的可变借用（App::dispatch_action）。等子进程退出会把借用占住几十毫秒，
+    // 这期间任何系统通知（切输入源、改激活策略）打进来，gpui 的观察者借用失败就会 panic。
     let _ = std::process::Command::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-        .status();
+        .spawn();
 }
 
 /// 打开 README 的「获取 API Key」章节（纯跳转，不需要经过主循环）
@@ -328,7 +331,63 @@ extern "C" fn quit_app(_this: &Object, _sel: Sel, _sender: id) {
 
 /// 状态项与其菜单的地址，供「程序化弹出菜单」使用（Dock 图标被点/重新打开时）。
 static STATUS_ITEM: AtomicUsize = AtomicUsize::new(0);
+static HANDLER: AtomicUsize = AtomicUsize::new(0);
 static STATUS_MENU: AtomicUsize = AtomicUsize::new(0);
+
+/// 在主线程「稍后」执行的回调（reopen 专用）。
+///
+/// 为什么要绕这一下：`Application::on_reopen` 的回调是**在 gpui 持有整份 App 可变
+/// 借用的情况下**被调用的（gpui 的实现就是 `callback(&mut app.borrow_mut())`），
+/// 而弹菜单是个**模态循环**，会一直占着这份借用不放。这期间 AppKit 一旦发通知
+/// （点 Dock 图标会激活 app，紧接着就是「输入源变了」通知），gpui 自己的观察者就要
+/// 再借一次 → `RefCell already borrowed` → panic → abort → KeepAlive 下拉起来再崩。
+/// 实测：这么写的版本点一次 Dock 图标崩一次。
+/// 用 performSelectorOnMainThread（waitUntilDone=NO）把它丢到下一次主循环，
+/// reopen 回调立刻返回、借用立刻释放，菜单在下一轮 runloop 里弹。
+extern "C" fn popup_menu_action(_this: &Object, _sel: Sel, _sender: id) {
+    // 先记日志再弹：popup_status_menu 是模态循环，要等菜单关掉才返回，
+    // 日志写在后面的话「菜单还开着」这段时间里完全没有痕迹（排查时会被误导）。
+    eprintln!("[beek] 点 Dock 图标（重新打开）→ 弹出菜单栏菜单（模态，关掉后继续）");
+    let shown = popup_status_menu();
+    eprintln!("[beek] 菜单已关闭（弹出{}）", if shown { "成功" } else { "失败" });
+}
+
+/// 退出用的 selector（由 performSelectorOnMainThread 调用）
+extern "C" fn quit_on_main_action(_this: &Object, _sel: Sel, _sender: id) {
+    quit_now();
+}
+
+/// 异步退出：`quit_now` 要跑 `launchctl bootout`（子进程，可能上百毫秒），
+/// 直接在 gpui 的菜单动作里做会把 App 借用占住那么久，风险同上。
+/// 丢到下一次主循环执行，回调立刻返回。
+pub fn quit_async() {
+    unsafe {
+        let handler = HANDLER.load(Ordering::SeqCst) as id;
+        if handler == nil {
+            quit_now(); // 极端情况：handler 还没建好，退回同步退出
+            return;
+        }
+        let _: () = msg_send![handler,
+            performSelectorOnMainThread: sel!(quitOnMain:)
+            withObject: nil
+            waitUntilDone: false];
+    }
+}
+
+/// 异步弹出状态项菜单（见 popup_menu_action 的说明，不能同步弹）
+pub fn popup_status_menu_async() {
+    unsafe {
+        let handler = HANDLER.load(Ordering::SeqCst) as id;
+        if handler == nil {
+            eprintln!("[beek] ⚠️ 菜单 handler 还没建好，Dock 点击被忽略");
+            return;
+        }
+        let _: () = msg_send![handler,
+            performSelectorOnMainThread: sel!(popupStatusMenu:)
+            withObject: nil
+            waitUntilDone: false];
+    }
+}
 
 /// 弹出状态项菜单（等价于用鼠标点菜单栏图标）。
 ///
@@ -577,6 +636,9 @@ pub fn setup_status_item(cfg: &Config) {
         decl.add_method(sel!(openReadmeKey:), open_readme_key as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(checkUpdate:), check_update as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(openAbout:), open_about as extern "C" fn(&Object, Sel, id));
+        // Dock 图标点击（reopen）走这一条：必须是能「稍后执行」的 selector 方法
+        decl.add_method(sel!(popupStatusMenu:), popup_menu_action as extern "C" fn(&Object, Sel, id));
+        decl.add_method(sel!(quitOnMain:), quit_on_main_action as extern "C" fn(&Object, Sel, id));
         let cls = decl.register();
         let handler: id = msg_send![cls, new];
 
@@ -613,6 +675,7 @@ pub fn setup_status_item(cfg: &Config) {
         let (menu, toggle) = build_menu(cfg, handler);
         let _: () = msg_send![item, setMenu: menu];
         TOGGLE_ITEM.store(toggle as usize, Ordering::SeqCst);
+        HANDLER.store(handler as usize, Ordering::SeqCst);
         STATUS_ITEM.store(item as usize, Ordering::SeqCst);
         STATUS_MENU.store(menu as usize, Ordering::SeqCst);
 

@@ -1664,10 +1664,7 @@ actions!(
         MenuReadmeKey,
         MenuAccessibility,
         MenuRestart,
-        MenuQuit,
-        MenuToggleDock,
-        MenuToggleCopyToPopup,
-        MenuToggleClipboardFallback
+        MenuQuit
     ]
 );
 
@@ -1690,16 +1687,7 @@ fn setup_app_menus(cx: &mut App, tx: mpsc::Sender<UiEvent>) {
     cx.on_action(|_: &MenuReadmeKey, _cx| menubar::open_readme_key_url());
     cx.on_action(|_: &MenuAccessibility, _cx| menubar::open_accessibility_panel());
     cx.on_action(|_: &MenuRestart, _cx| menubar::restart_now());
-    cx.on_action(|_: &MenuQuit, _cx| menubar::quit_now());
-    cx.on_action(|_: &MenuToggleDock, _cx| {
-        menubar::flip_show_in_dock();
-    });
-    cx.on_action(|_: &MenuToggleCopyToPopup, _cx| {
-        menubar::flip_copy_to_popup();
-    });
-    cx.on_action(|_: &MenuToggleClipboardFallback, _cx| {
-        menubar::flip_clipboard_fallback();
-    });
+    cx.on_action(|_: &MenuQuit, _cx| menubar::quit_async());
 
     // 主菜单：第一项就是 macOS 的「app 菜单」（标题用 app 名）
     cx.set_menus(vec![Menu {
@@ -1822,8 +1810,9 @@ fn main() {
     // （applicationShouldHandleReopen）。不处理的话用户看起来就是「点了没反应」。
     // 界面就是菜单栏那个菜单，所以把同一份弹出来。
     app.on_reopen(|_cx: &mut App| {
-        let shown = menubar::popup_status_menu();
-        eprintln!("[beek] Dock 图标被点击（重新打开）→ 弹出菜单栏菜单：{}", shown);
+        // 注意：这个回调是在 gpui 持有整份 App 借用时跑的，所以只能做「立刻返回」的事。
+        // 弹菜单是模态循环，必须丢给主队列（见 menubar::popup_status_menu_async 的说明）。
+        menubar::popup_status_menu_async();
     });
     app.run(|cx: &mut App| {
         let cfg = config::load();
