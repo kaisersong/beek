@@ -23,18 +23,18 @@ ZIP="$ROOT/dist/BeeK-v$VERSION.zip"
 # 版本号必须在 package_app.sh **之前**写：那个脚本会把这份 Info.plist 装进 bundle、然后启动 app。
 # 反过来（先启动、再改 plist）会让进程里的 NSBundle 缓存住旧版本，于是出现
 # 「菜单栏显示新版本、关于窗口显示旧版本」的不一致 —— 1.0.5 就是这么翻的。
-echo "== 1/5 版本号写进 resources/Info.plist（版本 $VERSION）=="
+echo "== 1/6 版本号写进 resources/Info.plist（版本 $VERSION）=="
 BUILD=$(/usr/libexec/PlistBuddy -c Print:CFBundleVersion "$ROOT/resources/Info.plist" 2>/dev/null || echo 1)
 BUILD=$((BUILD + 1))
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$ROOT/resources/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$ROOT/resources/Info.plist"
 echo "   resources/Info.plist：CFBundleShortVersionString=$VERSION CFBundleVersion=$BUILD"
 
-echo "== 2/5 构建 + 安装（复用 package_app.sh，签名策略保持一致）=="
+echo "== 2/6 构建 + 安装（复用 package_app.sh，签名策略保持一致）=="
 sh "$ROOT/scripts/package_app.sh"
 echo "   已安装 bundle：$(/usr/libexec/PlistBuddy -c Print:CFBundleShortVersionString "$APP/Contents/Info.plist")（构建号 $(/usr/libexec/PlistBuddy -c Print:CFBundleVersion "$APP/Contents/Info.plist")）"
 
-echo "== 3/5 重新签名（证书优先，保证辅助功能授权不丢）=="
+echo "== 3/6 重新签名（证书优先，保证辅助功能授权不丢）=="
 DEVID=$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)
 if [ -n "$DEVID" ]; then
     codesign --force --sign "$DEVID" --identifier com.kaisersong.beek "$APP" 2>&1 | tail -1
@@ -44,14 +44,35 @@ else
 fi
 codesign --verify --strict "$APP" && echo "   签名校验通过"
 
-echo "== 4/5 打包 zip（ditto 保留 bundle 元数据与签名）=="
+echo "== 4/6 打包 zip（ditto 保留 bundle 元数据与签名）=="
 mkdir -p "$ROOT/dist"
 rm -f "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"
 echo "   $ZIP（$(ls -lh "$ZIP" | awk '{print $5}')）"
 echo "   资产名约定：BeeK-v$VERSION.zip（app 的检查更新按这个名字找）"
 
-echo "== 5/5 发布 =="
+echo "== 5/6 冒烟：点 Dock 图标（重新打开）不能崩 =="
+# 这条是踩过坑才加的：曾经在 gpui 持有 App 借用时同步弹模态菜单，
+# 点一次 Dock 图标崩一次（KeepAlive 拉起来再崩）。用 open -a 复现，不用手点。
+# 判据：pid 不变 + 崩溃报告数不增。
+CRASH_DIR="$HOME/Library/Logs/DiagnosticReports"
+pid_before=$(pgrep -f "$APP/Contents/MacOS/BeeK" | head -1)
+crashes_before=$(ls "$CRASH_DIR" 2>/dev/null | grep -c '^BeeK-' || true)
+open -a "$APP"
+sleep 5
+pid_after=$(pgrep -f "$APP/Contents/MacOS/BeeK" | head -1)
+crashes_after=$(ls "$CRASH_DIR" 2>/dev/null | grep -c '^BeeK-' || true)
+echo "   pid $pid_before → $pid_after；崩溃报告 $crashes_before → $crashes_after"
+if [ "$pid_before" != "$pid_after" ] || [ "$crashes_after" != "$crashes_before" ]; then
+    echo "❌ 触发「重新打开」后进程重启或新增崩溃报告 —— 不发布"
+    exit 1
+fi
+echo "   ✅ 没崩（弹出的是菜单栏那份菜单，是模态的）"
+# 模态菜单会挂在屏幕上，重启进程把它收掉
+launchctl kickstart -k "gui/$(id -u)/com.kaisersong.beek" >/dev/null 2>&1 || true
+sleep 2
+
+echo "== 6/6 发布 =="
 if [ "$1" != "--publish" ]; then
     echo "   跳过（要发布请加 --publish；发布前建议先在本地试一次 auto-update）"
     echo "   手动发布命令：gh release create v$VERSION \"$ZIP\" -R $REPO --title \"BeeK v$VERSION\""
