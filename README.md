@@ -1,8 +1,24 @@
-# BeeK 🐝
+# <img src="resources/icons/BeeK-app-256.png" width="40" height="40" alt="BeeK 图标"> BeeK
 
 轻量 macOS AI 划词翻译工具 — Lightweight AI selection translator for macOS.
 
 选中文本 → 出现小蜜蜂图标 → 点击后翻译 → 弹窗显示结果。菜单栏常驻，由 LaunchAgent 托管。
+
+## 图标
+
+下面是 app 实际在用的图标（`resources/icons/` 里就是这些文件，不是另画的示意图）。
+菜单栏和菜单项的图标是 template 图（纯黑 + alpha，由系统按明暗自动反色），
+所以每种给两张：黑的那张跟着浅色主题，白的那张跟着深色主题。
+
+- **应用图标**（Dock / Finder / 关于窗口）：<img src="resources/icons/BeeK-app-256.png" width="56" alt="BeeK 应用图标"> — `BeeK.icns`
+- **菜单栏图标**：<picture><source media="(prefers-color-scheme: dark)" srcset="resources/icons/BeeKMenuBarTemplate-white@2x.png"><img src="resources/icons/BeeKMenuBarTemplate@2x.png" width="22" alt="菜单栏小蜜蜂"></picture> — `BeeKMenuBarTemplate@2x.png`
+- **划词后出现在选区旁的小蜜蜂**：<img src="resources/icons/beek-selection-default-32@2x.png" width="28" alt="划词小蜜蜂"> — `beek-selection-{default,hover,pressed,disabled}-32@2x.png`
+- **弹窗标题行的喇叭**（点它朗读单词）：<img src="resources/icons/beek-speak-outline@4x.png" width="18" alt="朗读图标"> — `beek-speak-outline@4x.png`
+- **菜单「如何获取 API Key…」左侧的圆圈 i**：<picture><source media="(prefers-color-scheme: dark)" srcset="resources/icons/beek-circle-i-white@4x.png"><img src="resources/icons/beek-circle-i@4x.png" width="16" alt="圆圈 i 图标"></picture> — `beek-circle-i@4x.png`
+
+其中三个是脚本生成的，改图标时改脚本而不是描点补图：
+`gen_circle_i.py`（圆圈 i）、`gen_speak_outline.py`（喇叭）、
+`gen_template_white.py`（由 template 图生成上面那两张白色版本，供 README 用）。
 
 ## 特性
 
@@ -18,7 +34,7 @@
 
 ### 方式 A：下载 Release
 
-1. 打开 [Releases](https://github.com/kaisersong/beek/releases)，下载最新的 `BeeK-v<版本>.zip`（例如 `BeeK-v1.0.0.zip`）。
+1. 打开 [Releases](https://github.com/kaisersong/beek/releases)，下载最新的 `BeeK-v<版本>.zip`（例如 `BeeK-v1.0.5.zip`）。
 2. 解压，把 `BeeK.app` 拖进 `/Applications`。
 3. 首次打开：在 Finder 里右键 `BeeK.app` → 「打开」，再确认一次。之后正常双击即可。
 
@@ -142,11 +158,11 @@ open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibil
 
 | 菜单项 | 作用 |
 | --- | --- |
-| BeeK 划词翻译 v1.0.0 | 显示版本，不可点击 |
+| BeeK 划词翻译 v1.0.5 | 显示版本，不可点击 |
 | 开启取词权限（辅助功能）… | 打开系统的辅助功能面板 |
 | 在 Dock 中显示 | 切换 Dock 图标，勾选项 |
 | 设置 API Key… | 配置翻译服务的 Key 与模型 |
-| ⓘ 如何获取 API Key… | 打开本仓库 README 的「获取 API Key」一节 |
+| 如何获取 API Key… | 打开本仓库 README 的「获取 API Key」一节。这一项左边是圆圈 i 图标，见上文「图标」一节 |
 | 复制即弹按钮（自己按 ⌘C） | 勾选项。你自己按 ⌘C 时，在鼠标旁弹出小蜜蜂 |
 | 剪贴板兜底取词 | 勾选项。AX 取不到选区时，BeeK 自动模拟一次 ⌘C 去读选中文本 |
 | 检查更新… | 检查新版本，可下载并更新 |
@@ -160,9 +176,13 @@ open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibil
 
 - `src/main.rs` — GPUI 主入口：图标窗口、弹窗窗口、主循环
 - `src/ax.rs` — AX 取词：多层回退读取选中文本与选区矩形
+- `src/appcopy.rs` — 让目标应用自己交选区：浏览器 AppleScript、按下它自己的「拷贝」菜单项
 - `src/translate.rs` — 豆包 Ark 流式翻译；单词模式走词典式详解
 - `src/menubar.rs` — 菜单栏状态项与菜单
 - `src/config.rs` — 配置持久化
+- `src/clipboard.rs` — 模拟 ⌘C、剪贴板整体备份/还原、剪贴板监听
+- `src/eventtap.rs` — CGEventTap 全局事件监听（划词时机、鼠标按键）
+- `src/dialogs.rs` — NSAlert 对话框（API Key、关于、各类提示）
 - `src/icons.rs` — 编译期内嵌图标素材
 - `src/update.rs` — 检查更新、下载与替换 App
 - `src/mouse.rs` — 全局鼠标状态，供拖动弹窗与「点外部关闭」使用
@@ -176,6 +196,15 @@ open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibil
 | `BEEK_DEBUG=1` | 详细日志：AX 取值、流式响应、弹窗高度度量 |
 | `BEEK_SELFTEST=1` | 注入模拟选区，跑完「取词 → 图标 → 弹窗」链路。不需要辅助功能权限 |
 | `BEEK_TRANSLATE_SELFTEST=1` | 只量接口耗时，不开窗口 |
+| `BEEK_CLIP_SELFTEST=1` | 验证「模拟 ⌘C + 剪贴板还原」两个原语（先在别的应用里选好一段文字） |
+| `BEEK_APPCOPY_SELFTEST=1` | 验证「让应用自己交选区」两条路（AppleScript / 拷贝菜单项） |
+| `BEEK_MENU_DUMP=1` | 配合上一条，把目标应用的菜单结构打出来 |
+| `BEEK_AX_PROBE=1` + `BEEK_AX_PROBE_PID=<pid>` | 看某个应用的 AX 选区情况 |
+| `BEEK_AX_WATCH=1` | 装 CGEventTap，在用户划词的那一刻报告 AX 现场 |
+| `BEEK_UPDATE_CHECK=1` | 跑一次「检查更新」并打印结果 |
+| `BEEK_UPDATE_PREPARE=<zip 地址>` | 配合上一条，把「下载 → 解压」也跑一遍（不碰 /Applications） |
+| `BEEK_UPDATE_APPLY=1`（可用 `BEEK_UPDATE_SELFTEST_URL=<zip 地址>` 换源） | 端到端：检查 → 下载 → 解压 → 生成替换脚本 → 退出自己 |
+| `BEEK_ARK_KEY` | 翻译用的 API Key（配置文件的兜底） |
 
 ```bash
 cargo build --release
