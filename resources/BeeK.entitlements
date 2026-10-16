@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 浏览器取词那条路走 AppleScript（osascript 子进程发 Apple Event）。
+         hardened runtime 下没有这个 entitlement，系统会直接把 Apple Events 拒掉，
+         于是 Safari / Chrome 这类应用的第二条取词路径会静默失效。
+         注意：CI 那边用 Developer ID + hardened runtime 签名，所以必须带上它；
+         本地用 Apple Development 签名（没有 hardened runtime）时带上也无害。 -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+</dict>
+</plist>

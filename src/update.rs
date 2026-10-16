@@ -309,12 +309,20 @@ if pgrep -x BeeK >/dev/null; then echo "旧进程仍在运行，放弃替换"; e
 rm -rf "$APP" || {{ echo "删除旧 app 失败"; exit 1; }}
 ditto "$NEW" "$APP" || {{ echo "复制新 app 失败"; exit 1; }}
 xattr -dr com.apple.quarantine "$APP" 2>/dev/null
-DEVID=$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)
-if [ -n "$DEVID" ]; then
-    codesign --force --sign "$DEVID" --identifier com.kaisersong.beek "$APP"
+# 如果新包本来就是 Developer ID 签名（CI 出的、已公证），就**保留原签名**：
+# 重签会换成这台机器的 Apple Development 身份 → 辅助功能/自动化授权失效、
+# 而且公证 staple 也跟着失效。只有本地/临时包才需要重签。
+INCOMING_ID=$(codesign -dv --verbose=4 "$NEW" 2>&1 | sed -n 's/^Authority=\(Developer ID Application.*\)/\1/p' | head -1)
+if [ -n "$INCOMING_ID" ]; then
+    echo "新包已是 Developer ID 签名（$INCOMING_ID）→ 保留原签名与公证"
 else
-    echo "⚠️ 没找到 Apple Development 证书，退回 ad-hoc（辅助功能需重新勾选）"
-    codesign --force --sign - --identifier com.kaisersong.beek "$APP"
+    DEVID=$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)
+    if [ -n "$DEVID" ]; then
+        codesign --force --sign "$DEVID" --identifier com.kaisersong.beek "$APP"
+    else
+        echo "⚠️ 没找到 Apple Development 证书，退回 ad-hoc（辅助功能需重新勾选）"
+        codesign --force --sign - --identifier com.kaisersong.beek "$APP"
+    fi
 fi
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$LABEL.plist"
 echo "== 替换完成，当前版本 $(/usr/libexec/PlistBuddy -c Print:CFBundleShortVersionString "$APP/Contents/Info.plist" 2>/dev/null) =="

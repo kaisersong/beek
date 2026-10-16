@@ -11,14 +11,9 @@ set -e
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 APP=/Applications/BeeK.app
-BIN_SRC="$ROOT/target/release/beek"
 AGENT="$HOME/Library/LaunchAgents/com.kaisersong.beek.plist"
 
-echo "== 1/5 构建 release =="
-PATH="$HOME/.cargo/bin:$PATH" cargo build --release --manifest-path "$ROOT/Cargo.toml"
-echo "构建产物：$(shasum -a 256 "$BIN_SRC" | cut -c1-16)"
-
-echo "== 2/5 停掉旧进程（避免覆盖正在运行的二进制）=="
+echo "== 1/4 停掉旧进程（避免覆盖正在运行的二进制）=="
 launchctl bootout "gui/$(id -u)/com.kaisersong.beek" 2>/dev/null || true
 sleep 1
 pkill -x BeeK 2>/dev/null || true
@@ -34,30 +29,27 @@ if [ -f "$APP/Contents/Info.plist" ]; then
     echo "旧 Info.plist 已备份到 /tmp/beek_backup/Info.plist"
 fi
 
-echo "== 3/5 组装 bundle =="
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BIN_SRC" "$APP/Contents/MacOS/BeeK"
-cp "$ROOT/resources/Info.plist" "$APP/Contents/Info.plist"
-cp "$ROOT/resources/icons/BeeK.icns" "$APP/Contents/Resources/BeeK.icns"
-echo "App 图标: $(ls -l "$APP/Contents/Resources/BeeK.icns" | awk '{print $5" 字节"}')"
-echo "CFBundleIconFile: $(/usr/libexec/PlistBuddy -c Print:CFBundleIconFile "$APP/Contents/Info.plist")"
+echo "== 2/4 构建 + 组装 bundle（与 CI 同一条组装路径）=="
+sh "$ROOT/scripts/build_bundle.sh" /Applications
 
-echo "== 4/5 重签名 =="
+echo "== 3/4 重签名 =="
 # 为什么优先用证书而不是默认的 ad-hoc：TCC 把「辅助功能」授权记在签名身份上，
 # ad-hoc 身份每次重编译都会变 → 每次更新后取词都会失效，用户得再去系统设置里勾一次。
 # 用稳定的 Apple Development 证书签名，授权就能跨更新保留。
 DEVID=$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)
 if [ -n "$DEVID" ]; then
     echo "签名身份：$DEVID"
-    codesign --force --sign "$DEVID" --identifier com.kaisersong.beek "$APP" 2>&1 | tail -2
+    codesign --force --sign "$DEVID" --identifier com.kaisersong.beek \
+        --entitlements "$ROOT/resources/BeeK.entitlements" "$APP" 2>&1 | tail -2
 else
     echo "⚠️ 没找到 Apple Development 证书，退回 ad-hoc："
     echo "   这会让「辅助功能」授权在本次更新后失效，需要在系统设置里重新勾选 BeeK。"
-    codesign --force --sign - --identifier com.kaisersong.beek "$APP" 2>&1 | tail -2
+    codesign --force --sign - --identifier com.kaisersong.beek \
+        --entitlements "$ROOT/resources/BeeK.entitlements" "$APP" 2>&1 | tail -2
 fi
 codesign --verify --strict --verbose=2 "$APP" 2>&1 | tail -2 || echo "⚠️ 签名校验未通过"
 
-echo "== 5/5 启动并刷新图标缓存 =="
+echo "== 4/4 启动并刷新图标缓存 =="
 launchctl bootstrap "gui/$(id -u)" "$AGENT"
 sleep 3
 pgrep -fl "$APP/Contents/MacOS/BeeK" || echo "⚠️ 进程未启动"

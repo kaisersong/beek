@@ -188,6 +188,40 @@ Dock 图标（菜单「在 Dock 中显示」打开后才有）：
 
 版本号来自 `Cargo.toml` 的 `version`。
 
+## 发布
+
+两条路，产物结构一致（都走 `scripts/build_bundle.sh` 组装），区别只在签名和公证：
+
+| | 本地 `sh scripts/release.sh --publish` | CI（`.github/workflows/release.yml`） |
+| --- | --- | --- |
+| 签名 | 本机钥匙串里的 Apple Development | Developer ID Application（repo secrets 里的 .p12） |
+| 公证 | 不做 | 做（`notarytool` + `stapler staple`） |
+| 用户下载后 | Gatekeeper 判 `rejected`，要右键 → 打开 | Gatekeeper 判 `accepted`，双击即可 |
+| 适用 | 自己用、临时验证 | 对外发布 |
+| 授权保留 | 同一身份，辅助功能授权跨更新保留 | 换成 Developer ID 身份，**第一次要重新勾选一次**辅助功能（之后就稳定，且 Developer ID 有效期 5 年） |
+
+CI 触发方式：
+
+- 手动：Actions → Release → Run workflow（`publish=false` 只构建 + 签名 + 公证，产物在 artifact 里，先验证再发）
+- 打 tag：`git tag v1.0.8 && git push origin v1.0.8` → 自动发布到 Release（先建草稿、传完资产再转正式）
+
+CI 需要的 repo secrets（**值只能由仓库所有者添加**）：
+
+| secret | 内容 |
+| --- | --- |
+| `MACOS_CERTIFICATE_P12_BASE64` | Developer ID Application 证书导出的 .p12，base64 |
+| `MACOS_CERTIFICATE_PASSWORD` | 上面那个 .p12 的密码 |
+| `APPLE_TEAM_ID` | 团队 ID（`Y9YR86UG94`，工作流会校验） |
+| `APPLE_API_KEY_ID` | App Store Connect API Key 的 Key ID |
+| `APPLE_API_ISSUER` | 该 Key 的 Issuer ID |
+| `APPLE_API_KEY_P8_BASE64` | `AuthKey_<KEY_ID>.p8` 文件内容，base64 |
+
+签名用的 entitlements 在 `resources/BeeK.entitlements`：hardened runtime 下必须有
+`com.apple.security.automation.apple-events`，否则浏览器那条 AppleScript 取词路径会被系统直接拒掉。
+
+更新已装好的 app 时，如果新包本来就是 Developer ID 签名（CI 出的），`install_script` 会
+**保留原签名**（不重签）：重签会换身份、让辅助功能和公证一起失效。
+
 ## 架构
 
 - `src/main.rs` — GPUI 主入口：图标窗口、弹窗窗口、主循环
