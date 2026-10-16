@@ -181,6 +181,11 @@ Dock 图标（菜单「在 Dock 中显示」打开后才有）：
   「编辑」这一项是手搓的，因为 gpui 的 delegate 自己实现了 `copy:`/`paste:`，用 gpui 的菜单项
   会让动作发给 delegate 而不是文本框，对话框里的 ⌘V 就废了。
 
+弹对话框（关于 / 设置 API Key / 各类提示）时会**临时**把 app 切成 Regular（借一个 Dock 图标和
+正常菜单栏），框关掉后恢复原策略：模态框需要 app 处于激活状态 —— 不激活时 AppKit 会「请求
+用户注意」（Dock 图标跳），而 Accessory（关掉 Dock 图标）按定义没有菜单栏、被激活后菜单栏是灰的。
+这只改激活策略，不动 `config.json` 里的设置。
+
 版本号来自 `Cargo.toml` 的 `version`。
 
 ## 架构
@@ -215,6 +220,8 @@ Dock 图标（菜单「在 Dock 中显示」打开后才有）：
 | `BEEK_UPDATE_CHECK=1` | 跑一次「检查更新」并打印结果 |
 | `BEEK_UPDATE_PREPARE=<zip 地址>` | 配合上一条，把「下载 → 解压」也跑一遍（不碰 /Applications） |
 | `BEEK_UPDATE_APPLY=1`（可用 `BEEK_UPDATE_SELFTEST_URL=<zip 地址>` 换源） | 端到端：检查 → 下载 → 解压 → 生成替换脚本 → 退出自己 |
+| `BEEK_ABOUT_ON_START=1` | 启动后自动弹一次「关于」，用来观察只跟「激活状态 / 模态框」有关的行为 |
+| `BEEK_DIALOG_AUTOCLOSE=1` | 对话框 2 秒后自动「按好」关掉，不用手点也能验证关框之后的行为 |
 | `BEEK_ARK_KEY` | 翻译用的 API Key（配置文件的兜底） |
 
 ```bash
