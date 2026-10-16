@@ -32,6 +32,7 @@ import json
 import os
 import secrets
 import struct
+import tempfile
 import subprocess
 import sys
 import time
@@ -122,12 +123,14 @@ def pack_p12_from_cer(workdir: Path, p12: Path) -> None:
 
     print("== 把证书 + 私钥装进登录钥匙串（方便以后核对/重导）==")
     login = str(Path.home() / "Library/Keychains/login.keychain-db")
-    subprocess.run(["security", "import", str(key), "-k", login,
-                    "-T", "/usr/bin/codesign", "-T", "/usr/bin/security"],
-                   check=True, timeout=120)
-    subprocess.run(["security", "import", str(cer), "-k", login,
-                    "-T", "/usr/bin/codesign", "-T", "/usr/bin/security"],
-                   check=True, timeout=120)
+    # 已经装过会报 "item already exists"，这不是错（重复跑要能过），后面用
+    # find-identity 确认身份真的在就行
+    for src in (str(key), str(cer)):
+        r = subprocess.run(["security", "import", src, "-k", login,
+                            "-T", "/usr/bin/codesign", "-T", "/usr/bin/security"],
+                           capture_output=True, text=True, timeout=120)
+        msg = (r.stdout or r.stderr).strip().splitlines()
+        print("   " + (msg[0] if msg else f"（{src.split('/')[-1]} 无输出）"))
     listed = subprocess.run(["security", "find-identity", "-v", "-p", "codesigning"],
                             capture_output=True, text=True, timeout=60).stdout
     identity = next((l.strip() for l in listed.splitlines()
@@ -138,12 +141,43 @@ def pack_p12_from_cer(workdir: Path, p12: Path) -> None:
     p12_password = secrets.token_urlsafe(24)
     if p12.exists():
         p12.unlink()
-    subprocess.run(["openssl", "pkcs12", "-export", "-inkey", str(key),
+    # -legacy 不是可选项：OpenSSL 3 默认用 AES-256 + PBKDF2 打包 PKCS#12，
+    # 而 macOS 的 Security.framework 只认老的 RC2/3DES 格式，导入时会报
+    # 「MAC verification failed during PKCS12 import (wrong password?)」——
+    # 看起来像密码错，其实是格式不认。CI 上就是这么翻的车，本机已复现过。
+    subprocess.run(["openssl", "pkcs12", "-export", "-legacy", "-inkey", str(key),
                     "-in", str(cert_pem), *certfile_args,
                     "-out", str(p12), "-passout", f"pass:{p12_password}",
                     "-name", "Developer ID Application"], check=True, timeout=120)
     os.chmod(p12, 0o600)
     print(f"   {p12}（{p12.stat().st_size} 字节）")
+
+    # 自检：用 CI 会用到的同一条命令，在临时钥匙串里试一次导入。
+    # 打包格式不对在这里就暴露，不必等 CI 跑十分钟才发现。
+    print("== 自检：用 CI 的同一条 security import 试导入 ==")
+    probe = Path(tempfile.mkdtemp()) / "probe.keychain-db"
+    probe_pw = secrets.token_hex(12)
+    try:
+        subprocess.run(["security", "create-keychain", "-p", probe_pw, str(probe)],
+                       check=True, capture_output=True, timeout=60)
+        subprocess.run(["security", "unlock-keychain", "-p", probe_pw, str(probe)],
+                       check=True, capture_output=True, timeout=60)
+        imported = subprocess.run(
+            ["security", "import", str(p12), "-k", str(probe), "-P", p12_password,
+             "-T", "/usr/bin/codesign", "-T", "/usr/bin/security"],
+            capture_output=True, text=True, timeout=120)
+        identities = subprocess.run(
+            ["security", "find-identity", "-v", "-p", "codesigning", str(probe)],
+            capture_output=True, text=True, timeout=60).stdout
+        ok = "Developer ID Application" in identities
+        print("   " + (imported.stdout or imported.stderr).strip()[:120])
+        if not ok:
+            raise SystemExit("❌ 这一步不打过就别写 secrets：导入后找不到 Developer ID 身份\n"
+                             + identities)
+        print("   ✅ CI 那条导入命令能拿到 Developer ID 身份")
+    finally:
+        subprocess.run(["security", "delete-keychain", str(probe)],
+                       capture_output=True, timeout=60)
     print(f"P12_PASSWORD={p12_password}")
 
 
@@ -174,9 +208,9 @@ def main() -> None:
                     help="用开发者后台下载的 beek-developer-id.cer + 本机私钥打包 p12")
     ap.add_argument("--export-only", action="store_true",
                     help="跳过 API，直接把钥匙串里已有的 Developer ID 身份导出成 p12")
-    ap.add_argument("--issuer", required=True, help="App Store Connect 的 Issuer ID")
-    ap.add_argument("--key-id", required=True, help="App Store Connect API Key 的 Key ID")
-    ap.add_argument("--p8", required=True, help="该 Key 的 .p8 文件路径")
+    ap.add_argument("--issuer", help="App Store Connect 的 Issuer ID（只有走 API 时才需要）")
+    ap.add_argument("--key-id", help="App Store Connect API Key 的 Key ID（只有走 API 时才需要）")
+    ap.add_argument("--p8", help="该 Key 的 .p8 文件路径（只有走 API 时才需要）")
     ap.add_argument("--dir", default=str(Path.home() / ".xiaok/apple-signing"))
     args = ap.parse_args()
 
@@ -196,6 +230,9 @@ def main() -> None:
     if args.export_only:
         return export_identity(workdir, p12)
 
+    for need in ("issuer", "key_id", "p8"):
+        if not getattr(args, need):
+            raise SystemExit(f"走 API 时必须给 --{need.replace('_','-')}")
     token = make_jwt(args.key_id, args.issuer, Path(args.p8).expanduser())
 
     print("== 1/4 问 API：团队已有的 Developer ID Application 证书 ==")
