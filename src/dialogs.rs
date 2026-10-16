@@ -35,6 +35,49 @@ unsafe fn nsstring_value(v: id) -> String {
 }
 
 /// 弹一个原生提示框，返回被点按钮的下标（0 = 第一个按钮）。
+/// 弹模态框前把 app 抬成「前台 + 有菜单栏」的状态，返回原来的激活策略（需要恢复时用）。
+///
+/// 为什么要做这件事（两个现象同一个根因）：
+/// 模态框要求 app 处于激活状态。不激活就弹，AppKit 会去「请求用户注意」——
+/// 有 Dock 图标时表现就是 **Dock 图标一直跳**；而菜单里关掉「在 Dock 中显示」之后，
+/// app 是 Accessory，Accessory 按定义**没有菜单栏**，被激活后菜单栏会显示成灰的。
+/// 所以这里临时切到 Regular（有 Dock 图标 + 正常菜单栏），框关掉再切回原策略。
+unsafe fn enter_dialog_context() -> Option<i64> {
+    let app: id = msg_send![class!(NSApplication), sharedApplication];
+    let policy: i64 = msg_send![app, activationPolicy];
+    if policy != 0 {
+        let _: () = msg_send![app, setActivationPolicy: 0i64]; // 0 = Regular
+        eprintln!("[beek] 弹对话框：临时切到 Regular（原策略 {}，框关掉后恢复）", policy);
+    }
+    // activateIgnoringOtherApps: 在 14.0 标记为 deprecated，但各版本都还能用；
+    // 换成 activate() 的话老系统没有这个选择器。
+    let _: () = msg_send![app, activateIgnoringOtherApps: true];
+    if policy != 0 {
+        Some(policy)
+    } else {
+        None
+    }
+}
+
+/// 对话框结束，恢复原来的激活策略（Accessory = 没有 Dock 图标）
+unsafe fn leave_dialog_context(prev: Option<i64>) {
+    let app: id = msg_send![class!(NSApplication), sharedApplication];
+    // isActive 是「不再请求用户注意（Dock 图标不跳）」的直接证据：
+    // 模态框期间 app 真的在前台，就不需要 AppKit 去请求注意了
+    let active: i8 = msg_send![app, isActive];
+    match prev {
+        Some(p) => {
+            let _: () = msg_send![app, setActivationPolicy: p];
+            eprintln!(
+                "[beek] 对话框期间 isActive={}；激活策略恢复为 {}（=去掉临时 Dock 图标）",
+                active != 0,
+                p
+            );
+        }
+        None => eprintln!("[beek] 对话框期间 isActive={}（本来就是 Regular）", active != 0),
+    }
+}
+
 /// NSAlert 的返回值从 1000 起算（NSAlertFirstButtonReturn）。
 pub fn alert(title: &str, body: &str, buttons: &[&str]) -> usize {
     if selftest_mode() {
@@ -56,7 +99,9 @@ pub fn alert(title: &str, body: &str, buttons: &[&str]) -> usize {
         for b in buttons {
             let _: id = msg_send![alert, addButtonWithTitle: nsstr(b)];
         }
+        let prev = enter_dialog_context();
         let resp: NSInteger = msg_send![alert, runModal];
+        leave_dialog_context(prev);
         (resp - 1000).max(0) as usize
     }
 }
@@ -107,6 +152,9 @@ pub fn key_settings_dialog(mut key: String, mut model: String) -> Option<KeyInpu
     }
     loop {
         let choice = unsafe {
+            // 先激活再建框：不激活的话输入框拿不到键盘（文字光标也点不进去），
+            // 而且 AppKit 会去请求用户注意（Dock 图标跳）
+            let prev = enter_dialog_context();
             let view: id = msg_send![class!(NSView), alloc];
             let view: id = msg_send![view,
                 initWithFrame: NSRect::new(NSPoint::new(0., 0.), NSSize::new(420., 96.))];
@@ -140,6 +188,7 @@ pub fn key_settings_dialog(mut key: String, mut model: String) -> Option<KeyInpu
 
             let k = nsstring_value(msg_send![key_field, stringValue]);
             let m = nsstring_value(msg_send![model_field, stringValue]);
+            leave_dialog_context(prev);
             (idx, k, m)
         };
 

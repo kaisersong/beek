@@ -1840,6 +1840,15 @@ fn main() {
         // 编辑菜单要等 gpui 把主菜单建好之后再补上去
         menubar::install_edit_menu();
         menubar::dump_app_menus();
+        // 诊断：直接开一次「关于」对话框，不用手点菜单（观察
+        // 「Dock 图标跳 / 菜单栏变灰」这类只跟激活状态有关的行为）
+        if std::env::var("BEEK_ABOUT_ON_START").is_ok() {
+            let tx_about = tx.clone();
+            cx.spawn(async move |_cx| {
+                let _ = tx_about.send(UiEvent::OpenAbout);
+            })
+            .detach();
+        }
 
         let trusted = unsafe { accessibility_sys::AXIsProcessTrusted() };
         eprintln!(
