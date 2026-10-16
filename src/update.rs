@@ -136,8 +136,11 @@ fn probe_asset(version: &str) -> Option<String> {
             None
         }
         Err(e) => {
-            eprintln!("[beek] 升级包探测失败：{}", e);
-            None
+            // 探测失败 ≠ 资产不存在：atom 都拿到了，说明网络是通的，多半是这一次 HEAD 抽风。
+            // 这时**不能**报告「只能手动下载」——那会把整条自动更新路悄悄关掉。
+            // 仍然按约定地址返回，真的没有这个资产时下载那步会报明确的 HTTP 错误。
+            eprintln!("[beek] 升级包探测没成功（{}），仍按约定地址尝试：{}", e, url);
+            Some(url)
         }
     }
 }
@@ -467,6 +470,10 @@ pub fn check_selftest() {
                 "[自检] 远端最新 {}（页面 {}，升级包 {:?}）",
                 rel.tag, rel.page_url, rel.asset_url
             );
+            eprintln!("[自检] 版本说明前 3 行：");
+            for line in rel.notes.lines().take(3) {
+                eprintln!("[自检]   {}", line);
+            }
             if is_newer(&rel.version, CURRENT_VERSION) {
                 eprintln!(
                     "[自检] 判定：有新版本（{} → {}）",
