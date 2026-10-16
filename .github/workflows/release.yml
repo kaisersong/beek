@@ -188,7 +188,11 @@ jobs:
         run: |
           set -eu
           # 先建草稿、传资产、最后才转正式：避免出现「已发布但资产还没上传完」的窗口
-          gh release create "$TAG" --title "BeeK $TAG" --generate-notes --draft || true
+          if [ -f RELEASE_NOTES.md ]; then
+            gh release create "$TAG" --title "BeeK $TAG" --notes-file RELEASE_NOTES.md --draft || true
+          else
+            gh release create "$TAG" --title "BeeK $TAG" --generate-notes --draft || true
+          fi
           gh release upload "$TAG" "$ZIP" "$ZIP.sha256" --clobber
           gh release edit "$TAG" --draft=false --latest
           echo "已发布：https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"

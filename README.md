@@ -216,6 +216,12 @@ CI 需要的 repo secrets（**值只能由仓库所有者添加**）：
 | `APPLE_API_ISSUER` | 该 Key 的 Issuer ID |
 | `APPLE_API_KEY_P8_BASE64` | `AuthKey_<KEY_ID>.p8` 文件内容，base64 |
 
+签名证书：Developer ID Application，**2027-11-15 到期**（Apple 现在只发一年期）。到期或换机时的重做流程：
+本机 `scripts/dev/make_developer_id_cert.py` 生成 CSR（私钥留在 `~/.xiaok/apple-signing/`）→
+账号持有人本人在开发者后台用它签发 Developer ID Application 证书（API 不行，实测被 403 挡）→
+下载 .cer → 同一个脚本 `--from-cer` 打包成 p12（用 `-legacy`，Security.framework 不认 OpenSSL 3 的
+默认 AES 格式）→ 重新写那 6 个 secrets。脚本打完包会自己用 CI 那条 `security import` 命令验一遍。
+
 签名用的 entitlements 在 `resources/BeeK.entitlements`：hardened runtime 下必须有
 `com.apple.security.automation.apple-events`，否则浏览器那条 AppleScript 取词路径会被系统直接拒掉。
 
