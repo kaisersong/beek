@@ -1686,9 +1686,81 @@ fn main() {
     if std::env::var("BEEK_UPDATE_APPLY").is_ok() {
         // 全流程：查更新 → 下载 → 解压 → 生成替换脚本 → 启动脚本 → 退出自己。
         // 用来端到端验证「自动更新」这条路（正常用户是点菜单里的「下载并更新」）。
+        // 允许用本地/自定义地址替代资产地址：没有外网时也能验证「下载 → 替换」整条链路
+        let local = std::env::var("BEEK_UPDATE_SELFTEST_URL").ok();
+        let checked = match (update::check(), local.clone()) {
+            (Ok(Some(mut rel)), Some(url)) => {
+                rel.asset_url = Some(url);
+                Ok(Some(rel))
+            }
+            (other, _) => other,
+        };
+        match checked {
+            Ok(Some(rel))
+                if local.is_some() || update::is_newer(&rel.version, update::CURRENT_VERSION) =>
+            {
+                eprintln!("[自检] 开始下载 {}（资产 {:?}）", rel.tag, rel.asset_url);
+                match update::prepare(&rel) {
+                    Ok(new_app) => match update::install_script(&new_app, &rel.version) {
+                        Ok(script) => {
+                            eprintln!("[自检] 替换脚本：{}", script.display());
+                            match update::run_script(&script) {
+                                Ok(_) => {
+                                    eprintln!("[自检] 脚本已启动，本进程退出，等待被替换");
+                                    std::process::exit(0);
+                                }
+                                Err(e) => eprintln!("[自检] 启动替换脚本失败：{}", e),
+                            }
+                        }
+                        Err(e) => eprintln!("[自检] 生成替换脚本失败：{}", e),
+                    },
+                    Err(e) => eprintln!("[自检] 下载/解压失败：{}", e),
+                }
+            }
+            Ok(Some(rel)) => eprintln!("[自检] 已是最新（远端 {}）", rel.tag),
+            Ok(None) => eprintln!("[自检] 远端还没有 release"),
+            Err(e) => eprintln!("[自检] 检查更新失败：{}", e),
+        }
+        return;
+    }
+    if std::env::var("BEEK_UPDATE_CHECK").is_ok() {
+        // 只查一次更新并打印结果（不需要点菜单，便于验证）
         match update::check() {
-            Ok(Some(rel)) if update::is_newer(&rel.version, update::CURRENT_VERSION) => {
-                eprintln!("[自检] 发现新版本 {}，开始下载…", rel.tag);
+            Ok(Some(rel)) => {
+                eprintln!(
+                    "[自检] 远端最新 {}（资产 {}），当前 v{}，有新版本={}",
+                    rel.tag,
+                    rel.asset_url.as_deref().unwrap_or("无"),
+                    update::CURRENT_VERSION,
+                    update::is_newer(&rel.version, update::CURRENT_VERSION)
+                );
+                eprintln!("[自检] 版本说明前 3 行：");
+                for line in rel.notes.lines().take(3) {
+                    eprintln!("[自检]   {}", line);
+                }
+            }
+            Ok(None) => eprintln!("[自检] 远端还没有 release"),
+            Err(e) => eprintln!("[自检] 检查更新失败：{}", e),
+        }
+        return;
+    }
+    if std::env::var("BEEK_UPDATE_APPLY").is_ok() {
+        // 全流程：查更新 → 下载 → 解压 → 生成替换脚本 → 启动脚本 → 退出自己。
+        // 用来端到端验证「自动更新」这条路（正常用户是点菜单里的「下载并更新」）。
+        // 允许用本地/自定义地址替代资产地址：没有外网时也能验证「下载 → 替换」整条链路
+        let local = std::env::var("BEEK_UPDATE_SELFTEST_URL").ok();
+        let checked = match (update::check(), local.clone()) {
+            (Ok(Some(mut rel)), Some(url)) => {
+                rel.asset_url = Some(url);
+                Ok(Some(rel))
+            }
+            (other, _) => other,
+        };
+        match checked {
+            Ok(Some(rel))
+                if local.is_some() || update::is_newer(&rel.version, update::CURRENT_VERSION) =>
+            {
+                eprintln!("[自检] 开始下载 {}（资产 {:?}）", rel.tag, rel.asset_url);
                 match update::prepare(&rel) {
                     Ok(new_app) => match update::install_script(&new_app, &rel.version) {
                         Ok(script) => {

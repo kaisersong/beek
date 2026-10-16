@@ -456,6 +456,47 @@ pub fn selftest_download(url: &str) {
     eprintln!("[自检] 下载+解压自检的临时文件已清理");
 }
 
+/// 自检：只跑一遍「检查更新」并打印结果（BEEK_UPDATE_CHECK=1）。
+/// 发布 Release 之后用它验证这条链路，不需要点菜单。
+pub fn check_selftest() {
+    eprintln!("[自检] 当前版本 {}，仓库 {}", CURRENT_VERSION, REPO);
+    match check() {
+        Ok(None) => eprintln!("[自检] 远端还没有任何 release（链路本身是通的）"),
+        Ok(Some(rel)) => {
+            eprintln!(
+                "[自检] 远端最新 {}（页面 {}，升级包 {:?}）",
+                rel.tag, rel.page_url, rel.asset_url
+            );
+            if is_newer(&rel.version, CURRENT_VERSION) {
+                eprintln!(
+                    "[自检] 判定：有新版本（{} → {}）",
+                    CURRENT_VERSION, rel.version
+                );
+            } else {
+                eprintln!(
+                    "[自检] 判定：已是最新（远端 {} 不比当前 {} 新）",
+                    rel.version, CURRENT_VERSION
+                );
+            }
+        }
+        Err(e) => eprintln!("[自检] 检查更新失败：{}", e),
+    }
+    if let Ok(url) = std::env::var("BEEK_UPDATE_PREPARE") {
+        eprintln!("[自检] 尝试下载并解压：{}", url);
+        let rel = Release {
+            version: "selftest".to_string(),
+            tag: "selftest".to_string(),
+            notes: String::new(),
+            page_url: RELEASES_URL.to_string(),
+            asset_url: Some(url),
+        };
+        match prepare(&rel) {
+            Ok(app) => eprintln!("[自检] 下载+解压成功：{}", app.display()),
+            Err(e) => eprintln!("[自检] 下载+解压失败：{}", e),
+        }
+    }
+}
+
 /// 纯函数自检：版本号比较与资产命名
 pub fn selftest() {
     let cases: &[(&str, &str, bool)] = &[

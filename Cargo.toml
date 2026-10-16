@@ -1,6 +1,6 @@
 [package]
 name = "beek"
-version = "1.0.3"
+version = "1.0.4"
 edition = "2021"
 description = "轻量 macOS AI 划词翻译工具 - Lightweight AI selection translator for macOS"
 
