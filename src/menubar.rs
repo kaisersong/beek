@@ -224,41 +224,81 @@ unsafe fn nsstr(s: &str) -> id {
     NSString::alloc(nil).init_str(s)
 }
 
-extern "C" fn toggle_dock(_this: &Object, _sel: Sel, sender: id) {
-    unsafe {
-        let state: i64 = msg_send![sender, state];
-        let show = state == 0;
-        let _: () = msg_send![sender, setState: if show { 1i64 } else { 0i64 }];
-        set_dock_visible(show);
-        // 读-改-写：不能整份覆盖，否则会把 providers 里配好的 key 抹掉
-        config::update(|c| c.show_in_dock = show);
-    }
+// ---------- 动作实现：菜单项（objc target）与 gpui action 共用同一份逻辑 ----------
+
+/// 切换「在 Dock 中显示」，返回切换后的值。
+pub fn flip_show_in_dock() -> bool {
+    let show = !config::load().show_in_dock;
+    set_dock_visible(show);
+    // 读-改-写：不能整份覆盖，否则会把 providers 里配好的 key 抹掉
+    config::update(|c| c.show_in_dock = show);
+    show
 }
 
-extern "C" fn open_accessibility_settings(_this: &Object, _sel: Sel, _sender: id) {
-    // 直接打开「辅助功能」授权面板，方便用户勾选 BeeK
+pub fn flip_copy_to_popup() -> bool {
+    let on = !config::load().copy_to_popup;
+    config::update(|c| c.copy_to_popup = on);
+    eprintln!("[beek] 复制即弹按钮：{}", if on { "开" } else { "关" });
+    on
+}
+
+pub fn flip_clipboard_fallback() -> bool {
+    let on = !config::load().clipboard_fallback;
+    config::update(|c| c.clipboard_fallback = on);
+    eprintln!("[beek] 剪贴板兜底取词：{}", if on { "开" } else { "关" });
+    on
+}
+
+/// 直接打开「辅助功能」授权面板，方便用户勾选 BeeK
+pub fn open_accessibility_panel() {
     let _ = std::process::Command::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
         .status();
 }
 
-extern "C" fn toggle_copy_to_popup(_this: &Object, _sel: Sel, sender: id) {
+/// 打开 README 的「获取 API Key」章节（纯跳转，不需要经过主循环）
+pub fn open_readme_key_url() {
+    crate::update::open_url(crate::update::README_KEY_URL);
+}
+
+/// 重启：KeepAlive=true，正常退出会被 launchd 立刻重新拉起（用于让辅助功能授权生效）
+pub fn restart_now() -> ! {
+    std::process::exit(0)
+}
+
+/// 退出：服务由 launchd KeepAlive 托管，先 bootout 再退出，避免被立即重启。
+pub fn quit_now() -> ! {
+    let _ = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("launchctl bootout gui/$(id -u)/com.kaisersong.beek 2>/dev/null")
+        .status();
+    std::process::exit(0)
+}
+
+// ---------- 菜单项挂的 objc target ----------
+
+extern "C" fn toggle_dock(_this: &Object, _sel: Sel, sender: id) {
+    let on = flip_show_in_dock();
     unsafe {
-        let state: i64 = msg_send![sender, state];
-        let on = state == 0;
         let _: () = msg_send![sender, setState: if on { 1i64 } else { 0i64 }];
-        config::update(|c| c.copy_to_popup = on);
-        eprintln!("[beek] 复制即弹按钮：{}", if on { "开" } else { "关" });
+    }
+}
+
+extern "C" fn open_accessibility_settings(_this: &Object, _sel: Sel, _sender: id) {
+    open_accessibility_panel();
+}
+
+extern "C" fn toggle_copy_to_popup(_this: &Object, _sel: Sel, sender: id) {
+    let on = flip_copy_to_popup();
+    unsafe {
+        let _: () = msg_send![sender, setState: if on { 1i64 } else { 0i64 }];
     }
 }
 
 extern "C" fn toggle_clipboard_fallback(_this: &Object, _sel: Sel, sender: id) {
+    let on = flip_clipboard_fallback();
     unsafe {
-        let state: i64 = msg_send![sender, state];
-        let on = state == 0;
         let _: () = msg_send![sender, setState: if on { 1i64 } else { 0i64 }];
-        config::update(|c| c.clipboard_fallback = on);
-        eprintln!("[beek] 剪贴板兜底取词：{}", if on { "开" } else { "关" });
     }
 }
 
@@ -267,8 +307,7 @@ extern "C" fn open_key_settings(_this: &Object, _sel: Sel, _sender: id) {
 }
 
 extern "C" fn open_readme_key(_this: &Object, _sel: Sel, _sender: id) {
-    // 纯跳转，不需要主循环：直接开浏览器到 README 的「获取 API Key」章节
-    crate::update::open_url(crate::update::README_KEY_URL);
+    open_readme_key_url();
 }
 
 extern "C" fn check_update(_this: &Object, _sel: Sel, _sender: id) {
@@ -280,17 +319,97 @@ extern "C" fn open_about(_this: &Object, _sel: Sel, _sender: id) {
 }
 
 extern "C" fn restart_app(_this: &Object, _sel: Sel, _sender: id) {
-    // KeepAlive=true，正常退出会被 launchd 立刻重新拉起，等价于重启（用于让辅助功能授权生效）
-    std::process::exit(0);
+    restart_now();
 }
 
 extern "C" fn quit_app(_this: &Object, _sel: Sel, _sender: id) {
-    // 服务由 launchd KeepAlive 托管，先 bootout 再退出，避免被立即重启。
-    let _ = std::process::Command::new("sh")
-        .arg("-c")
-        .arg("launchctl bootout gui/$(id -u)/com.kaisersong.beek 2>/dev/null")
-        .status();
-    std::process::exit(0);
+    quit_now();
+}
+
+/// 状态项与其菜单的地址，供「程序化弹出菜单」使用（Dock 图标被点/重新打开时）。
+static STATUS_ITEM: AtomicUsize = AtomicUsize::new(0);
+static STATUS_MENU: AtomicUsize = AtomicUsize::new(0);
+
+/// 弹出状态项菜单（等价于用鼠标点菜单栏图标）。
+///
+/// 用途：这个 app 没有任何窗口，所以点 Dock 图标时 macOS 发的是「重新打开」
+/// （applicationShouldHandleReopen）；不处理的话用户看起来就是「点了没反应」。
+pub fn popup_status_menu() -> bool {
+    unsafe {
+        let item = STATUS_ITEM.load(Ordering::SeqCst) as id;
+        let menu = STATUS_MENU.load(Ordering::SeqCst) as id;
+        if item == nil || menu == nil {
+            return false;
+        }
+        // popUpStatusItemMenu: 虽然被标记为 deprecated，但仍是程序化弹出状态项菜单的做法
+        let _: () = msg_send![item, popUpStatusItemMenu: menu];
+        true
+    }
+}
+
+/// 给 gpui 建好的菜单栏补一个「编辑」菜单。
+///
+/// 为什么这一项不用 gpui 的菜单模型：gpui 的 delegate 自己实现了 copy:/paste:，
+/// 用 gpui 的 os_action 建出来的项，点下去是发给 delegate（再派发成 gpui action），
+/// **不会**走到文本框 —— 也就是「设置 API Key」里的输入框按 ⌘V 没反应。
+/// 这里手搓的项 target 为空，动作沿响应链走，第一响应者（field editor）才收得到，
+/// ⌘X / ⌘C / ⌘V / ⌘A 才是正常的。
+pub fn install_edit_menu() {
+    unsafe {
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let main: id = msg_send![app, mainMenu];
+        if main == nil {
+            eprintln!("[beek] ⚠️ 主菜单还不存在，编辑菜单没装上");
+            return;
+        }
+        let count: usize = msg_send![main, numberOfItems];
+        for i in 0..count {
+            let it: id = msg_send![main, itemAtIndex: i];
+            if item_title(it) == "编辑" {
+                return; // 已经装过（gpui 重建主菜单后我们会再调一次）
+            }
+        }
+
+        let item_alloc: id = msg_send![class!(NSMenuItem), alloc];
+        let item: id = msg_send![item_alloc, init];
+        let sub_alloc: id = msg_send![class!(NSMenu), alloc];
+        let sub: id = msg_send![sub_alloc, init];
+        // 标题两边都要写：父项没有标题时，菜单栏会把它显示成类名（NSMenuItem）
+        let _: () = msg_send![sub, setTitle: nsstr("编辑")];
+        let _: () = msg_send![item, setTitle: nsstr("编辑")];
+        add_item(sub, "剪切", sel!(cut:), "x", nil);
+        add_item(sub, "复制", sel!(copy:), "c", nil);
+        add_item(sub, "粘贴", sel!(paste:), "v", nil);
+        add_item(sub, "全选", sel!(selectAll:), "a", nil);
+        let _: () = msg_send![item, setSubmenu: sub];
+        let _: () = msg_send![main, addItem: item];
+        eprintln!("[beek] 编辑菜单已挂上（target 为空 → 走响应链，对话框输入框的 ⌘X/⌘C/⌘V/⌘A 可用）");
+    }
+}
+
+/// 取证：打印 NSApp 的主菜单，以及问 gpui 的 delegate 要一份 Dock 菜单。
+/// Dock 菜单在 macOS 上就是通过 `applicationDockMenu:` 这个委托方法要的，
+/// 所以这里不看我们设了什么，而是看 delegate 实际返回什么。
+pub fn dump_app_menus() {
+    unsafe {
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let main: id = msg_send![app, mainMenu];
+        dump_menu_desc("主菜单", main);
+
+        let delegate: id = msg_send![app, delegate];
+        if delegate == nil {
+            eprintln!("[beek] NSApp.delegate 为空，Dock 菜单无从谈起");
+            return;
+        }
+        let sel_dock = sel!(applicationDockMenu:);
+        let responds: i8 = msg_send![delegate, respondsToSelector: sel_dock];
+        if responds == 0 {
+            eprintln!("[beek] delegate 没实现 applicationDockMenu:（Dock 右键会退回系统默认菜单）");
+            return;
+        }
+        let dock: id = msg_send![delegate, applicationDockMenu: app];
+        dump_menu_desc("Dock 右键（delegate 实际返回的）", dock);
+    }
 }
 
 /// 创建菜单栏状态图标和菜单。handler/status item 由系统持有，永不释放。
@@ -426,48 +545,6 @@ unsafe fn build_menu(cfg: &Config, handler: id) -> (id, id) {
     (menu, toggle)
 }
 
-/// 主菜单：装它之前，点 Dock 图标把 app 激活时屏幕顶部的菜单栏只有 app 名、没有任何菜单项。
-/// 第一项固定是「app 菜单」（标题由 AppKit 用 app 名替换）；第二项「编辑」是必需的 ——
-/// NSAlert 里的输入框（设置 API Key）靠它才有 ⌘X / ⌘C / ⌘V / ⌘A。
-unsafe fn build_main_menu(handler: id) -> id {
-    let menu_alloc: id = msg_send![class!(NSMenu), alloc];
-    let menu: id = msg_send![menu_alloc, init];
-
-    let app_item_alloc: id = msg_send![class!(NSMenuItem), alloc];
-    let app_item: id = msg_send![app_item_alloc, init];
-    let app_sub_alloc: id = msg_send![class!(NSMenu), alloc];
-    let app_sub: id = msg_send![app_sub_alloc, init];
-
-    add_item(app_sub, "关于 BeeK", sel!(openAbout:), "", handler);
-    add_item(app_sub, "检查更新…", sel!(checkUpdate:), "", handler);
-    add_separator(app_sub);
-    add_item(app_sub, "隐藏 BeeK", sel!(hide:), "h", nil);
-    let hide_other = add_item(app_sub, "隐藏其他", sel!(hideOtherApplications:), "h", nil);
-    // ⌘⌥H：initWithTitle 默认给的是 ⌘，这里补上 Option
-    let _: () = msg_send![hide_other, setKeyEquivalentModifierMask: (1u64 << 20) | (1u64 << 19)];
-    add_item(app_sub, "显示全部", sel!(unhideAllApplications:), "", nil);
-    add_separator(app_sub);
-    add_item(app_sub, "重新启动 BeeK", sel!(restartApp:), "", handler);
-    add_item(app_sub, "退出 BeeK", sel!(quitApp:), "q", handler);
-
-    let _: () = msg_send![app_item, setSubmenu: app_sub];
-    let _: () = msg_send![menu, addItem: app_item];
-
-    let edit_item_alloc: id = msg_send![class!(NSMenuItem), alloc];
-    let edit_item: id = msg_send![edit_item_alloc, init];
-    let edit_sub_alloc: id = msg_send![class!(NSMenu), alloc];
-    let edit_sub: id = msg_send![edit_sub_alloc, init];
-    add_item(edit_sub, "剪切", sel!(cut:), "x", nil);
-    add_item(edit_sub, "复制", sel!(copy:), "c", nil);
-    add_item(edit_sub, "粘贴", sel!(paste:), "v", nil);
-    add_item(edit_sub, "全选", sel!(selectAll:), "a", nil);
-    let _: () = msg_send![edit_item, setSubmenu: edit_sub];
-    let _: () = msg_send![menu, addItem: edit_item];
-
-    menu
-}
-
-
 pub fn setup_status_item(cfg: &Config) {
     unsafe {
         let superclass = Class::get("NSObject").unwrap();
@@ -513,25 +590,19 @@ pub fn setup_status_item(cfg: &Config) {
             let _: () = msg_send![button, setTitle: nsstr("")];
         }
 
-        // 菜单内容只写一遍：菜单栏状态项和 Dock 右键菜单用同一套动作。
-        // NSMenuItem 不能同时属于两个菜单，所以两边各建一份。
+        // 状态项自己的菜单（唯一手搓的一份，因为它不是「应用级菜单」，
+        // gpui 的菜单 API 管不到菜单栏图标）。带勾选态和圆圈 i 图标，没法用 gpui 的模型表达。
         let (menu, toggle) = build_menu(cfg, handler);
         let _: () = msg_send![item, setMenu: menu];
         TOGGLE_ITEM.store(toggle as usize, Ordering::SeqCst);
+        STATUS_ITEM.store(item as usize, Ordering::SeqCst);
+        STATUS_MENU.store(menu as usize, Ordering::SeqCst);
 
-        // Dock 右键菜单：系统默认给的那个只有寥寥几项，换成跟菜单栏一致的动作。
-        let app: id = msg_send![class!(NSApplication), sharedApplication];
-        let (dock_menu, _) = build_menu(cfg, handler);
-        let _: () = msg_send![app, setDockMenu: dock_menu];
-
-        // 主菜单：不装它的话，点 Dock 图标把 app 激活时，屏幕顶部的菜单栏是空的（只剩一个 app 名）。
-        let main_menu = build_main_menu(handler);
-        let _: () = msg_send![app, setMainMenu: main_menu];
-
-        // 取证：三个菜单各有哪些项。不靠肉眼也能确认「菜单不是空的」。
-        dump_menu_desc("菜单栏", menu);
-        dump_menu_desc("Dock 右键", dock_menu);
-        dump_menu_desc("主菜单（激活后屏幕顶部）", main_menu);
+        // 应用级菜单（主菜单 / Dock 右键菜单）不在这里建：macOS 要 Dock 菜单是走
+        // applicationDockMenu: 这个**委托方法**，而 delegate 是 gpui 自己实现的，
+        // 我们手写挂在 NSApp.dockMenu 上的那份会被它挡住。改用 gpui 的
+        // set_menus / set_dock_menu（见 main.rs 的 setup_app_menus）。
+        dump_menu_desc("菜单栏图标菜单", menu);
 
         // 自检：状态栏按钮应挂在窗口上且可见，可用于确认菜单栏图标真的显示了
         let btn_window: id = msg_send![button, window];

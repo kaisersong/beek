@@ -1644,6 +1644,92 @@ fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
     });
 }
 
+// ---------- 应用级菜单（主菜单 / Dock 右键菜单）----------
+//
+// 为什么用 gpui 的菜单 API 而不是自己建 NSMenu：macOS 上 Dock 右键菜单是靠
+// `applicationDockMenu:` 这个**委托方法**要的，而 delegate 是 gpui 自己实现的
+// （见 gpui platform/mac/platform.rs），手写挂在 NSApp.dockMenu 上的那份会被挡住。
+// 主菜单同理：手搓的 NSMenuItem 父项标题会漏成类名（菜单栏上显示「NSMenuItem」）。
+//
+// 唯一例外是「编辑」菜单：gpui 的 delegate 自己实现了 copy:/paste:，用 gpui 的
+// os_action 建出来的项点下去是发给 delegate 再派发成 gpui action，**到不了文本框**，
+// 那样「设置 API Key」的输入框按 ⌘V 就没反应。所以那一份仍然手搓并挂到主菜单上
+// （见 menubar::install_edit_menu）。
+actions!(
+    beek_menu,
+    [
+        MenuOpenAbout,
+        MenuCheckUpdate,
+        MenuKeySettings,
+        MenuReadmeKey,
+        MenuAccessibility,
+        MenuRestart,
+        MenuQuit,
+        MenuToggleDock,
+        MenuToggleCopyToPopup,
+        MenuToggleClipboardFallback
+    ]
+);
+
+fn setup_app_menus(cx: &mut App, tx: mpsc::Sender<UiEvent>) {
+    // ⌘Q：菜单项上的快捷键来自键位绑定（gpui 的菜单没有 keyEquivalent 字段）
+    cx.bind_keys([KeyBinding::new("cmd-q", MenuQuit, None)]);
+
+    let t1 = tx.clone();
+    cx.on_action(move |_: &MenuOpenAbout, _cx| {
+        let _ = t1.send(UiEvent::OpenAbout);
+    });
+    let t2 = tx.clone();
+    cx.on_action(move |_: &MenuCheckUpdate, _cx| {
+        let _ = t2.send(UiEvent::CheckUpdate);
+    });
+    let t3 = tx.clone();
+    cx.on_action(move |_: &MenuKeySettings, _cx| {
+        let _ = t3.send(UiEvent::OpenKeySettings);
+    });
+    cx.on_action(|_: &MenuReadmeKey, _cx| menubar::open_readme_key_url());
+    cx.on_action(|_: &MenuAccessibility, _cx| menubar::open_accessibility_panel());
+    cx.on_action(|_: &MenuRestart, _cx| menubar::restart_now());
+    cx.on_action(|_: &MenuQuit, _cx| menubar::quit_now());
+    cx.on_action(|_: &MenuToggleDock, _cx| {
+        menubar::flip_show_in_dock();
+    });
+    cx.on_action(|_: &MenuToggleCopyToPopup, _cx| {
+        menubar::flip_copy_to_popup();
+    });
+    cx.on_action(|_: &MenuToggleClipboardFallback, _cx| {
+        menubar::flip_clipboard_fallback();
+    });
+
+    // 主菜单：第一项就是 macOS 的「app 菜单」（标题用 app 名）
+    cx.set_menus(vec![Menu {
+        name: "BeeK".into(),
+        items: vec![
+            MenuItem::action("关于 BeeK", MenuOpenAbout),
+            MenuItem::action("检查更新…", MenuCheckUpdate),
+            MenuItem::action("设置 API Key…", MenuKeySettings),
+            MenuItem::action("如何获取 API Key…", MenuReadmeKey),
+            MenuItem::separator(),
+            MenuItem::action("重新启动 BeeK", MenuRestart),
+            MenuItem::action("退出 BeeK", MenuQuit),
+        ],
+    }]);
+
+    // Dock 右键菜单：走 gpui 的 set_dock_menu，AppKit 会经 delegate 拿到它
+    cx.set_dock_menu(vec![
+        MenuItem::action("设置 API Key…", MenuKeySettings),
+        MenuItem::action("如何获取 API Key…", MenuReadmeKey),
+        MenuItem::separator(),
+        MenuItem::action("开启取词权限（辅助功能）…", MenuAccessibility),
+        MenuItem::separator(),
+        MenuItem::action("检查更新…", MenuCheckUpdate),
+        MenuItem::action("关于 BeeK", MenuOpenAbout),
+        MenuItem::separator(),
+        MenuItem::action("重新启动 BeeK", MenuRestart),
+        MenuItem::action("退出 BeeK", MenuQuit),
+    ]);
+}
+
 // ---------- 主入口 ----------
 fn main() {
     if std::env::var("BEEK_TRANSLATE_SELFTEST").is_ok() {
@@ -1731,7 +1817,15 @@ fn main() {
         return;
     }
 
-    Application::new().run(|cx: &mut App| {
+    let app = Application::new();
+    // 这个 app 没有任何窗口：点 Dock 图标时 macOS 发的是「重新打开」
+    // （applicationShouldHandleReopen）。不处理的话用户看起来就是「点了没反应」。
+    // 界面就是菜单栏那个菜单，所以把同一份弹出来。
+    app.on_reopen(|_cx: &mut App| {
+        let shown = menubar::popup_status_menu();
+        eprintln!("[beek] Dock 图标被点击（重新打开）→ 弹出菜单栏菜单：{}", shown);
+    });
+    app.run(|cx: &mut App| {
         let cfg = config::load();
         menubar::set_dock_visible(cfg.show_in_dock);
         // 两个版本号来源必须一致：菜单栏标题读的是编译期版本，关于窗口读的是 bundle 里的
@@ -1753,6 +1847,10 @@ fn main() {
         let (tx, rx) = mpsc::channel::<UiEvent>();
         menubar::set_ui_sender(tx.clone());
         menubar::setup_status_item(&cfg);
+        setup_app_menus(cx, tx.clone());
+        // 编辑菜单要等 gpui 把主菜单建好之后再补上去
+        menubar::install_edit_menu();
+        menubar::dump_app_menus();
 
         let trusted = unsafe { accessibility_sys::AXIsProcessTrusted() };
         eprintln!(

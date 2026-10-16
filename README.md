@@ -170,6 +170,17 @@ open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibil
 | 重新启动 BeeK | 重启进程。改完权限后用 |
 | 退出 BeeK | 退出进程，同时移除 LaunchAgent |
 
+Dock 图标（菜单「在 Dock 中显示」打开后才有）：
+
+- **右键**：弹出同一套动作（设置 API Key / 如何获取 API Key / 取词权限 / 检查更新 / 关于 / 重新启动 / 退出）。
+  这份菜单走的是 gpui 的 `set_dock_menu` —— macOS 是通过 `applicationDockMenu:` 这个委托方法要 Dock 菜单的，
+  手写挂在 `NSApp.dockMenu` 上会被 gpui 自己的 delegate 挡住。
+- **左键**：这个 app 没有窗口，所以 macOS 发的是「重新打开」（`applicationShouldHandleReopen`）。
+  BeeK 的处理是把菜单栏那份菜单弹出来（等于点菜单栏图标），不会出现「点了没反应」。
+- 顶部菜单栏（app 激活时）：app 菜单（关于 / 检查更新 / 设置 API Key / … / 退出）+ 编辑菜单。
+  「编辑」这一项是手搓的，因为 gpui 的 delegate 自己实现了 `copy:`/`paste:`，用 gpui 的菜单项
+  会让动作发给 delegate 而不是文本框，对话框里的 ⌘V 就废了。
+
 版本号来自 `Cargo.toml` 的 `version`。
 
 ## 架构
