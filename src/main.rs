@@ -1918,6 +1918,9 @@ fn main() {
                             close_window(cx, &mut icon_win);
                         }
                         UiEvent::StartTranslate(text, b) => {
+                            // 用户点了我们自己的图标：那一下的坐标就在我們窗口上，
+                            // AX 轮询拿着它会问到我们自己（死锁），先置宽限
+                            ax::pulse_self_ui();
                             if let Some(id) = in_flight {
                                 eprintln!("[beek] +{}ms 忽略重复点击（id={} 仍在翻译中）", ms(t0), id);
                                 continue;
@@ -2323,6 +2326,16 @@ fn main() {
                     let rect = g.card_cocoa();
                     let handle = drag_handle_cocoa(&g);
                     let (mx, my, buttons) = mouse::state();
+                    // 鼠标按在我们自己的卡片上：同上面的理由，先置 AX 宽限
+                    if prev_buttons == Some(0)
+                        && buttons != 0
+                        && mx >= rect.0
+                        && mx <= rect.0 + rect.2
+                        && my >= rect.1
+                        && my <= rect.1 + rect.3
+                    {
+                        ax::pulse_self_ui();
+                    }
                     match prev_buttons {
                         // 第一次采样只记状态，不判定
                         None => prev_buttons = Some(buttons),

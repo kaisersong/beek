@@ -52,6 +52,8 @@ unsafe fn enter_dialog_context() -> Option<i64> {
     // activateIgnoringOtherApps: 在 14.0 标记为 deprecated，但各版本都还能用；
     // 换成 activate() 的话老系统没有这个选择器。
     let _: () = msg_send![app, activateIgnoringOtherApps: true];
+    // 让 AX 轮询别再问 AX：现在前台是我们自己，问自己会死锁（见 ax::set_self_ui_front）
+    crate::ax::set_self_ui_front(true);
     if policy != 0 {
         Some(policy)
     } else {
@@ -61,6 +63,7 @@ unsafe fn enter_dialog_context() -> Option<i64> {
 
 /// 对话框结束，恢复原来的激活策略（Accessory = 没有 Dock 图标）
 unsafe fn leave_dialog_context(prev: Option<i64>) {
+    crate::ax::set_self_ui_front(false);
     let app: id = msg_send![class!(NSApplication), sharedApplication];
     // isActive 是「不再请求用户注意（Dock 图标不跳）」的直接证据：
     // 模态框期间 app 真的在前台，就不需要 AppKit 去请求注意了
@@ -100,6 +103,11 @@ pub fn alert(title: &str, body: &str, buttons: &[&str]) -> usize {
             let _: id = msg_send![alert, addButtonWithTitle: nsstr(b)];
         }
         let prev = enter_dialog_context();
+        // 诊断：BEEK_DIALOG_AUTOCLOSE=1 时 2 秒后自动「按好」，
+        // 用来验证「框关掉之后」的状态（那时 app 可能还在最前面）
+        if std::env::var("BEEK_DIALOG_AUTOCLOSE").is_ok() {
+            crate::menubar::stop_modal_async(std::time::Duration::from_secs(2));
+        }
         let resp: NSInteger = msg_send![alert, runModal];
         leave_dialog_context(prev);
         (resp - 1000).max(0) as usize

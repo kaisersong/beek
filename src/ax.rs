@@ -340,6 +340,15 @@ unsafe fn focused_app() -> Option<AXUIElementRef> {
             let app = a as AXUIElementRef;
             let mut pid: LibcPid = 0;
             if AXUIElementGetPid(app, &mut pid) == 0 && pid > 0 {
+                if pid == std::process::id() as LibcPid {
+                    // 前台是我们自己（对话框/面板在前面）：绝对不要问自己，会死锁
+                    log_throttled(
+                        "焦点是自己",
+                        3,
+                        "[beek] 取词：前台是 BeeK 自己（弹框/面板在前面），本轮跳过 AX",
+                    );
+                    return None;
+                }
                 LAST_APP_PID.store(pid, std::sync::atomic::Ordering::Relaxed);
             }
             return Some(app);
@@ -384,6 +393,53 @@ fn log_throttled(key: &'static str, secs: u64, msg: &str) {
     }
     guard.insert(key, now);
     eprintln!("{}", msg);
+}
+
+/// 「我们自己的界面正在最前面」这个判断，用**开关 + 时间窗口**两件东西表达。
+///
+/// 为什么需要它：AX 查询的目标如果**是我们自己**，AppKit 会在**调用线程里**遍历自己的
+/// 视图来回答（栈上是 `-[NSApplication accessibilityHitTest:]`），那要 NSViewHierarchyLock；
+/// 主线程此刻可能正在做 display cycle 的布局刷新、也要这把锁 → 两边互等，主线程卡死
+/// （表现就是转圈、菜单/弹框点了没反应）。
+///
+/// 为什么还要时间窗口：真正踩到的路径是 `AXUIElementCopyElementAtPosition` ——
+/// 用户点了我们自己对话框上的按钮，那**一下的坐标**就在我们窗口上；哪怕对话框已经关掉，
+/// 轮询拿着这个坐标去问，问到的还是我们自己。所以要「关掉之后再留一段宽限」。
+/// 实测：不留宽限时，点「已保存」对话框的「好」之后必卡。
+static SELF_UI_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SELF_UI_GRACE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 关掉之后再宽限这么久（轮询每 50ms 一次，够覆盖「刚点完那一下」）
+const SELF_UI_GRACE: u64 = 1500;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn grace_until() -> u64 {
+    SELF_UI_GRACE_MS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 我们自己的界面打开/关闭（对话框、菜单）。关闭时留一段宽限，见上面的说明。
+pub fn set_self_ui_front(on: bool) {
+    use std::sync::atomic::Ordering;
+    SELF_UI_OPEN.store(on, Ordering::Relaxed);
+    if !on {
+        SELF_UI_GRACE_MS.store(now_ms() + SELF_UI_GRACE, Ordering::Relaxed);
+    }
+}
+
+/// 我们自己的窗口上刚发生一次点击（图标窗口 / 弹窗）——只延长宽限窗口
+pub fn pulse_self_ui() {
+    SELF_UI_GRACE_MS.store(now_ms() + SELF_UI_GRACE, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 现在要不要跳过 AX 查询（我们自己的界面在前台，或刚点过我们自己的界面）
+fn self_ui_in_front() -> bool {
+    SELF_UI_OPEN.load(std::sync::atomic::Ordering::Relaxed) || now_ms() < grace_until()
 }
 
 /// 按屏幕坐标取元素：`AXUIElementCopyElementAtPosition`。
@@ -431,6 +487,16 @@ pub unsafe fn describe_at_position(x: f64, y: f64) -> String {
 /// 监视器每 tick 都调这个函数，所以平时靠 `deep=false` 只走便宜的路
 /// （焦点元素 → 父链 → 焦点元素子树）；只有刚发生过划词动作时才放开深层搜索。
 pub unsafe fn ax_selection(deep: bool, point: Option<(f64, f64)>) -> Option<Selection> {
+    // 自己的界面在最前面（对话框/菜单开着）→ 直接不问 AX：
+    // 问自己的视图会和主线程的布局刷新抢锁，死锁（见 SELF_FRONTMOST）
+    if self_ui_in_front() {
+        log_throttled(
+            "自己在前台",
+            3,
+            "[beek] 取词：我们自己的界面在前台 / 刚被点过 → 本轮跳过 AX（问自己会和主线程抢锁）",
+        );
+        return None;
+    }
     // 先确保前台应用的完整 AX 树是打开的（WebKit/Electron 不打开就一个选区都读不到）
     let last = LAST_APP_PID.load(std::sync::atomic::Ordering::Relaxed);
     if last > 0 {

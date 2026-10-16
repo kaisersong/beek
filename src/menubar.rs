@@ -344,6 +344,44 @@ static STATUS_MENU: AtomicUsize = AtomicUsize::new(0);
 /// 实测：这么写的版本点一次 Dock 图标崩一次。
 /// 用 performSelectorOnMainThread（waitUntilDone=NO）把它丢到下一次主循环，
 /// reopen 回调立刻返回、借用立刻释放，菜单在下一轮 runloop 里弹。
+/// 菜单打开/关闭：这段时间我们的界面就在最前面，AX 轮询必须停手
+/// （问自己会和主线程的布局刷新抢 NSViewHierarchyLock，见 ax::set_self_ui_front）
+extern "C" fn menu_will_open(_this: &Object, _sel: Sel, _menu: id) {
+    crate::ax::set_self_ui_front(true);
+}
+
+extern "C" fn menu_did_close(_this: &Object, _sel: Sel, _menu: id) {
+    crate::ax::set_self_ui_front(false);
+}
+
+/// 诊断用：在主线程上结束当前模态会话（等价于点对话框的按钮）。
+/// 用途：验证「对话框关掉之后」的状态 —— 那时 app 可能还在最前面，
+/// 而 AX 轮询问到自己会死锁（见 ax::set_self_ui_front）。
+extern "C" fn stop_modal_action(_this: &Object, _sel: Sel, _sender: id) {
+    unsafe {
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![app, stopModalWithCode: 1000i64];
+    }
+}
+
+/// 稍后在主线程结束模态会话（后台线程不能直接碰 AppKit）
+pub fn stop_modal_async(delay: std::time::Duration) {
+    let handler_addr = HANDLER.load(Ordering::SeqCst);
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        unsafe {
+            let handler = handler_addr as id;
+            if handler == nil {
+                return;
+            }
+            let _: () = msg_send![handler,
+                performSelectorOnMainThread: sel!(stopModalOnMain:)
+                withObject: nil
+                waitUntilDone: false];
+        }
+    });
+}
+
 extern "C" fn popup_menu_action(_this: &Object, _sel: Sel, _sender: id) {
     // 先记日志再弹：popup_status_menu 是模态循环，要等菜单关掉才返回，
     // 日志写在后面的话「菜单还开着」这段时间里完全没有痕迹（排查时会被误导）。
@@ -565,6 +603,8 @@ unsafe fn add_separator(menu: id) {
 unsafe fn build_menu(cfg: &Config, handler: id) -> (id, id) {
     let menu_alloc: id = msg_send![class!(NSMenu), alloc];
     let menu: id = msg_send![menu_alloc, init];
+    // 自己的 delegate：只为拿到「菜单开着」的时机，好让 AX 轮询停手
+    let _: () = msg_send![menu, setDelegate: handler];
 
     // 第一项只显示版本，不可点
     let title = add_item(
@@ -639,6 +679,9 @@ pub fn setup_status_item(cfg: &Config) {
         // Dock 图标点击（reopen）走这一条：必须是能「稍后执行」的 selector 方法
         decl.add_method(sel!(popupStatusMenu:), popup_menu_action as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(quitOnMain:), quit_on_main_action as extern "C" fn(&Object, Sel, id));
+        decl.add_method(sel!(menuWillOpen:), menu_will_open as extern "C" fn(&Object, Sel, id));
+        decl.add_method(sel!(stopModalOnMain:), stop_modal_action as extern "C" fn(&Object, Sel, id));
+        decl.add_method(sel!(menuDidClose:), menu_did_close as extern "C" fn(&Object, Sel, id));
         let cls = decl.register();
         let handler: id = msg_send![cls, new];
 
