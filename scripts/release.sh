@@ -20,16 +20,19 @@ VERSION=$(sed -n 's/^version = "\(.*\)".*/\1/p' "$ROOT/Cargo.toml" | head -1)
 [ -n "$VERSION" ] || { echo "读不到 Cargo.toml 里的 version"; exit 1; }
 ZIP="$ROOT/dist/BeeK-v$VERSION.zip"
 
-echo "== 1/5 构建 + 安装（复用 package_app.sh，签名策略保持一致）=="
-sh "$ROOT/scripts/package_app.sh"
-
-echo "== 2/5 版本号写进 bundle（版本 $VERSION）=="
+# 版本号必须在 package_app.sh **之前**写：那个脚本会把这份 Info.plist 装进 bundle、然后启动 app。
+# 反过来（先启动、再改 plist）会让进程里的 NSBundle 缓存住旧版本，于是出现
+# 「菜单栏显示新版本、关于窗口显示旧版本」的不一致 —— 1.0.5 就是这么翻的。
+echo "== 1/5 版本号写进 resources/Info.plist（版本 $VERSION）=="
 BUILD=$(/usr/libexec/PlistBuddy -c Print:CFBundleVersion "$ROOT/resources/Info.plist" 2>/dev/null || echo 1)
 BUILD=$((BUILD + 1))
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$ROOT/resources/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$ROOT/resources/Info.plist"
-cp "$ROOT/resources/Info.plist" "$APP/Contents/Info.plist"
-echo "   CFBundleShortVersionString=$(/usr/libexec/PlistBuddy -c Print:CFBundleShortVersionString "$APP/Contents/Info.plist") CFBundleVersion=$BUILD"
+echo "   resources/Info.plist：CFBundleShortVersionString=$VERSION CFBundleVersion=$BUILD"
+
+echo "== 2/5 构建 + 安装（复用 package_app.sh，签名策略保持一致）=="
+sh "$ROOT/scripts/package_app.sh"
+echo "   已安装 bundle：$(/usr/libexec/PlistBuddy -c Print:CFBundleShortVersionString "$APP/Contents/Info.plist")（构建号 $(/usr/libexec/PlistBuddy -c Print:CFBundleVersion "$APP/Contents/Info.plist")）"
 
 echo "== 3/5 重新签名（证书优先，保证辅助功能授权不丢）=="
 DEVID=$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)

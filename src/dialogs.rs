@@ -177,5 +177,7 @@ pub fn about_dialog() -> usize {
         build,
         crate::update::REPO
     );
-    alert("BeeK 🐝", &body, &["检查更新…", "打开 README", "好"])
+    // 标题不再带 emoji：NSAlert 的图标本来就是 app 自己的图标（真实素材），
+    // 再写一个 🐝 字形等于在真图标下面又贴了个假图标。
+    alert("BeeK", &body, &["检查更新…", "打开 README", "好"])
 }

@@ -294,6 +294,180 @@ extern "C" fn quit_app(_this: &Object, _sel: Sel, _sender: id) {
 }
 
 /// 创建菜单栏状态图标和菜单。handler/status item 由系统持有，永不释放。
+
+// ---------- 菜单构造：状态项 / Dock 右键 / 主菜单共用 ----------
+
+unsafe fn item_title(item: id) -> String {
+    let t: id = msg_send![item, title];
+    if t == nil {
+        return String::new();
+    }
+    let ptr: *const std::os::raw::c_char = msg_send![t, UTF8String];
+    if ptr.is_null() {
+        String::new()
+    } else {
+        std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+    }
+}
+
+/// 打印一个菜单有哪些项（含子菜单里的项）。取证用。
+pub fn dump_menu_desc(tag: &str, menu: id) {
+    unsafe {
+        if menu == nil {
+            eprintln!("[beek] {} 菜单：未创建", tag);
+            return;
+        }
+        let count: usize = msg_send![menu, numberOfItems];
+        eprintln!("[beek] {} 菜单共 {} 项：", tag, count);
+        for i in 0..count {
+            let mi: id = msg_send![menu, itemAtIndex: i];
+            let title = item_title(mi);
+            let sub: id = msg_send![mi, submenu];
+            if sub == nil {
+                eprintln!("[beek]   [{}] 「{}」", i, title);
+            } else {
+                let n: usize = msg_send![sub, numberOfItems];
+                let mut names: Vec<String> = Vec::new();
+                for j in 0..n {
+                    let sj: id = msg_send![sub, itemAtIndex: j];
+                    let st = item_title(sj);
+                    names.push(if st.is_empty() { "—（分隔线）".to_string() } else { st });
+                }
+                eprintln!(
+                    "[beek]   [{}] 「{}」→ {} 项：{}",
+                    i,
+                    title,
+                    n,
+                    names.join(" / ")
+                );
+            }
+        }
+    }
+}
+
+/// 往菜单里挂一项。target 传 nil 表示走响应链：隐藏窗口、剪切复制粘贴、全选
+/// 这类标准动作由 AppKit 自己处理，不需要我们实现。
+unsafe fn add_item(menu: id, title: &str, action: Sel, key: &str, target: id) -> id {
+    let alloc: id = msg_send![class!(NSMenuItem), alloc];
+    let mi: id = msg_send![alloc,
+        initWithTitle: nsstr(title)
+        action: action
+        keyEquivalent: nsstr(key)];
+    if target != nil {
+        let _: () = msg_send![mi, setTarget: target];
+    }
+    let _: () = msg_send![menu, addItem: mi];
+    mi
+}
+
+unsafe fn add_separator(menu: id) {
+    let sep: id = msg_send![class!(NSMenuItem), separatorItem];
+    let _: () = msg_send![menu, addItem: sep];
+}
+
+/// 建一套 BeeK 的动作菜单，返回（菜单, 「在 Dock 中显示」那一项）。
+unsafe fn build_menu(cfg: &Config, handler: id) -> (id, id) {
+    let menu_alloc: id = msg_send![class!(NSMenu), alloc];
+    let menu: id = msg_send![menu_alloc, init];
+
+    // 第一项只显示版本，不可点
+    let title = add_item(
+        menu,
+        &format!("BeeK 划词翻译 v{}", crate::update::CURRENT_VERSION),
+        sel!(noop:),
+        "",
+        nil,
+    );
+    let _: () = msg_send![title, setEnabled: false];
+
+    add_item(menu, "开启取词权限（辅助功能）…", sel!(openAccessibilitySettings:), "", handler);
+
+    let toggle = add_item(menu, "在 Dock 中显示", sel!(toggleDock:), "", handler);
+    let _: () = msg_send![toggle, setState: if cfg.show_in_dock { 1i64 } else { 0i64 }];
+
+    // 复制即弹按钮：你自己按 ⌘C 时在鼠标旁弹小蜜蜂（不合成输入、不依赖 AX，最可靠）
+    let c2p = add_item(menu, "复制即弹按钮（自己按 ⌘C）", sel!(toggleCopyToPopup:), "", handler);
+    let _: () = msg_send![c2p, setState: if cfg.copy_to_popup { 1i64 } else { 0i64 }];
+
+    // 剪贴板兜底：AX 取不到选区时，模拟一次 ⌘C 读剪贴板（Safari/Muse/Grok Bot 这类应用必须开）
+    let clip = add_item(menu, "剪贴板兜底取词", sel!(toggleClipboardFallback:), "", handler);
+    let _: () = msg_send![clip, setState: if cfg.clipboard_fallback { 1i64 } else { 0i64 }];
+
+    add_separator(menu);
+
+    // 设置 API Key：弹出的对话框由主循环用 AppKit 的 NSAlert 呈现
+    add_item(menu, "设置 API Key…", sel!(openKeySettings:), "", handler);
+
+    // 「如何获取 API Key…」：带一个圆圈 i 图标，点开 README 对应章节
+    let help = add_item(menu, "如何获取 API Key…", sel!(openReadmeKey:), "", handler);
+    let png = icons::CIRCLE_I_PNG;
+    let data: id = msg_send![class!(NSData),
+        dataWithBytes: png.as_ptr() as *const std::os::raw::c_void
+        length: png.len() as NSUInteger];
+    let img_alloc: id = msg_send![class!(NSImage), alloc];
+    let circle: id = msg_send![img_alloc, initWithData: data];
+    if circle == nil {
+        eprintln!("[beek] ⚠️ 圆圈 i 图标解码失败，菜单项将没有图标");
+    } else {
+        let sz = NSSize::new(icons::MENU_ICON_PT, icons::MENU_ICON_PT);
+        let _: () = msg_send![circle, setSize: sz];
+        // template：交给 AppKit 按菜单明暗自动反色
+        let _: () = msg_send![circle, setTemplate: YES];
+        let _: () = msg_send![help, setImage: circle];
+    }
+
+    add_separator(menu);
+    add_item(menu, "检查更新…", sel!(checkUpdate:), "", handler);
+    add_item(menu, "关于 BeeK", sel!(openAbout:), "", handler);
+    add_separator(menu);
+    add_item(menu, "重新启动 BeeK", sel!(restartApp:), "", handler);
+    add_item(menu, "退出 BeeK", sel!(quitApp:), "q", handler);
+
+    (menu, toggle)
+}
+
+/// 主菜单：装它之前，点 Dock 图标把 app 激活时屏幕顶部的菜单栏只有 app 名、没有任何菜单项。
+/// 第一项固定是「app 菜单」（标题由 AppKit 用 app 名替换）；第二项「编辑」是必需的 ——
+/// NSAlert 里的输入框（设置 API Key）靠它才有 ⌘X / ⌘C / ⌘V / ⌘A。
+unsafe fn build_main_menu(handler: id) -> id {
+    let menu_alloc: id = msg_send![class!(NSMenu), alloc];
+    let menu: id = msg_send![menu_alloc, init];
+
+    let app_item_alloc: id = msg_send![class!(NSMenuItem), alloc];
+    let app_item: id = msg_send![app_item_alloc, init];
+    let app_sub_alloc: id = msg_send![class!(NSMenu), alloc];
+    let app_sub: id = msg_send![app_sub_alloc, init];
+
+    add_item(app_sub, "关于 BeeK", sel!(openAbout:), "", handler);
+    add_item(app_sub, "检查更新…", sel!(checkUpdate:), "", handler);
+    add_separator(app_sub);
+    add_item(app_sub, "隐藏 BeeK", sel!(hide:), "h", nil);
+    let hide_other = add_item(app_sub, "隐藏其他", sel!(hideOtherApplications:), "h", nil);
+    // ⌘⌥H：initWithTitle 默认给的是 ⌘，这里补上 Option
+    let _: () = msg_send![hide_other, setKeyEquivalentModifierMask: (1u64 << 20) | (1u64 << 19)];
+    add_item(app_sub, "显示全部", sel!(unhideAllApplications:), "", nil);
+    add_separator(app_sub);
+    add_item(app_sub, "重新启动 BeeK", sel!(restartApp:), "", handler);
+    add_item(app_sub, "退出 BeeK", sel!(quitApp:), "q", handler);
+
+    let _: () = msg_send![app_item, setSubmenu: app_sub];
+    let _: () = msg_send![menu, addItem: app_item];
+
+    let edit_item_alloc: id = msg_send![class!(NSMenuItem), alloc];
+    let edit_item: id = msg_send![edit_item_alloc, init];
+    let edit_sub_alloc: id = msg_send![class!(NSMenu), alloc];
+    let edit_sub: id = msg_send![edit_sub_alloc, init];
+    add_item(edit_sub, "剪切", sel!(cut:), "x", nil);
+    add_item(edit_sub, "复制", sel!(copy:), "c", nil);
+    add_item(edit_sub, "粘贴", sel!(paste:), "v", nil);
+    add_item(edit_sub, "全选", sel!(selectAll:), "a", nil);
+    let _: () = msg_send![edit_item, setSubmenu: edit_sub];
+    let _: () = msg_send![menu, addItem: edit_item];
+
+    menu
+}
+
+
 pub fn setup_status_item(cfg: &Config) {
     unsafe {
         let superclass = Class::get("NSObject").unwrap();
@@ -339,130 +513,25 @@ pub fn setup_status_item(cfg: &Config) {
             let _: () = msg_send![button, setTitle: nsstr("")];
         }
 
-        let menu_alloc: id = msg_send![class!(NSMenu), alloc];
-        let menu: id = msg_send![menu_alloc, init];
-
-        let title_alloc: id = msg_send![class!(NSMenuItem), alloc];
-        let title: id = msg_send![title_alloc,
-            initWithTitle: nsstr(&format!("BeeK 划词翻译 v{}", crate::update::CURRENT_VERSION))
-            action: sel!(noop:)
-            keyEquivalent: nsstr("")];
-        let _: () = msg_send![title, setEnabled: false];
-        let _: () = msg_send![menu, addItem: title];
-
-        let ax_alloc: id = msg_send![class!(NSMenuItem), alloc];
-        let ax_item: id = msg_send![ax_alloc,
-            initWithTitle: nsstr("开启取词权限（辅助功能）…")
-            action: sel!(openAccessibilitySettings:)
-            keyEquivalent: nsstr("")];
-        let _: () = msg_send![ax_item, setTarget: handler];
-        let _: () = msg_send![menu, addItem: ax_item];
-
-        let toggle_alloc: id = msg_send![class!(NSMenuItem), alloc];
-        let toggle: id = msg_send![toggle_alloc,
-            initWithTitle: nsstr("在 Dock 中显示")
-            action: sel!(toggleDock:)
-            keyEquivalent: nsstr("")];
-        let _: () = msg_send![toggle, setTarget: handler];
-        let _: () = msg_send![toggle, setState: if cfg.show_in_dock { 1i64 } else { 0i64 }];
-        let _: () = msg_send![menu, addItem: toggle];
+        // 菜单内容只写一遍：菜单栏状态项和 Dock 右键菜单用同一套动作。
+        // NSMenuItem 不能同时属于两个菜单，所以两边各建一份。
+        let (menu, toggle) = build_menu(cfg, handler);
+        let _: () = msg_send![item, setMenu: menu];
         TOGGLE_ITEM.store(toggle as usize, Ordering::SeqCst);
 
-        // 复制即弹按钮：你自己按 ⌘C 时在鼠标旁弹小蜜蜂（不合成输入、不依赖 AX，最可靠）
-        let c2p_alloc: id = msg_send![class!(NSMenuItem), alloc];
-        let c2p_item: id = msg_send![c2p_alloc,
-            initWithTitle: nsstr("复制即弹按钮（自己按 ⌘C）")
-            action: sel!(toggleCopyToPopup:)
-            keyEquivalent: nsstr("")];
-        let _: () = msg_send![c2p_item, setTarget: handler];
-        let _: () = msg_send![c2p_item, setState: if cfg.copy_to_popup { 1i64 } else { 0i64 }];
-        let _: () = msg_send![menu, addItem: c2p_item];
+        // Dock 右键菜单：系统默认给的那个只有寥寥几项，换成跟菜单栏一致的动作。
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let (dock_menu, _) = build_menu(cfg, handler);
+        let _: () = msg_send![app, setDockMenu: dock_menu];
 
-        // 剪贴板兜底：AX 取不到选区时，模拟 ⌘C 读剪贴板（Safari/Muse/Grok Bot 这类应用必须开）
-        let clip_alloc: id = msg_send![class!(NSMenuItem), alloc];
-        let clip_item: id = msg_send![clip_alloc,
-            initWithTitle: nsstr("剪贴板兜底取词")
-            action: sel!(toggleClipboardFallback:)
-            keyEquivalent: nsstr("")];
-        let _: () = msg_send![clip_item, setTarget: handler];
-        let _: () = msg_send![clip_item, setState: if cfg.clipboard_fallback { 1i64 } else { 0i64 }];
-        let _: () = msg_send![menu, addItem: clip_item];
+        // 主菜单：不装它的话，点 Dock 图标把 app 激活时，屏幕顶部的菜单栏是空的（只剩一个 app 名）。
+        let main_menu = build_main_menu(handler);
+        let _: () = msg_send![app, setMainMenu: main_menu];
 
-        let sep2: id = msg_send![class!(NSMenuItem), separatorItem];
-        let _: () = msg_send![menu, addItem: sep2];
-
-        // 设置 API Key：弹出的对话框由主循环用 AppKit 的 NSAlert 呈现
-        let key_alloc: id = msg_send![class!(NSMenuItem), alloc];
-        let key_item: id = msg_send![key_alloc,
-            initWithTitle: nsstr("设置 API Key…")
-            action: sel!(openKeySettings:)
-            keyEquivalent: nsstr("")];
-        let _: () = msg_send![key_item, setTarget: handler];
-        let _: () = msg_send![menu, addItem: key_item];
-
-        // 「如何获取 API Key…」：带一个圆圈 i 图标，点开 README 对应章节
-        let help_alloc: id = msg_send![class!(NSMenuItem), alloc];
-        let help_item: id = msg_send![help_alloc,
-            initWithTitle: nsstr("如何获取 API Key…")
-            action: sel!(openReadmeKey:)
-            keyEquivalent: nsstr("")];
-        let _: () = msg_send![help_item, setTarget: handler];
-        let png = icons::CIRCLE_I_PNG;
-        let data: id = msg_send![class!(NSData),
-            dataWithBytes: png.as_ptr() as *const std::os::raw::c_void
-            length: png.len() as NSUInteger];
-        let img_alloc: id = msg_send![class!(NSImage), alloc];
-        let circle: id = msg_send![img_alloc, initWithData: data];
-        if circle == nil {
-            eprintln!("[beek] ⚠️ 圆圈 i 图标解码失败，菜单项将没有图标");
-        } else {
-            let sz = NSSize::new(icons::MENU_ICON_PT, icons::MENU_ICON_PT);
-            let _: () = msg_send![circle, setSize: sz];
-            // template：交给 AppKit 按菜单明暗自动反色
-            let _: () = msg_send![circle, setTemplate: YES];
-            let _: () = msg_send![help_item, setImage: circle];
-        }
-        let _: () = msg_send![menu, addItem: help_item];
-
-        let sep3: id = msg_send![class!(NSMenuItem), separatorItem];
-        let _: () = msg_send![menu, addItem: sep3];
-
-        let upd_alloc: id = msg_send![class!(NSMenuItem), alloc];
-        let upd_item: id = msg_send![upd_alloc,
-            initWithTitle: nsstr("检查更新…")
-            action: sel!(checkUpdate:)
-            keyEquivalent: nsstr("")];
-        let _: () = msg_send![upd_item, setTarget: handler];
-        let _: () = msg_send![menu, addItem: upd_item];
-
-        let about_alloc: id = msg_send![class!(NSMenuItem), alloc];
-        let about_item: id = msg_send![about_alloc,
-            initWithTitle: nsstr("关于 BeeK")
-            action: sel!(openAbout:)
-            keyEquivalent: nsstr("")];
-        let _: () = msg_send![about_item, setTarget: handler];
-        let _: () = msg_send![menu, addItem: about_item];
-
-        let sep: id = msg_send![class!(NSMenuItem), separatorItem];
-        let _: () = msg_send![menu, addItem: sep];
-
-        let restart_alloc: id = msg_send![class!(NSMenuItem), alloc];
-        let restart: id = msg_send![restart_alloc,
-            initWithTitle: nsstr("重新启动 BeeK")
-            action: sel!(restartApp:)
-            keyEquivalent: nsstr("")];
-        let _: () = msg_send![restart, setTarget: handler];
-        let _: () = msg_send![menu, addItem: restart];
-
-        let quit_alloc: id = msg_send![class!(NSMenuItem), alloc];
-        let quit: id = msg_send![quit_alloc,
-            initWithTitle: nsstr("退出 BeeK")
-            action: sel!(quitApp:)
-            keyEquivalent: nsstr("q")];
-        let _: () = msg_send![quit, setTarget: handler];
-        let _: () = msg_send![menu, addItem: quit];
-
-        let _: () = msg_send![item, setMenu: menu];
+        // 取证：三个菜单各有哪些项。不靠肉眼也能确认「菜单不是空的」。
+        dump_menu_desc("菜单栏", menu);
+        dump_menu_desc("Dock 右键", dock_menu);
+        dump_menu_desc("主菜单（激活后屏幕顶部）", main_menu);
 
         // 自检：状态栏按钮应挂在窗口上且可见，可用于确认菜单栏图标真的显示了
         let btn_window: id = msg_send![button, window];

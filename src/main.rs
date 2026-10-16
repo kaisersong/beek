@@ -1734,6 +1734,20 @@ fn main() {
     Application::new().run(|cx: &mut App| {
         let cfg = config::load();
         menubar::set_dock_visible(cfg.show_in_dock);
+        // 两个版本号来源必须一致：菜单栏标题读的是编译期版本，关于窗口读的是 bundle 里的
+        // Info.plist。不一致过一次（菜单栏 1.0.5、关于 1.0.4），所以这里开机就报出来。
+        let (bv, bb) = update::bundle_version();
+        eprintln!(
+            "[beek] 版本：编译期 v{}，bundle v{}（构建号 {}）{}",
+            update::CURRENT_VERSION,
+            bv,
+            bb,
+            if bv == update::CURRENT_VERSION {
+                ""
+            } else {
+                " ⚠️ 两者不一致（发布时写版本号的时机错了）"
+            }
+        );
         // 事件通道先于菜单创建：菜单里的「设置 API Key / 检查更新 / 关于」
         // 都要把动作转回主循环执行
         let (tx, rx) = mpsc::channel::<UiEvent>();
