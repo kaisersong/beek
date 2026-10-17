@@ -271,6 +271,9 @@ CI 需要的 repo secrets（**值只能由仓库所有者添加**）：
 | `BEEK_UPDATE_CHECK=1` | 跑一次「检查更新」并打印结果 |
 | `BEEK_UPDATE_PREPARE=<zip 地址>` | 配合上一条，把「下载 → 解压」也跑一遍（不碰 /Applications） |
 | `BEEK_UPDATE_APPLY=1`（可用 `BEEK_UPDATE_SELFTEST_URL=<zip 地址>` 换源） | 端到端：检查 → 下载 → 解压 → 生成替换脚本 → 退出自己 |
+| `BEEK_UPDATE_FEED=<atom 地址>` + `BEEK_UPDATE_ASSET=<zip 地址>` | 把「检查更新」指到本地假 feed / 本地 zip，不发版也能验证自动更新整条链路 |
+| `BEEK_UPDATE_SCRIPT_DUMP=1` | 生成两种安装脚本（立即更新 / 静默安装）到 `/tmp/update-*.sh` 便于对比 |
+| `BEEK_QUIT_TEST=1` | 走一遍真实退出路径（`launchctl bootout` + 删 plist + 可能的静默安装） |
 | `BEEK_ABOUT_ON_START=1` | 启动后自动弹一次「关于」，用来观察只跟「激活状态 / 模态框」有关的行为 |
 | `BEEK_DIALOG_AUTOCLOSE=1` | 对话框 2 秒后自动「按好」关掉，不用手点也能验证关框之后的行为 |
 | `BEEK_ARK_KEY` | 翻译用的 API Key（配置文件的兜底） |

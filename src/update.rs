@@ -148,8 +148,11 @@ fn probe_asset(version: &str) -> Option<String> {
 /// 查最新 release。返回 Ok(None) 表示「没有发布过任何 release」（还没发过版，不算错误）。
 /// 预发布版（tag 里带 -beta 之类）会被跳过，避免稳定版用户被推去装 beta。
 pub fn check() -> Result<Option<Release>, String> {
+    // 离线自检用：BEEK_UPDATE_FEED 指向本地假 feed，BEEK_UPDATE_ASSET 指向本地 zip，
+    // 就能在不发版的情况下验证「自动更新」整条链路（发现 → 下载 → 暂存 → 提示）。
+    let feed = std::env::var("BEEK_UPDATE_FEED").unwrap_or_else(|_| RELEASES_ATOM.to_string());
     let resp = client()?
-        .get(RELEASES_ATOM)
+        .get(&feed)
         .send()
         .map_err(|e| format!("请求失败：{}", e))?;
     if !resp.status().is_success() {
@@ -194,7 +197,7 @@ pub fn check() -> Result<Option<Release>, String> {
         let notes = between(entry, "<content type=\"html\">", "</content>")
             .map(|c| strip_html(&c))
             .unwrap_or_default();
-        let asset_url = probe_asset(&version);
+        let asset_url = std::env::var("BEEK_UPDATE_ASSET").ok().or_else(|| probe_asset(&version));
         return Ok(Some(Release {
             version,
             tag,
