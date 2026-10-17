@@ -59,6 +59,10 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "版本 ${V}，tag ${TAG}（资产名 BeeK-v$V.zip，app 的检查更新按这个名字找）"
 
+      - name: 检查 shell 变量写法（bash 5 会把变量后的全角标点当成变量名）
+        # 这个坑踩过两次：本地 /bin/sh 是 bash 3.2 测不出来，只在 runner 的 bash 5 上炸。
+        run: python3 scripts/dev/check_shell_vars.py
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
@@ -193,7 +197,7 @@ jobs:
           xcrun stapler staple "$DMG"
           xcrun stapler validate "$DMG"
           spctl -a -t open --context context:primary-signature -vv "$DMG"
-          echo "$DMG（$(ls -lh "$DMG" | awk '{print $5}')）"
+          echo "${DMG}（$(ls -lh "$DMG" | awk '{print $5}')）"
           shasum -a 256 "$DMG" | tee "$DMG.sha256"
           echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
 
