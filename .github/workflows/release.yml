@@ -173,7 +173,8 @@ jobs:
           ditto -c -k --keepParent "$APP" "$ZIP"
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
           echo "${ZIP}（$(ls -lh "$ZIP" | awk '{print $5}')）"
-          shasum -a 256 "$ZIP" | tee "$ZIP.sha256"
+          # 只写文件名：用户是在下载目录里跑 shasum -c，带 dist/ 前缀会找不到文件
+          (cd dist && shasum -a 256 "$(basename "$ZIP")" > "$(basename "$ZIP").sha256" && cat "$(basename "$ZIP").sha256")
 
       - name: 打包 DMG（给用户手动安装：双击挂载 → 拖进「应用程序」）
         id: dmg
@@ -198,7 +199,7 @@ jobs:
           xcrun stapler validate "$DMG"
           spctl -a -t open --context context:primary-signature -vv "$DMG"
           echo "${DMG}（$(ls -lh "$DMG" | awk '{print $5}')）"
-          shasum -a 256 "$DMG" | tee "$DMG.sha256"
+          (cd dist && shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256" && cat "$(basename "$DMG").sha256")
           echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
 
       - name: 上传 artifact（无论发不发布都留一份，便于人工验证）
