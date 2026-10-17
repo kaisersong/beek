@@ -242,6 +242,13 @@ pub fn flip_copy_to_popup() -> bool {
     on
 }
 
+pub fn flip_auto_update() -> bool {
+    let on = !config::load().auto_update;
+    config::update(|c| c.auto_update = on);
+    eprintln!("[beek] 自动检查更新：{}", if on { "开" } else { "关" });
+    on
+}
+
 pub fn flip_clipboard_fallback() -> bool {
     let on = !config::load().clipboard_fallback;
     config::update(|c| c.clipboard_fallback = on);
@@ -280,11 +287,63 @@ pub fn restart_now() -> ! {
 
 /// 退出：服务由 launchd KeepAlive 托管，先 bootout 再退出，避免被立即重启。
 pub fn quit_now() -> ! {
-    let _ = std::process::Command::new("sh")
-        .arg("-c")
-        .arg("launchctl bootout gui/$(id -u)/com.kaisersong.beek 2>/dev/null")
-        .status();
+    // 1) 有暂存的更新就先静默装上（不重新拉起）：下次启动就是新版本
+    if let Some(staged) = crate::update::staged() {
+        match crate::update::install_script_ex(
+            std::path::Path::new(&staged.app),
+            &staged.version,
+            false,
+        ) {
+            Ok(script) => {
+                if let Err(e) = crate::update::run_script(&script) {
+                    eprintln!("[beek] 退出时安装更新失败：{}", e);
+                } else {
+                    crate::update::clear_staged();
+                    eprintln!("[beek] 退出：已安排静默安装 v{}", staged.version);
+                }
+            }
+            Err(e) => eprintln!("[beek] 生成安装脚本失败：{}", e),
+        }
+    }
+
+    // 2) 卸载 LaunchAgent —— 必须确认成功，否则 KeepAlive 会把它立刻拉起来，
+    //    用户看到的就是「点了退出还有进程在跑」
+    let label = "com.kaisersong.beek";
+    let out = std::process::Command::new("launchctl")
+        .args(["bootout", &format!("gui/{}/{}", unsafe { libc_getuid() }, label)])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => eprintln!("[beek] 退出：LaunchAgent 已卸载（{}）", label),
+        Ok(o) => eprintln!(
+            "[beek] ⚠️ launchctl bootout 失败（{}）：{}",
+            o.status,
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => eprintln!("[beek] ⚠️ 调 launchctl 失败：{}", e),
+    }
+
+    // 3) 删掉 LaunchAgent plist：菜单里写的是「退出进程，同时移除 LaunchAgent」，
+    //    只 bootout 的话下次登录它还会自己回来
+    let plist = format!(
+        "{}/Library/LaunchAgents/{}.plist",
+        std::env::var("HOME").unwrap_or_default(),
+        label
+    );
+    match std::fs::remove_file(&plist) {
+        Ok(_) => eprintln!("[beek] 退出：已移除 {}", plist),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => eprintln!("[beek] ⚠️ 移除 plist 失败：{}", e),
+    }
+
     std::process::exit(0)
+}
+
+/// 当前 uid（避免为此引入 libc 依赖）
+unsafe fn libc_getuid() -> u32 {
+    extern "C" {
+        fn getuid() -> u32;
+    }
+    getuid()
 }
 
 // ---------- 菜单项挂的 objc target ----------
@@ -306,6 +365,13 @@ extern "C" fn open_automation_settings(_this: &Object, _sel: Sel, _sender: id) {
 
 extern "C" fn toggle_copy_to_popup(_this: &Object, _sel: Sel, sender: id) {
     let on = flip_copy_to_popup();
+    unsafe {
+        let _: () = msg_send![sender, setState: if on { 1i64 } else { 0i64 }];
+    }
+}
+
+extern "C" fn toggle_auto_update(_this: &Object, _sel: Sel, sender: id) {
+    let on = flip_auto_update();
     unsafe {
         let _: () = msg_send![sender, setState: if on { 1i64 } else { 0i64 }];
     }
@@ -345,6 +411,8 @@ extern "C" fn quit_app(_this: &Object, _sel: Sel, _sender: id) {
 /// 状态项与其菜单的地址，供「程序化弹出菜单」使用（Dock 图标被点/重新打开时）。
 static STATUS_ITEM: AtomicUsize = AtomicUsize::new(0);
 static HANDLER: AtomicUsize = AtomicUsize::new(0);
+/// 「检查更新…」菜单项地址：后台下载完成后改成「更新到 vX（退出后生效）」
+static CHECK_ITEM: AtomicUsize = AtomicUsize::new(0);
 static STATUS_MENU: AtomicUsize = AtomicUsize::new(0);
 
 /// 在主线程「稍后」执行的回调（reopen 专用）。
@@ -437,6 +505,17 @@ pub fn popup_status_menu_async() {
             performSelectorOnMainThread: sel!(popupStatusMenu:)
             withObject: nil
             waitUntilDone: false];
+    }
+}
+
+/// 后台把更新下载好了：把菜单里的「检查更新…」改成提示语，用户一眼能看到
+pub fn set_update_hint(text: &str) {
+    unsafe {
+        let item = CHECK_ITEM.load(Ordering::SeqCst) as id;
+        if item == nil {
+            return;
+        }
+        let _: () = msg_send![item, setTitle: nsstr(text)];
     }
 }
 
@@ -649,6 +728,10 @@ unsafe fn build_menu(cfg: &Config, handler: id) -> (id, id) {
     let clip = add_item(menu, "剪贴板兜底取词", sel!(toggleClipboardFallback:), "", handler);
     let _: () = msg_send![clip, setState: if cfg.clipboard_fallback { 1i64 } else { 0i64 }];
 
+    // 自动检查更新：后台下载，退出时静默安装（不打断用户）
+    let auto = add_item(menu, "自动检查更新", sel!(toggleAutoUpdate:), "", handler);
+    let _: () = msg_send![auto, setState: if cfg.auto_update { 1i64 } else { 0i64 }];
+
     add_separator(menu);
 
     // 设置 API Key：弹出的对话框由主循环用 AppKit 的 NSAlert 呈现
@@ -673,7 +756,8 @@ unsafe fn build_menu(cfg: &Config, handler: id) -> (id, id) {
     }
 
     add_separator(menu);
-    add_item(menu, "检查更新…", sel!(checkUpdate:), "", handler);
+    let check_item = add_item(menu, "检查更新…", sel!(checkUpdate:), "", handler);
+    CHECK_ITEM.store(check_item as usize, Ordering::SeqCst);
     add_item(menu, "关于 BeeK", sel!(openAbout:), "", handler);
     add_separator(menu);
     add_item(menu, "重新启动 BeeK", sel!(restartApp:), "", handler);
@@ -692,6 +776,7 @@ pub fn setup_status_item(cfg: &Config) {
         decl.add_method(sel!(quitApp:), quit_app as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(restartApp:), restart_app as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(toggleClipboardFallback:), toggle_clipboard_fallback as extern "C" fn(&Object, Sel, id));
+        decl.add_method(sel!(toggleAutoUpdate:), toggle_auto_update as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(toggleCopyToPopup:), toggle_copy_to_popup as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(openKeySettings:), open_key_settings as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(openReadmeKey:), open_readme_key as extern "C" fn(&Object, Sel, id));

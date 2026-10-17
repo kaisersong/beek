@@ -206,6 +206,51 @@ pub fn check() -> Result<Option<Release>, String> {
     Ok(None)
 }
 
+/// 已下载待安装的更新（写进 update/staged.json）
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct Staged {
+    pub version: String,
+    pub tag: String,
+    pub app: String,
+}
+
+fn staged_path() -> PathBuf {
+    update_dir().join("staged.json")
+}
+
+/// 后台下载完成 → 暂存下来，等退出或下次启动时装（对应 electron-updater 的 autoDownload）
+pub fn stage(rel: &Release, app: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(update_dir()).map_err(|e| format!("创建更新目录失败：{}", e))?;
+    let staged = Staged {
+        version: rel.version.clone(),
+        tag: rel.tag.clone(),
+        app: app.display().to_string(),
+    };
+    let body = serde_json::to_string_pretty(&staged).map_err(|e| e.to_string())?;
+    std::fs::write(staged_path(), body).map_err(|e| format!("写暂存标记失败：{}", e))
+}
+
+/// 读一眼暂存的更新（不消耗）
+pub fn staged() -> Option<Staged> {
+    let body = std::fs::read_to_string(staged_path()).ok()?;
+    let staged: Staged = serde_json::from_str(&body).ok()?;
+    // 版本比当前旧/相同就不算（比如手动装过更新的版本，标记还没清）
+    if !is_newer(&staged.version, CURRENT_VERSION) {
+        let _ = std::fs::remove_file(staged_path());
+        return None;
+    }
+    // 解压出来的 app 还在吗（用户可能手动清了）
+    if !PathBuf::from(&staged.app).is_dir() {
+        let _ = std::fs::remove_file(staged_path());
+        return None;
+    }
+    Some(staged)
+}
+
+pub fn clear_staged() {
+    let _ = std::fs::remove_file(staged_path());
+}
+
 /// 更新包存放目录：~/Library/Application Support/BeeK/update
 pub fn update_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -289,7 +334,22 @@ fn find_app(dir: &Path) -> Option<PathBuf> {
 /// 重新签名沿用安装脚本同样的策略（优先 Apple Development 证书）：
 /// TCC 按签名身份记辅助功能授权，换成 ad-hoc 就会让用户重新授权一次。
 pub fn install_script(new_app: &Path, version: &str) -> Result<PathBuf, String> {
-    let script = PathBuf::from("/tmp/beek_update.sh");
+    install_script_ex(new_app, version, true)
+}
+
+/// `relaunch=false` 时不重新拉起（退出时静默安装用：下次登录/启动自然是新版本）
+pub fn install_script_ex(new_app: &Path, version: &str, relaunch: bool) -> Result<PathBuf, String> {
+    install_script_to(new_app, version, relaunch, "beek_update")
+}
+
+/// 同 install_script_ex，但可以指定脚本名（诊断用：一次生成两种模式来对比）
+pub fn install_script_to(
+    new_app: &Path,
+    version: &str,
+    relaunch: bool,
+    name: &str,
+) -> Result<PathBuf, String> {
+    let script = PathBuf::from(format!("/tmp/{}.sh", name));
     let body = format!(
         r#"#!/bin/sh
 # 由 BeeK 自动更新生成：替换 /Applications/BeeK.app
@@ -301,11 +361,18 @@ APP="/Applications/BeeK.app"
 # 不加引号会被 shell 截断（实测：脚本走到 ditto 时源路径为空、替换失败，旧 app 已被删）
 NEW="{new_app}"
 LABEL={label}
-launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null
-# 等旧进程退出（最多 15 秒）：进程还在就直接删 bundle 会失败
-i=0
-while pgrep -x BeeK >/dev/null && [ $i -lt 30 ]; do sleep 0.5; i=$((i+1)); done
-if pgrep -x BeeK >/dev/null; then echo "旧进程仍在运行，放弃替换"; exit 1; fi
+if [ "{relaunch}" = "1" ]; then
+    # 立即更新：先让旧进程退出，再替换，最后重新拉起
+    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null
+    i=0
+    while pgrep -x BeeK >/dev/null && [ $i -lt 30 ]; do sleep 0.5; i=$((i+1)); done
+    if pgrep -x BeeK >/dev/null; then echo "旧进程仍在运行，放弃替换"; exit 1; fi
+else
+    # 静默安装（退出时 / 下次启动时）：**不动进程**。
+    # macOS 允许替换正在运行的 bundle（进程持有的是旧 inode），
+    # 这里 bootout 的话会把用户正在用的 app 直接杀掉，得不偿失。
+    echo "静默安装：只替换 bundle，不动正在运行的进程"
+fi
 rm -rf "$APP" || {{ echo "删除旧 app 失败"; exit 1; }}
 ditto "$NEW" "$APP" || {{ echo "复制新 app 失败"; exit 1; }}
 xattr -dr com.apple.quarantine "$APP" 2>/dev/null
@@ -324,12 +391,17 @@ else
         codesign --force --sign - --identifier com.kaisersong.beek "$APP"
     fi
 fi
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$LABEL.plist"
+if [ "{relaunch}" = "1" ]; then
+    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$LABEL.plist"
+else
+    echo "（静默安装：不重新拉起，下次启动即为新版本）"
+fi
 echo "== 替换完成，当前版本 $(/usr/libexec/PlistBuddy -c Print:CFBundleShortVersionString "$APP/Contents/Info.plist" 2>/dev/null) =="
 "#,
         version = version,
         new_app = new_app.display(),
-        label = LAUNCH_LABEL
+        label = LAUNCH_LABEL,
+        relaunch = if relaunch { "1" } else { "0" }
     );
     std::fs::write(&script, body).map_err(|e| format!("写替换脚本失败：{}", e))?;
     Ok(script)

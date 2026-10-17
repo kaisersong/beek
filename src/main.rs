@@ -46,6 +46,8 @@ enum UiEvent {
     UpdatePrepared(std::path::PathBuf, String),
     /// 更新过程中的失败（下载 / 解压 / 替换脚本）
     UpdateFailed(String),
+    /// 后台已经下载好更新，交给主线程改菜单提示（AppKit 只能在主线程碰）
+    UpdateStaged(String),
 }
 
 /// 朗读一个词：用系统自带的 /usr/bin/say，不联网也不需要额外权限。
@@ -1055,6 +1057,53 @@ fn gesture_recent(track: &MouseTrack) -> bool {
         .unwrap_or(false)
 }
 
+// ---------- 自动检查更新（对应 electron-updater 的 autoDownload）----------
+//
+// 策略照 xiaok desktop：后台自动下载，但**不打断你** ——
+//   · 下载完只把菜单里的「检查更新…」改成「更新到 vX（退出后生效）」
+//   · 退出 BeeK 时静默把 bundle 换掉（不重新拉起），下次启动就是新版本
+//   · 想立刻生效就点那个菜单项（走原来的「下载并更新」，会重启）
+fn spawn_auto_update(tx: mpsc::Sender<UiEvent>) {
+    std::thread::spawn(move || {
+        // 启动后先等一会儿：别和启动阶段的 AX / 菜单初始化抢时间
+        std::thread::sleep(Duration::from_secs(10));
+        loop {
+            if config::load().auto_update {
+                match update::check() {
+                    Ok(Some(rel)) if update::is_newer(&rel.version, update::CURRENT_VERSION) => {
+                        if update::staged().map(|s| s.version) == Some(rel.version.clone()) {
+                            eprintln!("[beek] 自动更新：v{} 已经下载好了，等下次启动", rel.version);
+                        } else {
+                            eprintln!("[beek] 自动更新：发现 v{}，开始后台下载", rel.version);
+                            match update::prepare(&rel) {
+                                Ok(app) => match update::stage(&rel, &app) {
+                                    Ok(_) => {
+                                        eprintln!(
+                                            "[beek] 自动更新：v{} 已下载完成 → 退出 BeeK 时安装",
+                                            rel.version
+                                        );
+                                        menubar::set_update_hint(&format!(
+                                            "更新到 v{}（退出后生效）",
+                                            rel.version
+                                        ));
+                                        let _ = tx.send(UiEvent::UpdateStaged(rel.version.clone()));
+                                    }
+                                    Err(e) => eprintln!("[beek] 自动更新：暂存失败：{}", e),
+                                },
+                                Err(e) => eprintln!("[beek] 自动更新：下载失败：{}", e),
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("[beek] 自动更新：检查失败（{}），下次再试", e),
+                }
+            }
+            // 每 6 小时看一次
+            std::thread::sleep(Duration::from_secs(6 * 3600));
+        }
+    });
+}
+
 // ---------- AX 监控后台线程 ----------
 fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
     std::thread::spawn(move || {
@@ -1790,6 +1839,25 @@ fn main() {
         }
         return;
     }
+    if std::env::var("BEEK_UPDATE_SCRIPT_DUMP").is_ok() {
+        // 诊断：把两种安装脚本都生成出来（立即更新 / 静默安装），检查分支对不对
+        let fake_dir = std::env::temp_dir().join("beek-script-dump");
+        let fake_app = fake_dir.join("BeeK.app");
+        let _ = std::fs::create_dir_all(&fake_app);
+        for (name, relaunch) in [("update-immediate", true), ("update-silent", false)] {
+            match update::install_script_to(&fake_app, "9.9.9", relaunch, name) {
+                Ok(p) => eprintln!("[自检] 已生成 {}", p.display()),
+                Err(e) => eprintln!("[自检] 生成失败：{}", e),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&fake_dir);
+        return;
+    }
+    if std::env::var("BEEK_QUIT_TEST").is_ok() {
+        // 诊断：走一遍真实的菜单退出路径（bootout + 移除 plist + 可能存在的静默安装）
+        eprintln!("[自检] 走真实退出路径（等价于点菜单「退出 BeeK」）");
+        menubar::quit_now();
+    }
     if std::env::var("BEEK_APPCOPY_SELFTEST").is_ok() {
         // 直接验证「让应用自己交选区」这两条路（AppleScript / 菜单拷贝）。
         // 用法：先在目标应用里选好文字、让它保持前台，再跑这个。
@@ -1847,6 +1915,23 @@ fn main() {
         setup_app_menus(cx, tx.clone());
         // 编辑菜单要等 gpui 把主菜单建好之后再补上去
         menubar::install_edit_menu();
+        // 上次退出时可能已经下载好更新（比如进程被强杀），这里补装一次：
+        // 换掉磁盘上的 bundle 后本进程还是旧版本，退出后下一次启动才是新版本。
+        if let Some(staged) = update::staged() {
+            eprintln!(
+                "[beek] 启动：发现已下载的更新 v{}，静默安装（本次仍以 v{} 运行）",
+                staged.version,
+                update::CURRENT_VERSION
+            );
+            if let Ok(script) = update::install_script_ex(
+                std::path::Path::new(&staged.app),
+                &staged.version,
+                false,
+            ) {
+                let _ = update::run_script(&script);
+                update::clear_staged();
+            }
+        }
         menubar::dump_app_menus();
         // 诊断：直接开一次「关于」对话框，不用手点菜单（观察
         // 「Dock 图标跳 / 菜单栏变灰」这类只跟激活状态有关的行为）
@@ -1873,6 +1958,7 @@ fn main() {
             spawn_selftest(tx.clone(), cfg.show_in_dock);
         }
         spawn_mouse_tracker();
+        spawn_auto_update(tx.clone());
         spawn_ax_monitor(tx.clone());
 
         cx.spawn(async move |cx| {
@@ -2300,6 +2386,10 @@ fn main() {
                                     }
                                 }
                             }
+                        }
+                        UiEvent::UpdateStaged(version) => {
+                            menubar::set_update_hint(&format!("更新到 v{}（退出后生效）", version));
+                            eprintln!("[beek] 自动更新：菜单提示已改为「更新到 v{}（退出后生效）」", version);
                         }
                         UiEvent::UpdateFailed(e) => {
                             eprintln!("[beek] +{}ms 更新失败：{}", ms(t0), e);

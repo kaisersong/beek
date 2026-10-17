@@ -44,6 +44,10 @@ pub struct Config {
     /// 已经有「剪贴板兜底取词」（手势触发，不乱弹）。需要的人可以在菜单里手动打开。
     #[serde(default)]
     pub copy_to_popup: bool,
+    /// 是否自动检查并下载更新（默认开）。下载完成后不会打断你：
+    /// 退出 BeeK 时静默装上，或下次启动时生效。对应菜单里的「自动检查更新」。
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
     /// 各翻译服务的配置，键是服务名（见 ARK）
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
