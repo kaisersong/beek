@@ -259,6 +259,15 @@ pub fn open_accessibility_panel() {
         .spawn();
 }
 
+/// 打开「自动化（Apple Events）」授权面板。
+/// 用途：浏览器取词那条 AppleScript 路径第一次会弹「BeeK 想要控制 Safari」，
+/// 如果当时点了「不允许」，系统会记住、不再弹窗，只能来这里手动勾上。
+pub fn open_automation_panel() {
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
+        .spawn();
+}
+
 /// 打开 README 的「获取 API Key」章节（纯跳转，不需要经过主循环）
 pub fn open_readme_key_url() {
     crate::update::open_url(crate::update::README_KEY_URL);
@@ -289,6 +298,10 @@ extern "C" fn toggle_dock(_this: &Object, _sel: Sel, sender: id) {
 
 extern "C" fn open_accessibility_settings(_this: &Object, _sel: Sel, _sender: id) {
     open_accessibility_panel();
+}
+
+extern "C" fn open_automation_settings(_this: &Object, _sel: Sel, _sender: id) {
+    open_automation_panel();
 }
 
 extern "C" fn toggle_copy_to_popup(_this: &Object, _sel: Sel, sender: id) {
@@ -617,6 +630,13 @@ unsafe fn build_menu(cfg: &Config, handler: id) -> (id, id) {
     let _: () = msg_send![title, setEnabled: false];
 
     add_item(menu, "开启取词权限（辅助功能）…", sel!(openAccessibilitySettings:), "", handler);
+    add_item(
+        menu,
+        "开启自动化授权（控制浏览器）…",
+        sel!(openAutomationSettings:),
+        "",
+        handler,
+    );
 
     let toggle = add_item(menu, "在 Dock 中显示", sel!(toggleDock:), "", handler);
     let _: () = msg_send![toggle, setState: if cfg.show_in_dock { 1i64 } else { 0i64 }];
@@ -668,6 +688,7 @@ pub fn setup_status_item(cfg: &Config) {
         let mut decl = ClassDecl::new("BeeKMenuHandler", superclass).unwrap();
         decl.add_method(sel!(toggleDock:), toggle_dock as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(openAccessibilitySettings:), open_accessibility_settings as extern "C" fn(&Object, Sel, id));
+        decl.add_method(sel!(openAutomationSettings:), open_automation_settings as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(quitApp:), quit_app as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(restartApp:), restart_app as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(toggleClipboardFallback:), toggle_clipboard_fallback as extern "C" fn(&Object, Sel, id));

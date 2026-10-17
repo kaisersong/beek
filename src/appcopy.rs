@@ -37,6 +37,57 @@ fn browser_name(bundle_id: &str) -> Option<&'static str> {
         .map(|(_, name)| *name)
 }
 
+/// 带超时地跑一个子进程（超时就 kill，返回 None）
+fn run_with_timeout(
+    cmd: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> Option<std::process::Output> {
+    use std::process::Stdio;
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    eprintln!(
+                        "[beek] AppleScript 取词超时（{}s）→ 放弃这条路，改走菜单拷贝",
+                        timeout.as_secs()
+                    );
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+/// 「自动化被拒绝」只提示一次（用户拒绝了就会一直失败，没必要每次划词都刷屏）
+fn log_refused_once(err: &str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static SHOWN: AtomicBool = AtomicBool::new(false);
+    if SHOWN.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    eprintln!(
+        "[beek] AppleScript 取词被拒绝（{err}）。\
+         系统会记住这次「不允许」、不再弹窗；要恢复这条路径请到：\
+         系统设置 → 隐私与安全性 → 自动化 → BeeK → 勾上对应的浏览器。\
+         不恢复也能用：取词会继续走「按应用自己的拷贝菜单」和剪贴板兜底。"
+    );
+}
+
 /// 用 AppleScript 问浏览器要选区。Safari 与 Chromium 系的脚本不同：
 /// Chromium 要 execute active tab 的 javascript，且脚本字符串需要再嵌一层引号。
 fn applescript_selection(app_name: &str, is_safari: bool) -> Option<String> {
@@ -52,14 +103,22 @@ fn applescript_selection(app_name: &str, is_safari: bool) -> Option<String> {
             app_name, js
         )
     };
-    let out = std::process::Command::new("/usr/bin/osascript")
-        .arg("-e")
-        .arg(&script)
-        .output()
-        .ok()?;
+    // 必须带超时：osascript 无超时会一直等目标应用回话，而这段代码跑在 AX 轮询线程里，
+    // 浏览器一卡住整个取词就停摆（返回 None 比拖死强）。
+    let out = run_with_timeout(
+        std::process::Command::new("/usr/bin/osascript").arg("-e").arg(&script),
+        std::time::Duration::from_secs(2),
+    )?;
     if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        eprintln!("[beek] AppleScript 取词失败：{}", err.trim());
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        // -1743 / errAEEventNotPermitted：用户第一次弹窗点了「不允许」。
+        // 系统会记住这个决定、不再弹窗，只能去 系统设置 → 隐私与安全性 → 自动化 里手动勾。
+        // 取词不会因此坏掉（后面还有菜单拷贝那条），但建议把原因写清楚、别只丢一行 stderr。
+        if err.contains("1743") || err.contains("Not authorized") {
+            log_refused_once(&err);
+        } else {
+            eprintln!("[beek] AppleScript 取词失败：{}", err);
+        }
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();

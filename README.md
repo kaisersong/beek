@@ -142,6 +142,11 @@ BEEK_AX_WATCH=1 /Applications/BeeK.app/Contents/MacOS/BeeK
 open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
 ```
 
+**浏览器取词还有第二条路要授权**：Safari / Chrome 等会通过 AppleScript 问浏览器要选区，
+第一次会弹「BeeK 想要控制 Safari」。点了「不允许」的话系统**不会**再问，需要到
+系统设置 → 隐私与安全性 → **自动化** → BeeK 里手动勾上（菜单里有「开启自动化授权（控制浏览器）…」直达）。
+这条不授权也能用：取词会继续走「按应用自己的拷贝菜单项」和剪贴板兜底，只是多占一下剪贴板。
+
 改完权限后如果取词没有反应，点菜单「重新启动 BeeK」。
 
 **注意**：macOS 把辅助功能授权记在签名身份上。换一个身份签名，授权就失效，需要重新勾选一次。`scripts/package_app.sh` 优先用钥匙串里的 Apple Development 证书签名，授权因此能跨更新保留；找不到证书时它退回 ad-hoc 签名，这种情况下每次更新都要重新勾选。
@@ -163,6 +168,7 @@ open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibil
 | --- | --- |
 | BeeK 划词翻译 v1.0.5 | 显示版本，不可点击 |
 | 开启取词权限（辅助功能）… | 打开系统的辅助功能面板 |
+| 开启自动化授权（控制浏览器）… | 打开系统的「自动化」面板。浏览器取词那条 AppleScript 路径第一次会问一次，**当时点了「不允许」就不会再弹**，只能来这里勾上；不勾也能取词（会走菜单拷贝 + 剪贴板兜底） |
 | 在 Dock 中显示 | 切换 Dock 图标，勾选项 |
 | 设置 API Key… | 配置翻译服务的 Key 与模型 |
 | 如何获取 API Key… | 打开本仓库 README 的「获取 API Key」一节。这一项左边是圆圈 i 图标，见上文「图标」一节 |
