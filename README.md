@@ -2,6 +2,12 @@
 
 轻量 macOS AI 划词翻译工具 — Lightweight AI selection translator for macOS.
 
+[![最新版本](https://img.shields.io/github/v/release/kaisersong/beek?label=%E6%9C%80%E6%96%B0%E7%89%88)](https://github.com/kaisersong/beek/releases/latest)
+[![下载 DMG](https://img.shields.io/badge/%E2%AC%87%EF%B8%8F_%E4%B8%8B%E8%BD%BD_macOS_%E7%89%88-DMG-0B6E6E?style=flat-square)](https://github.com/kaisersong/beek/releases/latest/download/BeeK.dmg)
+
+**➡️ [下载最新版 BeeK.dmg](https://github.com/kaisersong/beek/releases/latest/download/BeeK.dmg)** —— 双击挂载，把 BeeK 拖进「应用程序」即可。
+这个链接永远指向最新版（每个 release 都会额外传一份稳定命名的 `BeeK.dmg`），不需要改版本号。
+
 选中文本 → 出现小蜜蜂图标 → 点击后翻译 → 弹窗显示结果。菜单栏常驻，由 LaunchAgent 托管。
 
 ## 图标
@@ -34,7 +40,8 @@
 
 ### 方式 A：下载 Release
 
-1. 打开 [Releases](https://github.com/kaisersong/beek/releases)，下载最新的 **`BeeK-v<版本>.dmg`**。
+1. 直接点上面的 **[下载最新版 BeeK.dmg](https://github.com/kaisersong/beek/releases/latest/download/BeeK.dmg)**；
+   想挑特定版本就去 [Releases](https://github.com/kaisersong/beek/releases) 下对应的 **`BeeK-v<版本>.dmg`**。
 2. 双击挂载，把 `BeeK` 拖到 `Applications` 快捷方式上（或拖进「应用程序」）。
 3. 卸载磁盘映像，双击打开 BeeK 即可 —— 已用 Developer ID 签名并公证，**不需要右键 → 打开**。
 
@@ -206,7 +213,7 @@ Dock 图标（菜单「在 Dock 中显示」打开后才有）：
 | --- | --- | --- |
 | 签名 | 本机钥匙串里的 Apple Development | Developer ID Application（repo secrets 里的 .p12） |
 | 公证 | 不做 | 做（app 和 DMG 都 `notarytool` + `stapler staple`） |
-| 产物 | 只有 `BeeK-v<版本>.zip` | `BeeK-v<版本>.dmg`（给用户装）+ `BeeK-v<版本>.zip`（给内置更新器）+ 两个 `.sha256` |
+| 产物 | 只有 `BeeK-v<版本>.zip` | `BeeK-v<版本>.dmg`（给用户装）+ `BeeK-v<版本>.zip`（给内置更新器）+ 两个 `.sha256`，外加一份稳定命名的 `BeeK.dmg`（README 的「下载最新版」指向它，永远不会因版本号过期） |
 | 用户下载后 | Gatekeeper 判 `rejected`，要右键 → 打开 | DMG / app 都是 `accepted`，双击即可 |
 | 适用 | 自己用、临时验证 | 对外发布 |
 | 授权保留 | 同一身份，辅助功能授权跨更新保留 | 换成 Developer ID 身份，**第一次要重新勾选一次**辅助功能（之后就稳定，且 Developer ID 有效期 5 年） |

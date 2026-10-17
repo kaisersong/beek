@@ -200,7 +200,11 @@ jobs:
           spctl -a -t open --context context:primary-signature -vv "$DMG"
           echo "${DMG}（$(ls -lh "$DMG" | awk '{print $5}')）"
           (cd dist && shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256" && cat "$(basename "$DMG").sha256")
+          # 稳定命名的副本：README 里的「下载最新版」指向
+          # releases/latest/download/BeeK.dmg —— 永远是最新那版，不会因为版本号而过期
+          cp "$DMG" dist/BeeK.dmg
           echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+          echo "stable=dist/BeeK.dmg" >> "$GITHUB_OUTPUT"
 
       - name: 上传 artifact（无论发不发布都留一份，便于人工验证）
         uses: actions/upload-artifact@v4
@@ -211,6 +215,7 @@ jobs:
             ${{ steps.pack.outputs.zip }}.sha256
             ${{ steps.dmg.outputs.dmg }}
             ${{ steps.dmg.outputs.dmg }}.sha256
+            ${{ steps.dmg.outputs.stable }}
           if-no-files-found: error
 
       - name: 发布到 GitHub Release
@@ -220,6 +225,7 @@ jobs:
           TAG: ${{ steps.ver.outputs.tag }}
           ZIP: ${{ steps.pack.outputs.zip }}
           DMG: ${{ steps.dmg.outputs.dmg }}
+          DMG_STABLE: ${{ steps.dmg.outputs.stable }}
         run: |
           set -eu
           # 先建草稿、传资产、最后才转正式：避免出现「已发布但资产还没上传完」的窗口
@@ -228,7 +234,7 @@ jobs:
           else
             gh release create "$TAG" --title "BeeK $TAG" --generate-notes --draft || true
           fi
-          gh release upload "$TAG" "$DMG" "$DMG.sha256" --clobber
+          gh release upload "$TAG" "$DMG" "$DMG.sha256" "$DMG_STABLE" --clobber
           gh release upload "$TAG" "$ZIP" "$ZIP.sha256" --clobber
           gh release edit "$TAG" --draft=false --latest
           echo "已发布：https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
