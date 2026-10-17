@@ -1148,7 +1148,15 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
                 if count != last_clip_count {
                     last_clip_count = count;
                     if !clipboard::is_self_inflicted(count) && config::load().copy_to_popup {
-                        if let Some(text) = clipboard::read_string() {
+                        // AX 已经拿到选区时，这次复制不再弹按钮。
+                        // 为什么：这条兜底是为「AX 拿不到选区」的应用（Safari / Muse / Grok Bot）准备的；
+                        // 在备忘录、Chrome、终端这些 AX 正常的应用里，选区的图标本来就会出现，
+                        // 再因为每一次 ⌘C 弹一次，等于把常复制的人天天骚扰一遍（用户实测反馈）。
+                        if sel.is_some() {
+                            eprintln!(
+                                "[beek] 剪贴板监听：AX 已有选区 → 这次复制不额外弹按钮（避免每次 ⌘C 都弹）"
+                            );
+                        } else if let Some(text) = clipboard::read_string() {
                             let text = text.trim().to_string();
                             if !text.is_empty() && !is_url(&text) {
                                 let (px, py) = mouse::position_topleft();
