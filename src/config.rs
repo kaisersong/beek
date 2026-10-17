@@ -39,9 +39,10 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub clipboard_fallback: bool,
     /// 「复制即弹按钮」：你自己按 ⌘C 复制时，在鼠标旁弹小蜜蜂。
-    /// 默认开：Safari / Muse / Grok 这类应用 AX 取不到选区、合成 ⌘C 也不稳，
-    /// 这条是唯一 100% 可靠的取词方式（代价是多按一次 ⌘C）。
-    #[serde(default = "default_true")]
+    /// **默认关**：这条会在每一次复制时弹按钮 —— 对经常复制的人等于持续打扰（实测反馈）。
+    /// 它只对「AX 看不到选区」的应用（Safari / Muse / Grok Bot）才有额外价值，而那些应用
+    /// 已经有「剪贴板兜底取词」（手势触发，不乱弹）。需要的人可以在菜单里手动打开。
+    #[serde(default)]
     pub copy_to_popup: bool,
     /// 各翻译服务的配置，键是服务名（见 ARK）
     #[serde(default)]
