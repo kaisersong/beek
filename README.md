@@ -34,9 +34,12 @@
 
 ### 方式 A：下载 Release
 
-1. 打开 [Releases](https://github.com/kaisersong/beek/releases)，下载最新的 `BeeK-v<版本>.zip`（例如 `BeeK-v1.0.5.zip`）。
-2. 解压，把 `BeeK.app` 拖进 `/Applications`。
-3. 首次打开：在 Finder 里右键 `BeeK.app` → 「打开」，再确认一次。之后正常双击即可。
+1. 打开 [Releases](https://github.com/kaisersong/beek/releases)，下载最新的 **`BeeK-v<版本>.dmg`**。
+2. 双击挂载，把 `BeeK` 拖到 `Applications` 快捷方式上（或拖进「应用程序」）。
+3. 卸载磁盘映像，双击打开 BeeK 即可 —— 已用 Developer ID 签名并公证，**不需要右键 → 打开**。
+
+旁边的 `BeeK-v<版本>.zip` 是给内置更新器用的（`检查更新…` 会按这个名字找升级包），手动安装不需要它。
+每个资产都配了 `.sha256`，想校验就 `shasum -a 256 -c BeeK-v<版本>.dmg.sha256`。
 
 ### 方式 B：本地构建
 
@@ -195,8 +198,9 @@ Dock 图标（菜单「在 Dock 中显示」打开后才有）：
 | | 本地 `sh scripts/release.sh --publish` | CI（`.github/workflows/release.yml`） |
 | --- | --- | --- |
 | 签名 | 本机钥匙串里的 Apple Development | Developer ID Application（repo secrets 里的 .p12） |
-| 公证 | 不做 | 做（`notarytool` + `stapler staple`） |
-| 用户下载后 | Gatekeeper 判 `rejected`，要右键 → 打开 | Gatekeeper 判 `accepted`，双击即可 |
+| 公证 | 不做 | 做（app 和 DMG 都 `notarytool` + `stapler staple`） |
+| 产物 | 只有 `BeeK-v<版本>.zip` | `BeeK-v<版本>.dmg`（给用户装）+ `BeeK-v<版本>.zip`（给内置更新器）+ 两个 `.sha256` |
+| 用户下载后 | Gatekeeper 判 `rejected`，要右键 → 打开 | DMG / app 都是 `accepted`，双击即可 |
 | 适用 | 自己用、临时验证 | 对外发布 |
 | 授权保留 | 同一身份，辅助功能授权跨更新保留 | 换成 Developer ID 身份，**第一次要重新勾选一次**辅助功能（之后就稳定，且 Developer ID 有效期 5 年） |
 

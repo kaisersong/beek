@@ -139,6 +139,7 @@ jobs:
           codesign --verify --strict --verbose=2 "$APP"
           codesign -dv --verbose=4 "$APP" 2>&1 | tee "$RUNNER_TEMP/beek-codesign.txt"
           grep "TeamIdentifier=$EXPECTED_TEAM_ID" "$RUNNER_TEMP/beek-codesign.txt"
+          echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
 
       - name: 公证 + staple
         timeout-minutes: 90
@@ -170,6 +171,32 @@ jobs:
           echo "${ZIP}（$(ls -lh "$ZIP" | awk '{print $5}')）"
           shasum -a 256 "$ZIP" | tee "$ZIP.sha256"
 
+      - name: 打包 DMG（给用户手动安装：双击挂载 → 拖进「应用程序」）
+        id: dmg
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -eu
+          DMG="dist/BeeK-v$VERSION.dmg"
+          rm -rf dist/dmg && mkdir -p dist/dmg
+          # 用已经公证并 staple 过的 app 做母版：拖出去之后 app 自身也带票据
+          cp -R "$APP" dist/dmg/
+          ln -s /Applications dist/dmg/Applications
+          hdiutil create -volname "BeeK" -srcfolder dist/dmg -ov -format UDZO "$DMG"
+          # DMG 本身也要签名 + 公证：只签 app 不签 DMG 的话，用户双击挂载那一步会被 Gatekeeper 拦
+          codesign --force --sign "$SIGN_IDENTITY" --timestamp "$DMG"
+          codesign --verify --verbose=2 "$DMG"
+          xcrun notarytool submit "$DMG" \
+            --key "$APPLE_API_KEY" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" --wait
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          spctl -a -t open --context context:primary-signature -vv "$DMG"
+          echo "$DMG（$(ls -lh "$DMG" | awk '{print $5}')）"
+          shasum -a 256 "$DMG" | tee "$DMG.sha256"
+          echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+
       - name: 上传 artifact（无论发不发布都留一份，便于人工验证）
         uses: actions/upload-artifact@v4
         with:
@@ -177,6 +204,8 @@ jobs:
           path: |
             ${{ steps.pack.outputs.zip }}
             ${{ steps.pack.outputs.zip }}.sha256
+            ${{ steps.dmg.outputs.dmg }}
+            ${{ steps.dmg.outputs.dmg }}.sha256
           if-no-files-found: error
 
       - name: 发布到 GitHub Release
@@ -185,6 +214,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.ver.outputs.tag }}
           ZIP: ${{ steps.pack.outputs.zip }}
+          DMG: ${{ steps.dmg.outputs.dmg }}
         run: |
           set -eu
           # 先建草稿、传资产、最后才转正式：避免出现「已发布但资产还没上传完」的窗口
@@ -193,6 +223,7 @@ jobs:
           else
             gh release create "$TAG" --title "BeeK $TAG" --generate-notes --draft || true
           fi
+          gh release upload "$TAG" "$DMG" "$DMG.sha256" --clobber
           gh release upload "$TAG" "$ZIP" "$ZIP.sha256" --clobber
           gh release edit "$TAG" --draft=false --latest
           echo "已发布：https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
