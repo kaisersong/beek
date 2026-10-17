@@ -73,19 +73,62 @@ fn run_with_timeout(
     }
 }
 
-/// 「自动化被拒绝」只提示一次（用户拒绝了就会一直失败，没必要每次划词都刷屏）
-fn log_refused_once(err: &str) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static SHOWN: AtomicBool = AtomicBool::new(false);
-    if SHOWN.swap(true, Ordering::Relaxed) {
-        return;
+/// AppleScript 取词失败的类型。每种只提示一次 —— 用户拒绝后每次划词都会失败，
+/// 每条刷一整段 stderr 会把日志淹掉（实测：日志里同一段 Chrome 报错刷了几十遍）。
+#[derive(Clone, Copy, PartialEq)]
+enum AppleScriptError {
+    /// 用户点了「不允许」，系统记住了、不再弹窗
+    NotPermitted,
+    /// Chromium 系没开「允许 Apple 事件中的 JavaScript」
+    ChromeJsDisabled,
+    Other,
+}
+
+fn classify_error(err: &str) -> AppleScriptError {
+    if err.contains("1743") || err.contains("Not authorized") {
+        AppleScriptError::NotPermitted
+    } else if err.contains("Apple 事件中的 JavaScript") || err.ends_with("(12)") {
+        // Chrome/Edge/Brave/Arc：默认关着「查看 → 开发者 → 允许 Apple 事件中的 JavaScript」
+        AppleScriptError::ChromeJsDisabled
+    } else {
+        AppleScriptError::Other
     }
-    eprintln!(
-        "[beek] AppleScript 取词被拒绝（{err}）。\
-         系统会记住这次「不允许」、不再弹窗；要恢复这条路径请到：\
-         系统设置 → 隐私与安全性 → 自动化 → BeeK → 勾上对应的浏览器。\
-         不恢复也能用：取词会继续走「按应用自己的拷贝菜单」和剪贴板兜底。"
-    );
+}
+
+fn log_once(kind: AppleScriptError, err: &str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static NOT_PERMITTED: AtomicBool = AtomicBool::new(false);
+    static CHROME_JS: AtomicBool = AtomicBool::new(false);
+    static OTHER: AtomicBool = AtomicBool::new(false);
+    match kind {
+        AppleScriptError::NotPermitted => {
+            if NOT_PERMITTED.swap(true, Ordering::Relaxed) {
+                return;
+            }
+            eprintln!(
+                "[beek] AppleScript 取词被拒绝（{err}）。系统会记住这次「不允许」、不再弹窗；\
+                 要恢复这条路径：系统设置 → 隐私与安全性 → 自动化 → BeeK → 勾上对应浏览器\
+                 （菜单里也有「开启自动化授权（控制浏览器）…」直达）。\
+                 不恢复也能用：会继续走「按应用自己的拷贝菜单」与剪贴板兜底。"
+            );
+        }
+        AppleScriptError::ChromeJsDisabled => {
+            if CHROME_JS.swap(true, Ordering::Relaxed) {
+                return;
+            }
+            eprintln!(
+                "[beek] Chromium 系浏览器没开「允许 Apple 事件中的 JavaScript」\
+                 （在该浏览器菜单：查看 → 开发者 → 允许 Apple 事件中的 JavaScript）。\
+                 不开也能取词：会走「按应用自己的拷贝菜单」。原始错误：{err}"
+            );
+        }
+        AppleScriptError::Other => {
+            if OTHER.swap(true, Ordering::Relaxed) {
+                return;
+            }
+            eprintln!("[beek] AppleScript 取词失败（只提示一次，后续同类失败不再刷日志）：{err}");
+        }
+    }
 }
 
 /// 用 AppleScript 问浏览器要选区。Safari 与 Chromium 系的脚本不同：
@@ -114,11 +157,8 @@ fn applescript_selection(app_name: &str, is_safari: bool) -> Option<String> {
         // -1743 / errAEEventNotPermitted：用户第一次弹窗点了「不允许」。
         // 系统会记住这个决定、不再弹窗，只能去 系统设置 → 隐私与安全性 → 自动化 里手动勾。
         // 取词不会因此坏掉（后面还有菜单拷贝那条），但建议把原因写清楚、别只丢一行 stderr。
-        if err.contains("1743") || err.contains("Not authorized") {
-            log_refused_once(&err);
-        } else {
-            eprintln!("[beek] AppleScript 取词失败：{}", err);
-        }
+        let kind = classify_error(&err);
+        log_once(kind, &err);
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -189,7 +229,7 @@ pub fn selected_text_via_app(pid: i32, bundle_id: &str) -> Outcome {
             }
         }
         None => {
-            eprintln!("[beek] 取词：该应用菜单里找不到「拷贝」项");
+            eprintln!("[beek] 取词：pid {} 的菜单里找不到「拷贝」项", pid);
             Outcome::Unavailable
         }
     }

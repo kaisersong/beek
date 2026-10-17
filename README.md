@@ -106,7 +106,7 @@ BeeK 按下面的顺序取选中文本，前一条拿不到才走后面。这套
 | 顺序 | 路径 | 适用 | 代价 |
 | --- | --- | --- | --- |
 | 1 | **AX 取词**：按鼠标坐标取元素，读它的 `AXSelectedText` | 备忘录、Chrome、终端、访达、云之家等 | 无（默认路径） |
-| 2 | **浏览器 AppleScript**：`window.getSelection().toString()` | Safari、Chrome、Edge、Brave、Arc、Firefox 等 | 首次需授权「控制浏览器」；不碰剪贴板 |
+| 2 | **浏览器 AppleScript**：`window.getSelection().toString()` | Safari 开箱可用；Chrome / Edge / Brave / Arc 需要先在该浏览器里开「查看 → 开发者 → 允许 Apple 事件中的 JavaScript」 | 首次需授权「控制浏览器」；不碰剪贴板。Chromium 系没开那个开关会自动回退到第 3 条 |
 | 3 | **菜单拷贝**：在目标应用菜单栏里找到「拷贝」项并按下（`AXPress`），让**应用自己**执行拷贝 | 其余应用，含 Muse、Grok Bot 等 Electron 应用 | 短暂占用剪贴板（读完立即还原） |
 | 4 | **复制即弹按钮**（默认关）：你自己按 ⌘C 时弹按钮，AX 已有选区时不弹 | 任何应用，兜底用 | 多按一次 ⌘C；每次复制都可能弹，故默认关 |
 | 5 | **剪贴板兜底**（可关）：自动合成一次 ⌘C 去取 | 时灵时不灵，最后手段 | 短暂占用剪贴板 |
