@@ -1,0 +1,12 @@
+Crate: zune-inflate 0.2.54
+Upstream license source: https://raw.githubusercontent.com/etemesi254/zune-image/69502ce83fdfecdd0beefd677e2abb3781b29d98/LICENSE.md
+SHA256 of upstream bytes: e870d7fd7819a9f0453c62798cb52ae95d148a8c91dc2de1d983f997143c72de
+
+// Copyright (c) 2022 zune-image developers
+// Licensed under the Apache License, Version 2.0
+// <LICENSE-APACHE or
+// http://www.apache.org/licenses/LICENSE-2.0> or the MIT
+// license <LICENSE-MIT or http://opensource.org/licenses/MIT>,
+// at your option. All files in the project carrying such
+// notice may not be copied, modified, or distributed except
+// according to those terms

@@ -1,0 +1,10 @@
+Crate: gpu-alloc-types 0.3.1
+Upstream license source: https://raw.githubusercontent.com/zakarumych/gpu-alloc/7ddd1fe576fcfc503347eb97e476a47581479f22/COPYING
+SHA256 of upstream bytes: 12121dfa588677007848ab922a45a1e3248868f6ff063598fceb3141d7897314
+
+Copyright 2020 The gpu-alloc Project Developers
+
+Licensed under the Apache License, Version 2.0, <license/LICENSE-APACHE or
+http://apache.org/licenses/LICENSE-2.0> or the MIT license <license/LICENSE-MIT or
+http://opensource.org/licenses/MIT>, at your option. This file may not be
+copied, modified, or distributed except according to those terms.

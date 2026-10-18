@@ -1,12 +1,16 @@
 # <img src="resources/icons/BeeK-app-256.png" width="40" height="40" alt="BeeK 图标"> BeeK
 
-轻量 macOS AI 划词翻译工具 — Lightweight AI selection translator for macOS.
+轻量 AI 划词翻译工具，支持 macOS 和 Windows 11 x64。
+
+Windows 用户和开发者请先阅读[构建与测试](docs/windows/build-and-test.md)、[实施状态](docs/windows/implementation-status.md)和[完整测试方案](docs/windows/windows-test-plan.md)。Windows 使用 UIA、独立 helper、Windows Credential Manager 和用户级安装；下文 AX、LaunchAgent、配置路径与安装说明针对 macOS。Windows 当前提供未签名公开预览版；尚未完成的多屏/混合 DPI 验收见实施状态。
 
 [![最新版本](https://img.shields.io/github/v/release/kaisersong/beek?label=%E6%9C%80%E6%96%B0%E7%89%88)](https://github.com/kaisersong/beek/releases/latest)
 [![下载 DMG](https://img.shields.io/badge/%E2%AC%87%EF%B8%8F_%E4%B8%8B%E8%BD%BD_macOS_%E7%89%88-DMG-0B6E6E?style=flat-square)](https://github.com/kaisersong/beek/releases/latest/download/BeeK.dmg)
 
 **➡️ [下载最新版 BeeK.dmg](https://github.com/kaisersong/beek/releases/latest/download/BeeK.dmg)** —— 双击挂载，把 BeeK 拖进「应用程序」即可。
-这个链接永远指向最新版（每个 release 都会额外传一份稳定命名的 `BeeK.dmg`），不需要改版本号。
+**➡️ [下载 Windows 安装包](https://github.com/kaisersong/beek/releases/latest/download/BeeK-windows-x64-setup.exe)** · [Windows 便携版 ZIP](https://github.com/kaisersong/beek/releases/latest/download/BeeK-windows-x64.zip)
+
+以上链接始终指向最新版。Windows 需要 Windows 11 x64，当前为未签名预览版，系统可能提示未知发布者；可用 Release 中的 SHA256 文件核验。运行安装包后从开始菜单打开 BeeK；便携版请解压整个目录后运行 `beek.exe`，保留同目录的 `beek-selection-host.exe`。
 
 选中文本 → 出现小蜜蜂图标 → 点击后翻译 → 弹窗显示结果。菜单栏常驻，由 LaunchAgent 托管。
 

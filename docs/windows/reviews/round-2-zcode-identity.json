@@ -1,0 +1,10 @@
+{
+  "reviewer": "zcode",
+  "cli_version": "0.16.9",
+  "session_id": "sess_c4d1d431-4178-447d-a512-24580670b423",
+  "model": "GLM-5.3",
+  "provider_id": "account:bigmodel-individual-coding-plan",
+  "variant": "max",
+  "source_plan_sha256": "3677663c2fa62ea9770d6bf0f3aa15ac730387a6335bb9f5a805ad1314675048",
+  "source_session_verified": true
+}

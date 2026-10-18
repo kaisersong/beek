@@ -1,0 +1,6 @@
+BeeK Windows selection fixture
+Hello intelligent agent.
+中文划词测试，人工智能体。
+Emoji boundary: A😀中B
+First line for multiline selection.
+Second line for multiline selection.

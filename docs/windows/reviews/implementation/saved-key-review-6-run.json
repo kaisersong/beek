@@ -1,0 +1,25 @@
+{
+  "sessionId": "sess_de3c3049-604c-435c-b808-7a0e202fec62",
+  "traceId": "fd349e67-983d-419d-878c-b6a4aa7d6cce",
+  "turnId": "turn_aa7af63d-41c6-403a-84ec-3673416001d1",
+  "usage": {
+    "source": "provider",
+    "modelRequestCount": 1,
+    "inputTokens": 175795,
+    "outputTokens": 5054,
+    "totalTokens": 180849,
+    "cacheReadTokens": 192,
+    "cacheWriteTokens": 0,
+    "reasoningTokens": 0,
+    "webFetchRequests": 0,
+    "webSearchRequests": 0
+  },
+  "eventCount": 5056,
+  "projection": {
+    "status": "idle",
+    "turnCount": 1,
+    "totalTokenCount": 180849,
+    "contextUsed": 180849,
+    "contextWindow": 200000
+  }
+}

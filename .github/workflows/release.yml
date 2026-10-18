@@ -23,7 +23,11 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: '发布到 GitHub Release（false = 只构建 + 签名 + 公证，产物放 artifact）'
+        description: '发布双平台 GitHub Release（false = 仅构建并上传 artifact）'
+        type: boolean
+        default: false
+      sign_windows:
+        description: '使用 Windows 签名证书（默认发布明确标注的未签名预览包）'
         type: boolean
         default: false
   push:
@@ -34,6 +38,11 @@ permissions:
   contents: write
 
 jobs:
+  windows:
+    uses: ./.github/workflows/windows-product.yml
+    with:
+      formal: ${{ inputs.sign_windows == true || vars.WINDOWS_SIGN_RELEASES == 'true' }}
+    secrets: inherit
   release:
     runs-on: macos-14
     env:
@@ -64,6 +73,8 @@ jobs:
         run: python3 scripts/dev/check_shell_vars.py
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
 
       - uses: Swatinem/rust-cache@v2
 
@@ -218,27 +229,58 @@ jobs:
             ${{ steps.dmg.outputs.stable }}
           if-no-files-found: error
 
-      - name: 发布到 GitHub Release
-        if: github.event_name == 'push' || inputs.publish
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.ver.outputs.tag }}
-          ZIP: ${{ steps.pack.outputs.zip }}
-          DMG: ${{ steps.dmg.outputs.dmg }}
-          DMG_STABLE: ${{ steps.dmg.outputs.stable }}
-        run: |
-          set -eu
-          # 先建草稿、传资产、最后才转正式：避免出现「已发布但资产还没上传完」的窗口
-          if [ -f RELEASE_NOTES.md ]; then
-            gh release create "$TAG" --title "BeeK $TAG" --notes-file RELEASE_NOTES.md --draft || true
-          else
-            gh release create "$TAG" --title "BeeK $TAG" --generate-notes --draft || true
-          fi
-          gh release upload "$TAG" "$DMG" "$DMG.sha256" "$DMG_STABLE" --clobber
-          gh release upload "$TAG" "$ZIP" "$ZIP.sha256" --clobber
-          gh release edit "$TAG" --draft=false --latest
-          echo "已发布：https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
-
       - name: 清理钥匙串
         if: always()
         run: security delete-keychain "$MACOS_SIGNING_KEYCHAIN" 2>/dev/null || true
+
+  publish:
+    needs: [release, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: BeeK-*
+          path: dist/aggregate
+          merge-multiple: true
+      - name: Validate both platforms and checksums
+        env:
+          SIGN_WINDOWS: ${{ inputs.sign_windows == true || vars.WINDOWS_SIGN_RELEASES == 'true' }}
+        run: |
+          set -eu
+          V=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["package"]["version"])')
+          test "$GITHUB_REF_TYPE" != tag || test "$GITHUB_REF_NAME" = "v$V"
+          if [ "$SIGN_WINDOWS" = true ]; then
+            python scripts/windows/release_assets.py --directory dist/aggregate --version "$V"
+          else
+            python scripts/windows/release_assets.py --directory dist/aggregate --version "$V" --allow-unsigned-windows
+          fi
+          cd dist/aggregate
+          cmp "BeeK-v$V.dmg" BeeK.dmg
+          cp "BeeK-v$V-windows-x64-setup.exe" BeeK-windows-x64-setup.exe
+          cp "BeeK-v$V-windows-x64.zip" BeeK-windows-x64.zip
+          sha256sum BeeK.dmg BeeK-windows-x64-setup.exe BeeK-windows-x64.zip > SHA256SUMS.txt
+          echo "TAG=v$V" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BeeK-release-assets
+          path: dist/aggregate/*
+          if-no-files-found: error
+      - name: Upload complete draft, then publish
+        if: github.event_name == 'push' || inputs.publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          if gh release view "$TAG" --json isDraft > "$RUNNER_TEMP/release.json"; then
+            python -c 'import json,sys; assert json.load(open(sys.argv[1]))["isDraft"], "Refusing to overwrite an already public release"' "$RUNNER_TEMP/release.json"
+          elif [ -f RELEASE_NOTES.md ]; then
+            gh release create "$TAG" --target "$GITHUB_SHA" --draft --title "BeeK $TAG" --notes-file RELEASE_NOTES.md
+          else
+            gh release create "$TAG" --target "$GITHUB_SHA" --draft --title "BeeK $TAG" --generate-notes
+          fi
+          gh release upload "$TAG" dist/aggregate/* --clobber
+          gh release edit "$TAG" --draft=false --latest

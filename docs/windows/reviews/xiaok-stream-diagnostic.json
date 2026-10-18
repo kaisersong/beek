@@ -1,0 +1,66 @@
+{
+  "captured_at": "2026-10-17T07:13:50.522Z",
+  "results": [
+    {
+      "case": "short",
+      "model": "qwen3.8-flash-next",
+      "input_bytes": 29,
+      "deadline_ms": 20000,
+      "request_count": 1,
+      "packets": 24,
+      "wire_text_chars": 16,
+      "wire_reasoning_chars": 60,
+      "adapter_text_chars": 16,
+      "adapter_thinking_chars": 60,
+      "chunk_types": {
+        "thinking": 20,
+        "text": 2,
+        "usage": 1,
+        "done": 1
+      },
+      "profile": "generic-openai",
+      "provider": "spark-c294",
+      "endpoint_host": "100.118.138.33",
+      "request_model": "qwen3.8-flash-next",
+      "request_reasoning_effort": null,
+      "dispatch_ms": 1,
+      "http_status": 200,
+      "header_ms": 7050,
+      "first_packet_ms": 7051,
+      "last_packet_ms": 9151,
+      "finish_reason": "stop",
+      "done": true,
+      "total_ms": 9152
+    },
+    {
+      "case": "section5",
+      "model": "qwen3.8-flash-next",
+      "input_bytes": 4223,
+      "deadline_ms": 20000,
+      "request_count": 1,
+      "packets": 292,
+      "wire_text_chars": 0,
+      "wire_reasoning_chars": 848,
+      "adapter_text_chars": 0,
+      "adapter_thinking_chars": 848,
+      "chunk_types": {
+        "thinking": 291,
+        "usage": 1
+      },
+      "profile": "generic-openai",
+      "provider": "spark-c294",
+      "endpoint_host": "100.118.138.33",
+      "request_model": "qwen3.8-flash-next",
+      "request_reasoning_effort": null,
+      "dispatch_ms": 0,
+      "http_status": 200,
+      "header_ms": 7050,
+      "first_packet_ms": 7053,
+      "last_packet_ms": 19983,
+      "error_type": "AbortError",
+      "error_code": 20,
+      "timed_out": true,
+      "total_ms": 20006
+    }
+  ]
+}

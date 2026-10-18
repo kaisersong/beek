@@ -1,0 +1,68 @@
+name: Windows G0 build and test tooling
+
+on:
+  pull_request:
+    paths:
+      - 'tools/windows-probe/**'
+      - 'scripts/windows/**'
+      - 'tests/windows/**'
+      - '.github/workflows/windows-g0.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-tools:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Acceptance tooling tests (not desktop acceptance)
+        run: python -m unittest discover -s tests/windows -p "test_*.py" -v
+
+  build-probe:
+    runs-on: windows-2025
+    defaults:
+      run:
+        working-directory: tools/windows-probe
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/windows-probe
+      - name: Locate Windows SDK shader compiler
+        run: |
+          $root = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+          $fxc = Get-ChildItem $root -Filter fxc.exe -Recurse |
+            Where-Object { $_.Directory.Name -eq 'x64' } |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $fxc) { throw 'Windows SDK x64 fxc.exe missing' }
+          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Locked debug build and tests
+        run: |
+          cargo build --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Locked release build
+        run: cargo build --locked --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-g0-build-only-not-desktop-acceptance
+          path: tools/windows-probe/target/release/beek-windows-probe.exe
+          if-no-files-found: error
+      # GitHub's service desktop is not evidence for focus, UIA, IME, DPI,
+      # Explorer recovery or G0 approval. Those require run-g0.ps1 on Win11.

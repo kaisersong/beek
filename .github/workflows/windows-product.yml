@@ -1,0 +1,110 @@
+name: Windows CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      formal:
+        type: boolean
+        default: false
+    secrets:
+      WINDOWS_CERTIFICATE_P12_BASE64:
+        required: false
+      WINDOWS_CERTIFICATE_PASSWORD:
+        required: false
+      WINDOWS_PUBLISHER_THUMBPRINT:
+        required: false
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Locate FXC and signature tool
+        run: |
+          $sdk=Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+          foreach($tool in @('fxc.exe','signtool.exe')){
+            $file=Get-ChildItem $sdk -Recurse -Filter $tool | Where-Object {$_.Directory.Name -eq 'x64'} | Sort-Object FullName -Descending | Select-Object -First 1
+            if(-not $file){throw "$tool missing"}
+            if($tool -eq 'fxc.exe'){"GPUI_FXC_PATH=$($file.FullName)" >> $env:GITHUB_ENV}else{"BEEK_SIGNTOOL=$($file.FullName)" >> $env:GITHUB_ENV}
+          }
+      - name: Format, unit tests, tooling tests (service runner only)
+        run: |
+          cargo fmt --all -- --check
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          cargo test --locked --all-targets
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          python -m unittest discover -s tests/windows -p "test_*.py"
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+      - name: Locked shipping binaries
+        run: cargo build --locked --release --bin beek --bin beek-selection-host
+      - name: Install verified packaging tool inside runner temporary directory
+        run: |
+          $file=Join-Path $env:RUNNER_TEMP 'innosetup-6.7.3.exe'
+          Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe' -OutFile $file
+          if((Get-FileHash $file -Algorithm SHA256).Hash.ToLower() -ne '9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732'){throw 'Inno SHA256 mismatch'}
+          $sig=Get-AuthenticodeSignature $file
+          if($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'Pyrsys B.V.'){throw 'Inno signature mismatch'}
+          $dir=Join-Path $env:RUNNER_TEMP 'beek-inno'
+          $p=Start-Process $file -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CURRENTUSER',('/DIR="'+$dir+'"'),'/NOICONS') -PassThru -Wait
+          if($p.ExitCode -ne 0){throw 'Inno setup failed'}
+          "BEEK_ISCC=$dir\ISCC.exe" >> $env:GITHUB_ENV
+      - name: Import formal signing identity
+        if: inputs.formal == true
+        env:
+          CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE_P12_BASE64 }}
+          PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          THUMBPRINT: ${{ secrets.WINDOWS_PUBLISHER_THUMBPRINT }}
+        run: |
+          if(-not $env:CERTIFICATE -or -not $env:PASSWORD -or $env:THUMBPRINT -notmatch '^[a-fA-F0-9]{40}$'){throw 'Formal Windows signing secrets missing'}
+          $pfx=Join-Path $env:RUNNER_TEMP 'beek-signing.pfx'
+          try{
+            [IO.File]::WriteAllBytes($pfx,[Convert]::FromBase64String($env:CERTIFICATE))
+            $cert=Import-PfxCertificate $pfx -CertStoreLocation Cert:\CurrentUser\My -Password (ConvertTo-SecureString $env:PASSWORD -AsPlainText -Force)
+            if($cert.Thumbprint -ne $env:THUMBPRINT -or -not $cert.HasPrivateKey){throw 'Unexpected Windows signing identity'}
+            "BEEK_SIGNER=$($cert.Thumbprint)" >> $env:GITHUB_ENV
+          }finally{Remove-Item $pfx -Force -ErrorAction SilentlyContinue}
+      - name: Package exact pair
+        run: |
+          $options=@{Iscc=$env:BEEK_ISCC}
+          if('${{ inputs.formal }}' -ne 'true'){$options.PublicPreview=$true}
+          if('${{ inputs.formal }}' -eq 'true'){$options.Formal=$true;$options.PublisherThumbprint=$env:BEEK_SIGNER;$options.SignTool=$env:BEEK_SIGNTOOL}
+          ./scripts/windows/package.ps1 @options
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BeeK-Windows-packages
+          path: |
+            dist/windows/*.zip
+            dist/windows/*setup.exe
+            dist/windows/*.sha256
+            dist/windows/windows-signatures.json
+          if-no-files-found: error
+      - name: Remove runner signing identity
+        if: always()
+        run: if($env:BEEK_SIGNER){Remove-Item "Cert:\CurrentUser\My\$env:BEEK_SIGNER" -Force -DeleteKey -ErrorAction SilentlyContinue}
+  mac-check:
+    if: inputs.formal != true
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --all-targets
+      - run: cargo test --locked --all-targets

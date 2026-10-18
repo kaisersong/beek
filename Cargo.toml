@@ -1,24 +1,54 @@
 [package]
 name = "beek"
-version = "1.0.15"
+version = "1.0.16"
 edition = "2021"
-description = "轻量 macOS AI 划词翻译工具 - Lightweight AI selection translator for macOS"
+description = "Lightweight AI selection translator for macOS and Windows"
 
 [[bin]]
 name = "beek"
 path = "src/main.rs"
 
+[[bin]]
+name = "beek-selection-host"
+path = "src/bin/selection-host.rs"
+
+[[bin]]
+name = "beek-windows-harness"
+path = "src/bin/windows-harness.rs"
+required-features = ["test-fixtures"]
+
+[features]
+dev-runtime-shaders = ["gpui/runtime_shaders"]
+test-fixtures = []
+
+[build-dependencies]
+sha2 = "0.10"
+embed-resource = "=3.0.12"
+
 [dependencies]
-# GPUI - Zed 的 UI 框架
-gpui = "0.2.2"
-# Ely - GPUI 组件库 (Overlays, Loading 等)
-ely-gpui-component = { git = "https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components" }
-# macOS 系统集成
+raw-window-handle = "=0.6.2"
+unicode-segmentation = "=1.12.0"
+sha2 = "0.10"
+getrandom = "0.3"
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui = "=0.2.2"
 accessibility-sys = "0.2"
 cocoa = "0.25"
 core-foundation = "0.9"
 objc = "0.2"
-# HTTP + JSON
-reqwest = { version = "0.12", features = ["blocking", "json"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-core = "=0.61.2"
+gpui = { version = "=0.2.2", default-features = false, features = ["windows-manifest", "runtime_shaders"] }
+windows = { version = "=0.61.3", features = [
+ "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Credentials",
+ "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_System_Memory",
+ "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_IO", "Win32_System_Registry",
+ "Win32_System_LibraryLoader", "Win32_System_SystemServices", "Win32_System_SystemInformation", "Win32_System_DataExchange",
+ "Win32_UI_Accessibility", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging",
+ "Win32_UI_Input_KeyboardAndMouse", "Win32_Media_Speech", "Win32_System_Console", "Win32_System_RemoteDesktop", "Win32_System_StationsAndDesktops"
+] }

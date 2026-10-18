@@ -75,7 +75,7 @@ sleep 2
 echo "== 6/6 发布 =="
 if [ "$1" != "--publish" ]; then
     echo "   跳过（要发布请加 --publish；发布前建议先在本地试一次 auto-update）"
-    echo "   手动发布命令：gh release create v$VERSION \"$ZIP\" -R $REPO --title \"BeeK v$VERSION\""
+    echo "   正式发布请使用双平台 Release 工作流。"
     exit 0
 fi
 
@@ -93,5 +93,6 @@ if [ ! -f "$NOTES" ]; then
         printf '\n\n## 安装\n下载 `BeeK-v%s.zip`，解压后把 BeeK.app 拖进「应用程序」。\n' "$VERSION"
     } > "$NOTES"
 fi
-gh release create "v$VERSION" "$ZIP" -R "$REPO" --title "BeeK v$VERSION" --notes-file "$NOTES"
-echo "已发布：https://github.com/$REPO/releases/tag/v$VERSION"
+echo "正式发布统一由 GitHub Release 工作流聚合 Windows 安装包/便携包 + macOS 签名公证包。"
+echo "本地 --publish 不再绕过双平台资产校验；请使用 Actions → Release。"
+exit 1

@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "scope": "G0 probe separately reviewed; included by final source_fingerprint, supplemental per-file inventory",
+  "files": [
+    {
+      "path": "tools/windows-probe/Cargo.toml",
+      "sha256": "0e0f2329e9a375fe87fbd3fb3cedd28eebcd703798d8ab028ba952a990c15a6a"
+    },
+    {
+      "path": "tools/windows-probe/LICENSE-APACHE",
+      "sha256": "752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a"
+    },
+    {
+      "path": "tools/windows-probe/Cargo.lock",
+      "sha256": "f7ad6d9b822fd1807dd47a78456651fd850c7b915d9e3e404726c5f6c261c0c5"
+    },
+    {
+      "path": "tools/windows-probe/THIRD_PARTY_NOTICES.md",
+      "sha256": "261aafca65e5944465931d21c764e3aa9c75f508a88e8cd22e840b9c1e60f260"
+    },
+    {
+      "path": "tools/windows-probe/README.md",
+      "sha256": "6d042d09d6a63bf4add3d58c5bc24b1055422580527e3fc7320bae9e7a1b7474"
+    },
+    {
+      "path": "tools/windows-probe/rust-toolchain.toml",
+      "sha256": "ca67e66659a82661386e5a08471c913cb8b3f7c7ce37592207d3f513589a41c2"
+    },
+    {
+      "path": "tools/windows-probe/src/native.rs",
+      "sha256": "aba37a596af2ec70673e143d544235aceed72f80d1b9cbf9cf830964581a8dd3"
+    },
+    {
+      "path": "tools/windows-probe/src/text_model.rs",
+      "sha256": "5b1aaca7d282a4c5a169d6d1d0f9e0b2e751ca9daeb2c062c79c35255e4e3c79"
+    },
+    {
+      "path": "tools/windows-probe/src/main.rs",
+      "sha256": "e26d937bf742b9281af4560dd5b0a490433bfb5565d60afa04d819fe0305eb8c"
+    },
+    {
+      "path": "tools/windows-probe/src/input.rs",
+      "sha256": "a9f95c665483f3aa3ddbdded9fbdeaa9e759d870c09341aa95c589d260017072"
+    }
+  ]
+}

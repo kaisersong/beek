@@ -1,0 +1,22 @@
+{
+  "sessionId": "sess_4a763d88-ca54-4e3a-a975-54944c197eea",
+  "usage": {
+    "source": "provider",
+    "modelRequestCount": 1,
+    "inputTokens": 20838,
+    "outputTokens": 27553,
+    "totalTokens": 48391,
+    "cacheReadTokens": 10240,
+    "cacheWriteTokens": 0,
+    "reasoningTokens": 0,
+    "webFetchRequests": 0,
+    "webSearchRequests": 0
+  },
+  "projection": {
+    "status": "idle",
+    "turnCount": 1,
+    "totalTokenCount": 48391,
+    "contextUsed": 48391,
+    "contextWindow": 200000
+  }
+}

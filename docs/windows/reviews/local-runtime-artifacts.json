@@ -1,0 +1,7 @@
+{
+  "reason": "CLI-created capability cache moved outside repository; no source changes",
+  "path": "/var/folders/qk/0759gskn77v_x22b9xqbk_f00000gp/T/beek-windows-review-runtime-fk7tgic5/.xiaok",
+  "files": [
+    "state/capability-health.json"
+  ]
+}

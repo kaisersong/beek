@@ -1,0 +1,23 @@
+{
+  "reviewer": "xiaok",
+  "model": "qwen3.8-flash-next",
+  "mode": "native-stream-with-progress",
+  "round": 2,
+  "started_at": "2026-10-17T07:15:41.688Z",
+  "idle_limit_ms": 60000,
+  "total_limit_ms": 900000,
+  "max_output_tokens": 16384,
+  "thinking_chars": 32113,
+  "text_chars": 0,
+  "chunks": 5640,
+  "chunk_types": {
+    "thinking": 5639,
+    "usage": 1
+  },
+  "first_chunk_ms": 8711,
+  "exit_code": 1,
+  "error_type": "Error",
+  "error_code": "ERR_STREAM_PREMATURE_CLOSE",
+  "timed_out": false,
+  "elapsed_s": 300
+}

@@ -1,0 +1,1311 @@
+{
+  "schema_version": 1,
+  "scope": "Windows 11 x64 G0-G5; G6/G7 remain disabled",
+  "cases": [
+    {
+      "id": "G0-01-BUILD",
+      "stage": "G0",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "在干净Windows11 x64 MSVC环境按README执行locked debug和release构建"
+      ],
+      "expected": "两种构建均成功；记录Rust/SDK/fxc版本与lock散列",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G0-02-GPU",
+      "stage": "G0",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "启动原型，记录显卡驱动和渲染错误，重启一次"
+      ],
+      "expected": "透明窗和输入窗口正确渲染，无GPU崩溃",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G0-03-SHOW",
+      "stage": "G0",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "记事本选中公开文本，从通知区显示原型悬浮窗"
+      ],
+      "expected": "显示前后前台HWND相同，选区和插入位置不变",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G0-04-CLICK",
+      "stage": "G0",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "切回记事本，连续点击悬浮按钮10次"
+      ],
+      "expected": "点击计数递增；前台仍是记事本，选区不丢失",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G0-05-ALPHA",
+      "stage": "G0",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "将悬浮窗移到明暗背景上，检查圆角及半透明"
+      ],
+      "expected": "背景透明且无黑矩形、闪白或点击穿透错误",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G0-06-TOPMOST",
+      "stage": "G0",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "在普通桌面切换Edge/记事本，再点击悬浮窗"
+      ],
+      "expected": "悬浮窗可见且不激活；不遮盖安全桌面",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G0-07-INPUT",
+      "stage": "G0",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "点击两个文本字段输入ASCII/中文/emoji，使用左右/Home/End/Delete"
+      ],
+      "expected": "光标、删除和UTF-16位置正确，无panic或乱码",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G0-08-IME",
+      "stage": "G0",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "微软拼音输入中文，移动候选窗位置，中英切换及取消组合"
+      ],
+      "expected": "组合标记/候选位置正确，提交不重复不丢字",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G0-09-IME-REPLACE",
+      "stage": "G0",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "先输入前缀中文和emoji，在非零偏移选区组合替换"
+      ],
+      "expected": "替换范围正确；emoji不拆分，后缀保留",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G0-10-PASTE",
+      "stage": "G0",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "对固定文本使用Ctrl+A/C/V/X和鼠标拖选"
+      ],
+      "expected": "复制/剪切/粘贴正确，未记录正文到日志",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G0-11-TAB",
+      "stage": "G0",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "Tab/Shift+Tab在两字段切换；鼠标选择字段后继续Tab"
+      ],
+      "expected": "焦点按实际当前字段导航，无字符键被劫持",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G0-12-DPI",
+      "stage": "G0",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "两屏100%+150%/200%，副屏左置，分别显示原型"
+      ],
+      "expected": "负坐标、文字缩放、命中位置与候选窗都正确",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G0-13-HOTPLUG",
+      "stage": "G0",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "拖动输入窗跨屏并拔除原显示器"
+      ],
+      "expected": "窗口可访问、无失联窗口、可继续IME输入",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G0-14-F11",
+      "stage": "G0",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "在Edge普通网页F11进入/退出全屏，再显示和点击悬浮窗"
+      ],
+      "expected": "不退出全屏、不抢焦点、不闪烁",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G0-15-TRAY",
+      "stage": "G0",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "关闭所有原型窗口后等待30秒，从通知区重开"
+      ],
+      "expected": "无可见窗口仍常驻；hidden lifetime host不可见；heartbeat visible_windows=0/gpui_windows=1，通知区重开可输入",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G0-16-EXPLORER",
+      "stage": "G0",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "测试机手动重启Explorer，再从通知区操作原型"
+      ],
+      "expected": "TaskbarCreated重建通知区图标，无重复图标",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G0-17-QUIT",
+      "stage": "G0",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "从通知区退出，再重新启动原型"
+      ],
+      "expected": "日志含quit且进程结束，无残留，重新启动成功",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G0-18-PRIVACY",
+      "stage": "G0",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "输入固定秘密哨兵文本，搜索原型日志"
+      ],
+      "expected": "日志不含输入/剪贴板正文，只含事件、尺寸、句柄",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G1-01-BUILD-WIN",
+      "stage": "G1",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "Windows执行cargo check/test/build --locked --all-targets"
+      ],
+      "expected": "Windows主程序及helper构建成功，无macOS引用",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G1-02-BUILD-MAC",
+      "stage": "G1",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "macOS执行locked构建并运行原有自检"
+      ],
+      "expected": "原macOS能力可构建且关键流程不回归",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G1-03-LOCK",
+      "stage": "G1",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "干净缓存重复locked构建；检验移除未用Ely"
+      ],
+      "expected": "依赖可复现，不隐式升级GPUI或拉未固定Git依赖",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G1-04-CFG",
+      "stage": "G1",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "构建所有bin/测试目标，检查资源相对exe定位"
+      ],
+      "expected": "helper只在Windows执行；无cwd依赖",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-01-NOTEPAD",
+      "stage": "G2",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "记事本选中中英、多行、双击单词、键盘选区及空选区"
+      ],
+      "expected": "后端值断言精确匹配fixture；空选区不冒充全文",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-02-EDGE",
+      "stage": "G2",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "Edge普通fixture网页和输入区重复各类选区"
+      ],
+      "expected": "L1后端文本/矩形/来源断言通过",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-03-CHROME",
+      "stage": "G2",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "Chrome普通fixture网页和输入区重复各类选区"
+      ],
+      "expected": "L1后端文本/矩形/来源断言通过",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-04-PASSWORD",
+      "stage": "G2",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "密码框/受保护界面触发取词"
+      ],
+      "expected": "返回Protected，不取全文、不模拟复制",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-05-ADMIN",
+      "stage": "G2",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "普通权限对管理员程序划词"
+      ],
+      "expected": "安全失败，无提权/注入和敏感缓存",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-06-EMPTY",
+      "stage": "G2",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "退化范围、空白选区、多段选区、无矩形"
+      ],
+      "expected": "状态正确，多段顺序正确，无矩形遵循锚点规则",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-07-LIMIT",
+      "stage": "G2",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "选中16384及16385 Unicode字符，包含四字节字符"
+      ],
+      "expected": "边界准确，超限明确拒绝，不悄悄截断",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-08-STALE",
+      "stage": "G2",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "UIA慢结果返回前换应用或同HWND换标签/文档"
+      ],
+      "expected": "旧结果丢弃，不出现错误来源按钮",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-09-PROTOCOL",
+      "stage": "G2",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "错版本/握手token/超长帧/乱序request_id/generation"
+      ],
+      "expected": "拒绝并恢复，有界内存和正确故障归因",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-10-HANG",
+      "stage": "G2",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "注入无法返回的UIA调用"
+      ],
+      "expected": "1500ms总预算后回收该worker，主消息线程正常",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-11-CRASH",
+      "stage": "G2",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "同一源操作及订阅回调分别连续崩溃3次并在30秒后探测"
+      ],
+      "expected": "1/5/30秒退避，第四次失败隔离，健康源成功",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-12-SLOTS",
+      "stage": "G2",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "慢A/B占满双槽，再切健康C；模拟终止未确认"
+      ],
+      "expected": "失效占用者优先回收，确认退出才补位；否则300ms Busy",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-13-RATE",
+      "stage": "G2",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "跨源连续异常和启动失败，滚动记录所有创建尝试"
+      ],
+      "expected": "UIA总数含终止中<=2；任意10秒创建<=6",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-14-INFRA",
+      "stage": "G2",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "无来源启动/握手连续失败3次"
+      ],
+      "expected": "基础设施暂停有反馈，不无限补位",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-15-SUBSCRIBE",
+      "stage": "G2",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "切换源/worker回收/锁屏恢复，记录订阅归属"
+      ],
+      "expected": "MTA同线程注册注销，重放一次，无无限全局订阅",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-16-CLIP-HANG",
+      "stage": "G2",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "reader延迟渲染阻塞，再正常UIA查询"
+      ],
+      "expected": "reader<=1且独立超时回收，不丢UIA订阅",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-17-CLIP-PENDING",
+      "stage": "G2",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "reader占用时连续复制多个sequence，跨300ms边界"
+      ],
+      "expected": "只保留最新；过期自动请求不复活，显式重试重绑sequence",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-18-CLIP-OWNER",
+      "stage": "G2",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "复制后切应用、后台写、空owner、历史恢复、自身复制"
+      ],
+      "expected": "未知关联不自动弹出，不伪造前台来源",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-19-SESSION",
+      "stage": "G2",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "锁屏、切会话、休眠恢复时使请求在途"
+      ],
+      "expected": "取消旧generation/缓存，解锁后重新绑定",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-20-JOB",
+      "stage": "G2",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "强杀主程序，观察helper和实例mutex"
+      ],
+      "expected": "Job清理全部子进程，新主程序可正常启动",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G3-01-NO-REQUEST",
+      "stage": "G3",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "自动划词只显示按钮，读取mock服务stats"
+      ],
+      "expected": "点击翻译前模型请求计数为0",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G3-02-CLICK-VERIFY",
+      "stage": "G3",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "按钮显示后同HWND换页/取消选区/超过8秒TTL再点击"
+      ],
+      "expected": "不发旧正文请求，明确要求重新划词",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G3-03-FLOW",
+      "stage": "G3",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "在最小L1三应用走划词→点击→流式→复制→点外关闭"
+      ],
+      "expected": "结果正确，点击后本地加载态<=100ms，选区/焦点不丢",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G3-04-DOUBLE",
+      "stage": "G3",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "快速双击按钮和重复100次开关弹窗"
+      ],
+      "expected": "同一点击不重复请求，迟到结果不复活窗口",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G3-05-SSE",
+      "stage": "G3",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "mock正常/UTF8分片/慢流/断流/空响应/无DONE"
+      ],
+      "expected": "解析正确，断流有可见错误，不把残缺流当完成",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G3-06-HTTP",
+      "stage": "G3",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "mock返回401/403/429/500与超长含哨兵错误正文"
+      ],
+      "expected": "错误有反馈，日志不回显凭据/原文，响应体读取有界",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G3-07-BOUNDS",
+      "stage": "G3",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "两个慢HTTP占满真实槽，再多次替换pending"
+      ],
+      "expected": "真实槽<=2，pending<=1，关闭窗口不释放未结束槽",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G3-08-STREAM-LIMIT",
+      "stage": "G3",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "mock超长SSE行/帧和输出超过256KiB"
+      ],
+      "expected": "读取中执行64KiB帧上限，输出有界并明确报错",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G3-09-CANCEL",
+      "stage": "G3",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "发请求后关闭/锁屏/切源，随后mock继续返回"
+      ],
+      "expected": "正文/完成/错误不重新打开旧窗口",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G3-10-DRAG",
+      "stage": "G3",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "拖动结果窗，点复制/朗读，再点外部"
+      ],
+      "expected": "不被取词检测撤销，不立即关闭新窗",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G3-11-DPI",
+      "stage": "G3",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "双屏混合DPI、副屏左置、任务栏移位、拔插显示器"
+      ],
+      "expected": "锚点/拖动/工作区边缘和缩放正确，窗始终可达",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G3-12-IME",
+      "stage": "G3",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "在正式设置窗口重复G0输入/IME/粘贴/Tab用例"
+      ],
+      "expected": "与G0结论一致，失败重审G0适配",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G3-13-ACCESS",
+      "stage": "G3",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "键盘热键打开可激活结果，检查缩放/导航"
+      ],
+      "expected": "无鼠标也可读取/复制结果，关闭恢复正常使用",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G3-14-F11",
+      "stage": "G3",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "Edge F11与最大化窗口/不可选放映画面"
+      ],
+      "expected": "可选网页L1；尺寸变化旧窗隐藏，不可选不伪造选区",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G3-15-EXIT",
+      "stage": "G3",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "两个HTTP慢流期间退出"
+      ],
+      "expected": "最多2秒清理平台资源，不等60秒，不承诺撤回服务端",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G4-01-DEFAULT",
+      "stage": "G4",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "干净新用户启动Windows；对照macOS旧配置"
+      ],
+      "expected": "Windows自动复制/复制监视/自启动/自动安装默认关，旧macOS行为不变",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G4-02-CONFIG",
+      "stage": "G4",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "损坏JSON/缺字段/读写失败/并发保存/修改model"
+      ],
+      "expected": "备份损坏文件，保留旧配置及base_url，失败可见",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G4-03-CREDENTIAL",
+      "stage": "G4",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "注入凭据写失败/读回失败/配置替换失败"
+      ],
+      "expected": "已提交完整配置与key保持可用，不回落错误账户",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G4-04-COMMIT",
+      "stage": "G4",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "提交前后杀进程，注入旧凭据清理失败"
+      ],
+      "expected": "按配置当前不可变ref恢复，清理失败只留可重试垃圾",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G4-05-MIGRATE",
+      "stage": "G4",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "旧明文key迁移，期间注入存储失败"
+      ],
+      "expected": "保存并读回成功后才移除明文，失败仍可恢复",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G4-06-SNAPSHOT",
+      "stage": "G4",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "请求在途修改key/model/base_url/provider"
+      ],
+      "expected": "一次请求只用冻结的一套配置，下一请求使用新版本",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G4-07-SINGLE",
+      "stage": "G4",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "普通第二次启动主程序，同时启动helper子命令"
+      ],
+      "expected": "仅一个主实例，第二次只ActivateSettings，helper不抢锁",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G4-08-IPC",
+      "stage": "G4",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "伪管道/抢占/错误SID会话/错误PID创建标识/未知类型"
+      ],
+      "expected": "拒绝控制请求和接管；帧<=4KiB及连接读写超时1秒",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G4-09-RESTART",
+      "stage": "G4",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "正常重启、子创建失败、预就绪失败、父退出超时、PID复用"
+      ],
+      "expected": "正确握手/保留旧实例，无双主实例或无反馈退出",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G4-10-AUTOSTART",
+      "stage": "G4",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "切换登录启动，退出再登录，升级安装路径"
+      ],
+      "expected": "Run绝对路径引用正确；退出保留偏好；卸载删除注册",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G4-11-HOTKEY",
+      "stage": "G4",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "默认Ctrl+Alt+T、改键、关闭、模拟冲突"
+      ],
+      "expected": "冲突有反馈，不劫持按键，不对Terminal强发Ctrl+C",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G4-12-PREVIEW",
+      "stage": "G4",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "复制监听关闭，托盘显式读取并预览再点击翻译"
+      ],
+      "expected": "可用且明确来自剪贴板，点击前0网络请求",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G4-13-TRAY",
+      "stage": "G4",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "所有窗口关闭后常驻，Explorer重启，托盘设置/关于/退出"
+      ],
+      "expected": "图标重建、菜单可用且无残留资源",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G4-14-SPEECH",
+      "stage": "G4",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "中英文/无语音/语音服务错误/含shell字符的公开文本"
+      ],
+      "expected": "无PowerShell拼接；失败有反馈，不阻塞翻译",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G4-15-PRIVACY",
+      "stage": "G4",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "固定哨兵分别放key、原文、译文、错误回显和配置URL"
+      ],
+      "expected": "日志无秘密内容；详细诊断需主动开启",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G5-01-PACKAGE",
+      "stage": "G5",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "在无Rust/编译工具的新Windows用户解压zip从不同cwd运行"
+      ],
+      "expected": "主程序/helper/资源/CRT完整，无控制台闪现",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G5-02-INSTALL",
+      "stage": "G5",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "普通用户中文名和空格路径新安装/同版本重装"
+      ],
+      "expected": "无需管理员，固定AppId、快捷方式和版本一致",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G5-03-UPGRADE",
+      "stage": "G5",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "N→N+1，程序运行时接受/拒绝退出，取消安装"
+      ],
+      "expected": "拒绝/退出失败不覆盖，无强杀半套文件，保留配置凭据",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G5-04-UNINSTALL",
+      "stage": "G5",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "卸载默认保留数据/显式清理两条路径"
+      ],
+      "expected": "托盘/helper/快捷方式/Run清理，只有明确选择才删数据凭据",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G5-05-SIGN",
+      "stage": "G5",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "签名发布前逐一检查exe/helper/setup Authenticode及发布者"
+      ],
+      "expected": "缺签名/错误发布者拒绝正式发布，仅内部预览",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G5-06-ASSETS",
+      "stage": "G5",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "缺Windows包/只有Windows包/错误架构/预发布通道fixture"
+      ],
+      "expected": "聚合发布拒绝缺任一平台资产；不会误取macOS包",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G5-07-MANUAL-UPDATE",
+      "stage": "G5",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "检查更新、无Windows包、固定HTTPS发布入口"
+      ],
+      "expected": "只引导签名installer，不自动下载执行任意URL",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G5-08-L1",
+      "stage": "G5",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "记事本、Edge、Chrome各重复中英拖选/双击/跨行/键盘选择/空选区"
+      ],
+      "expected": "全部核心L1通过，任一失败阻止G5，不得标L2规避",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G5-09-EXTENDED",
+      "stage": "G5",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "Word/VSCode/Terminal/文本PDF/扫描PDF/放映应用测试"
+      ],
+      "expected": "每应用版本清楚标L1/L2/不支持；不强制Ctrl+C中断Terminal",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G5-10-PERF",
+      "stage": "G5",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "每最小L1应用至少100次尝试，记录成功/失败/Busy/超时及延迟"
+      ],
+      "expected": "完整分母，p95<=800ms；点击本地态<=100ms，无排除失败美化",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G5-11-IDLE",
+      "stage": "G5",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "固定环境静置5分钟，采样主程序+所有helper CPU/内存/句柄"
+      ],
+      "expected": "平均CPU<=单核1%，总空闲工作集目标<=150MiB，无增长泄漏",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G5-12-SOAK",
+      "stage": "G5",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "8小时跨源选择/复制/网络故障/休眠恢复循环"
+      ],
+      "expected": "资源有界，无崩溃/旧响应复活/凭据剪贴板损失",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G5-13-OFFLINE",
+      "stage": "G5",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "断网/DNS错/证书错/代理失败再恢复"
+      ],
+      "expected": "有界超时，可重试，无无声自动请求循环",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G5-14-MAC-REGRESSION",
+      "stage": "G5",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "按macOS旧行为执行划词/兜底/设置/托盘/更新资产回归"
+      ],
+      "expected": "Windows拆分未改变原平台默认行为和旧更新协议",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G5-15-DISABLED",
+      "stage": "G5",
+      "method": "automated",
+      "priority": "required",
+      "steps": [
+        "检查正式首版功能标志与安装器/更新路径"
+      ],
+      "expected": "G6自动Ctrl+C与G7自动安装未过门禁保持关闭",
+      "evidence": [
+        "command-log",
+        "environment",
+        "actual-result"
+      ]
+    }
+  ]
+}

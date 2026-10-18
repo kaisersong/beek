@@ -1,0 +1,5 @@
+{
+  "status": "canceled_no_verdict",
+  "reason": "Full-repository interactive tool-driven review exceeded 13 minutes without a verdict; replaced by scoped immutable snapshots.",
+  "never_count_as_consensus": true
+}

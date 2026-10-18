@@ -20,6 +20,10 @@ pub const MENUBAR_ICON_PT: f64 = 18.0;
 /// 现在的实际绘制尺寸由悬浮窗口决定（见 main.rs 的 ICON_SIZE / ICON_ZOOM）。
 pub const SELECTION_ICON_PT: f32 = 32.0;
 
+/// Shared macOS/Windows visible button size and crop of the asset's outer rim.
+pub const SELECTION_BUTTON_PT: f32 = 24.;
+pub const SELECTION_CROP_ZOOM: f32 = 1.103448;
+
 /// 发音按钮的线描喇叭图标（56x56 @4x，透明底、灰描边）。
 /// 素材由 resources/icons/gen_speak_outline.py 生成；不用 emoji 是因为
 /// emoji 是彩色的，和它左边的灰色音标不是一套语言。

@@ -1,0 +1,10 @@
+{
+  "reviewer": "xiaok",
+  "mode": "installed-native-adapter",
+  "model": "qwen3.8-flash-next",
+  "round": 1,
+  "started_at": "2026-10-17T06:59:09.939Z",
+  "exit_code": 1,
+  "error_type": "AbortError",
+  "timed_out": true
+}

@@ -1,11 +1,13 @@
 ## 变更
 
-- **README 顶部给出「下载最新版」直达链接**：`https://github.com/kaisersong/beek/releases/latest/download/BeeK.dmg`
-  —— 每个 release 除了带版本号的 DMG，还会额外上传一份**稳定命名**的 `BeeK.dmg`，
-  所以这个链接永远指向最新版，不会因为版本号变化而过期。
-- 顶部同时放了「最新版本」与「下载」两个徽章，一眼能看到当前版本号。
+- 新增 Windows 11 x64 版本：UIA 划词、点击翻译、托盘设置、系统凭据保存、用户级安装和便携版。
+- Windows 浮动按钮去除外框，翻译卡片与 macOS 的尺寸、排版和图标保持一致。
+- 修复点击按钮后翻译窗口立即消失，以及 Edge、记事本拖选后按钮不出现的问题。
+- 新增 Windows CI：单元测试、工具测试、Release 构建、安装包和 ZIP；同一 Release 同时提供 macOS 和 Windows 下载。
 
-## 安装
+## 下载与安装
 
-点上面的下载链接拿到 `BeeK.dmg` → 双击挂载 → 把 BeeK 拖到 Applications → 卸载映像 → 打开。
-已经在用旧版本的**什么都不用做**：自动更新会后台下好，退出或下次启动就是新版。
+- **macOS**：下载 `BeeK.dmg` 或 `BeeK-v1.0.16.dmg`，双击后拖进「应用程序」。保留 Developer ID 签名与公证。
+- **Windows 11 x64**：下载 `BeeK-windows-x64-setup.exe` 或带版本号的安装包。便携版请完整解压 ZIP 后运行 `beek.exe`，不要移走配套 helper。
+- Windows 当前为**未签名公开预览版**，系统可能提示未知发布者。完整多屏/混合 DPI 验收及 Windows 代码签名仍待完成；此发布不代表完整 G0–G5 验收通过。
+- 提供 SHA256 校验。Windows 版暂不自动下载或安装更新，后续版本请从 Releases 手动下载。

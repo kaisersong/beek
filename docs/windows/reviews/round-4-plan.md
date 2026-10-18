@@ -1,0 +1,331 @@
+# BeeK Windows 版详细实施方案
+
+- 文档版本：v4 设计候选稿；签核状态见评审台账，不代表已经达成一致。
+- 日期：2026-10-17。
+- 源码基线：`09cfe6d3df02ddbd5bc274e1590d6f8ec757bad6`，Cargo 版本 `1.0.14`。
+- 本轮交付：实施方案、独立评审、修订与共识记录。不实施业务代码、不发布、不修改用户配置。
+- 本方案使用能力、依赖、验收证据安排 AI 开发，不估算人天。
+- “设计评审通过”只表示可按此执行；不能替代 Windows 构建、真实应用兼容性和发布验收。
+
+## 1. 目标、范围与默认行为
+
+保留 Rust 和 GPUI，将现有 macOS 专用代码隔离，实现 Windows 上“选中文本 → 小蜜蜂 → 点击才请求翻译 → 流式弹窗”的完整主路径。
+
+首个公开 Windows 版本支持 Windows 11 x64、普通用户权限、本地交互桌面。Windows 10、ARM64、远程桌面、管理员程序、游戏和独占全屏不作首版支持承诺；它们的失败必须安全降级，不能导致常驻进程崩溃或复制错误内容。不得将部分软件通过误写成“全局取词适用于任何应用”。
+
+| 能力 | 首版行为 | 验收边界 |
+| --- | --- | --- |
+| 自动划词 | 默认开启；拖选、双击后查 UIA 选区 | 支持清单中 UIA 可用的软件必须直接取词 |
+| 点击才翻译 | 默认且不可被后台探测绕过 | 展示小蜜蜂不产生模型请求 |
+| 词典/段落翻译、流式显示 | 复用当前逻辑 | 网络失败可重试；旧响应不能复活已关闭的弹窗 |
+| 复制译文、拖动、点外关闭 | 保留 | 不破坏原应用选区，不误关闭当前交互 |
+| 用户复制后显示小蜜蜂 | 可选，默认关闭 | 仅开关打开时处理外部文本剪贴板变化 |
+| 全局快捷键触发 | 默认 `Ctrl+Alt+T`；可改、可关闭 | 注册冲突有反馈，失败不劫持按键；仅查询当前选区 |
+| 一次性读取剪贴板 | 托盘显式动作，不要求打开监听开关 | 先本地预览，用户点击翻译后才请求 |
+| 自动模拟 Ctrl+C | 首版默认关闭；独立实验能力门禁 | 不作为 UIA 失败后无提示的必经路径 |
+| 托盘、设置、关于、退出、重启 | 必须 | 无可见窗口仍常驻；资源可释放 |
+| 登录启动 | 独立开关，默认关闭 | 退出不自动改变登录启动偏好 |
+| 系统朗读 | 可选，有语音则可用 | 无对应语音时给明确反馈，不阻塞翻译 |
+| 更新 | 首版检查并引导用户下载签名安装包 | 自动替换更新另设门禁，未通过时不得自动下载执行 |
+
+自动复制和自动安装均有明确独立的后续设计，不能由 AI 开发时自行打开。首版对 UIA 不支持的软件提供“开启复制即显示，手动 Ctrl+C”的降级路径，不要求安装浏览器扩展，不使用 OCR、注入 DLL、浏览器调试端口或管理员权限兜底。
+
+## 2. 本地代码证据
+
+仓库没有 `.codegraph/`，按用户规则跳过索引，不自行初始化。
+
+| 文件 | 基线中的职责和移植影响 |
+| --- | --- |
+| `Cargo.toml:13` | GPUI 0.2.2；macOS crate 目前全局引入；Ely 为未固定提交的 Git 依赖 |
+| `.gitignore:2` | 忽略 Cargo.lock，干净构建不可复现 |
+| `src/translate.rs` | 299 行，HTTP/SSE、词典提示词和响应解析，可保持行为复用 |
+| `src/config.rs:66` | 使用 HOME 和 Library/Application Support，Windows 必须分平台选目录 |
+| `src/ax.rs:489` | AX 选区查找；1209 行还包含探针与菜单搜索，不能机械逐行翻译 |
+| `src/appcopy.rs:136` | AppleScript 浏览器取词，以及 AXPress 复制菜单；Windows 无直接等价路径 |
+| `src/clipboard.rs:150` | NSPasteboard 多类型备份；Windows 数据格式和所有权机制不同 |
+| `src/mouse.rs` | Cocoa 鼠标坐标、主屏高度、按键状态 |
+| `src/eventtap.rs` | CGEventTap；当前主要为诊断取证使用，正常运行仍有鼠标轮询 |
+| `src/main.rs:461` | 仅按主屏尺寸布局；`PopupGeom::card_cocoa` 还有坐标翻转 |
+| `src/main.rs:491`、`:766` | GPUI 透明 PopUp，`focus:false`；Windows 必须验证原生实际行为 |
+| `src/main.rs:1108` | 50ms AX 轮询和 macOS 权限判断混入应用状态机 |
+| `src/main.rs:1728`、`:1884` | Dock、AppKit 菜单和启动初始化混入主程序 |
+| `src/menubar.rs:156`、`:284` | NSWindow 移动；重启仅 exit(0)，依赖 launchd 重新拉起 |
+| `src/dialogs.rs` | 原生 NSAlert 与输入框，需要隔离或改 GPUI 设置窗口 |
+| `src/update.rs:70`、`:255` | 通用资产名、ditto、.app、Shell 替换流程，不可给 Windows 复用 |
+| `.github/workflows/release.yml:38` | 仅 macos-14 的签名、公证、DMG 发布路径 |
+
+Ely 当前源码未被 BeeK 引用。第一步验证移除它后现有行为不变，并提交应用 Cargo.lock；若后续确需组件库，单独立项验证兼容并固定版本，不能借移植隐式升级 GPUI 全栈。
+
+## 3. 技术选择与可证伪条件
+
+1. 优先保留 GPUI 0.2.2。上游有 Windows 后端，但不意味着 `focus:false`、透明 PopUp、置顶和托盘存活均满足 BeeK。必须先完成 G0 原型门禁。
+2. Windows API 通过 `windows` crate 访问；具体版本由最小构建与 GPUI 依赖兼容检查确定后锁定。原生窗口句柄经 raw-window-handle 公开接口取得，不通过按窗口宽度枚举猜测。
+3. 托盘首选 Win32 `Shell_NotifyIconW`，与消息窗口一起放在专属平台消息线程；不为几个菜单额外引入不受控 UI 运行时。
+4. 设置、关于和错误信息使用 GPUI 窗口；仅系统必要界面使用 Win32。设置窗口允许正常激活，悬浮按钮和翻译窗口采取非激活策略。
+5. UIA 放入最多两个独立 `beek-selection-host.exe --role=uia-worker` 工作进程，通过有界 JSON Lines 通信；各自 COM MTA 线程执行 UIA。主进程协调、看门狗和输入消息线程不执行 UIA。只读剪贴板使用独立按需工作进程，避免延迟渲染传染 UIA。
+6. 取词、复制监视和窗口事件都归入单一应用状态机，通过 source token 和 generation 丢弃过期消息。
+7. 首版不实现浏览器扩展。只有验收证明 UIA 与显式复制路径都不足，才另写扩展方案和权限说明。
+
+G0 失败时的顺序：公开 API 调整 → Windows 专用窗口样式适配 → 可审计的最小 GPUI 补丁并固定修订。若仍不能满足非激活交互，则停止依赖该假设的开发、修订此方案并重审；不自动改成 Electron/Tauri，不擅自替换整个 UI 栈。
+
+G0 使用独立的 `tools/windows-probe` 最小 crate 与独立锁文件，仅依赖固定 GPUI/Win32 和必要资源，不导入当前 BeeK main.rs 或 macOS 模块；示例入口为 `cargo run --manifest-path tools/windows-probe/Cargo.toml --locked --release`，在 Windows MSVC 环境运行。除非激活透明窗/点击/托盘外，必须同时验证可激活 GPUI 文本输入窗口、中文 IME 中英切换/组合窗口位置、选中/粘贴、键盘导航和混合 DPI 缩放。任何一项失败都按 G0 的最小适配/补丁/重审路径处理，不能等 G3 才发现必须换输入框架。
+
+原型验证框架和系统交互，不是完整 BeeK。根应用的条件依赖、源码平台拆分和完整 Windows 应用构建属于 G1；G0 向 G1 交付成功版本、窗口参数、输入控件与 IME 证据、必要最小补丁及实机证据，避免要求先完成 G1 才能验证 G0。
+
+## 4. 目标模块及边界
+
+```text
+src/
+  main.rs                       # 仅引导与依赖装配
+  app/{controller,events}.rs     # 选区、请求、弹窗、退出状态机
+  core/{selection,geometry}.rs   # 平台中立值对象与布局规则
+  ui/{icon,popup,settings,about}.rs
+  translate.rs                  # 既有翻译能力与可替换测试端点
+  config.rs                     # schema、迁移与原子写入
+  platform/
+    mod.rs                      # 接口、能力、错误
+    macos/...                   # 既有 AX/AppKit/剪贴板逻辑
+    windows/
+      input.rs                  # 钩子/热键，只发送事件
+      desktop.rs                # HWND/PID/前台对象、显示器与 DPI
+      overlay.rs                # 非激活窗口样式和位置
+      tray.rs                   # 通知区图标和菜单
+      clipboard.rs              # 显式复制监视；可选事务
+      lifecycle.rs              # 单实例、自启动、显式重启
+      speech.rs                 # 系统语音
+  selection_host/...            # 独立 Windows UIA helper
+  update/{check,manifest,windows,macos}.rs
+```
+
+允许按真实代码调整文件粒度，但以下边界不可取消：core 不导入 AX/UIA/objc；ui 不查全局选区；输入回调不等待网络/UIA；平台代码不直接发翻译请求；Windows 的 cfg 分支不引用 macOS crate；macOS 模块保留原平台默认行为。
+
+接口草案：
+
+```rust
+struct SourceToken { hwnd: u64, pid: u32, process_created: u64, generation: u64 }
+enum TextOrigin { Uia(SourceToken), Clipboard { sequence: u32, owner: Option<SourceToken> } }
+struct Selection { text: String, rects: Vec<PhysicalRect>, source: SourceToken }
+enum SelectionResult { Selected(Selection), Empty, Unsupported, Protected, TimedOut, Stale }
+enum Trigger { DragEnded, DoubleClick, KeyboardSelection, Hotkey, UserCopy }
+enum PlatformEvent { Trigger(Trigger, SourceToken), OutsidePress, DisplayChanged, SessionChanged }
+```
+
+这是语义草案而非可直接编译接口，剪贴板事件不能强制装入 UIA SourceToken。真实实现需封装句柄生命周期和并发；UIA COM 对象不跨进程传递，主进程只接收值数据。请求和剪贴板内容不进入托盘回调闭包。
+
+## 5. 取词服务、触发与竞争控制
+
+### 5.1 输入与源绑定
+
+- 专用消息线程安装 `WH_MOUSE_LL`；需要键盘选区触发时安装 `WH_KEYBOARD_LL`，全局快捷键使用 `RegisterHotKey`。回调仅记录必要事件、时间和位置，立即返回；不记录用户键入内容。
+- 拖选、双击、键盘选择结束后防抖 120ms，应用状态机持有一个最新 pending 请求；同一源不并发排队。数值为初始配置，需通过验收调优。
+- 查询前记录前台 HWND、PID、进程创建标识、generation 和显示器。返回时复查来源和 generation；用户切换应用、开始新选区、打开 BeeK 设置或锁屏都使旧结果过期。
+- 点击 BeeK 小蜜蜂时使用已缓存选区，不重新从 BeeK 自己查询。排除本进程、helper、密码框、受保护界面和设置输入框；不从无法证明安全的元素走复制兜底。
+- 受支持控件可订阅 UIA TextSelectionChanged 作为增量触发；订阅与取消同一 MTA 线程完成，按前台源切换，不能全桌面无限订阅。
+- 同一 HWND 不等于同一文档。增加前台/焦点 WinEvent 通知和外部按键/点击失效信号，回调只发送事件；换标签、换文档、键入、点击外部、收到新选区事件均更新 selection_epoch。小蜜蜂缓存 TTL 初始 8 秒，失效立即隐藏；仅记录输入事件种类，不记录字符内容。
+- UIA 结果附元素运行时标识、选区摘要和 selection_epoch。点击小蜜蜂先显示本地确认/加载态并异步复查当前选区身份和文本（复查期间仍不发送模型请求），一致才使用冻结文本创建请求；元素消失、文档变动、超时或不一致则关闭旧按钮并提示重新划词。点击按钮本身与必要修饰键不作为外部输入失效。显式剪贴板预览使用独立的已确认快照，不假装属于 UIA 实时选区。
+
+### 5.2 UIA 查询顺序
+
+1. 验证前台源仍然一致且会话可交互。
+2. 获取焦点元素，必要时按鼠标点 `ElementFromPoint`，在有界祖先范围查 `TextPattern`，避免整棵桌面树遍历。
+3. 检查密码等受保护属性，读取 `GetSelection`，过滤空/退化范围，批量 `GetText` 和 `GetBoundingRectangles`。
+4. 多段选区按文档顺序拼接，保留矩形；文本默认上限 16,384 Unicode 字符，超限提示缩小选区，不能悄悄截断送模型。
+5. 无有效矩形时，鼠标触发使用触发点作为锚点；键盘触发仅在有可信控件/插入点位置时显示，否则提示快捷键失败，不在主屏任意位置弹窗。
+6. 过期、空、受保护和不支持是不同返回类型。不得将控件 Value/整页文本冒充选区，也不得把无法取词等同“没有选中”。
+
+### 5.3 helper 协议、工作进程和按来源隔离
+
+- helper 与主进程来自同一安装包，用固定绝对路径启动，不搜索 PATH。stdin/stdout 仅供协议，stderr 为脱敏诊断。
+- 握手包含协议版本、程序版本、实例随机 token；每条消息带 request_id、source、generation。单帧上限 256 KiB，拒绝未知版本、异常长度和无关响应。
+- 一次 UIA 操作超时初始 1,500ms，独立于 p95 ≤800ms 的性能目标。超时先使请求过期，再终止并回收占用它的工作进程；主协调服务、其他工作进程和健康来源不停止。不依赖可取消 COM 调用，也不采用遗留卡死 MTA 线程再无限补线程的办法。
+- 工作进程总数严格最多两个，按源 PID/创建标识绑定正在执行的操作，同源不并发；回收确认退出后才补位。当前前台健康来源优先用空闲槽。每源连续操作超时按该源计数：首次/第二次退避 1/5 秒，第三次暂停该源自动查询 30 秒，之后一次探测；切到其他健康应用不继承该退避。应用重新启动（创建标识改变）或用户显式恢复可重置该源计数。
+- 协议握手失败、异常帧、进程异常退出归为 worker/协议故障，与目标应用操作超时分开计数；只有跨来源、跨替换进程连续三次协议/进程故障才显示平台服务异常并暂停自动 UIA，保留手动预览/设置。该暂停不能由某一个慢应用的三次查询直接触发。
+- helper 纳入 Windows Job Object，主进程退出时结束子进程。终止、回收和补位有总数上限，不形成无限后台进程。订阅由各 worker 管理；只重建被回收 worker 当前所需的前台订阅，其余 worker 的订阅不动，源切换/重新建立后由主状态机重放一次。
+- 锁屏、会话切换、休眠恢复时取消旧请求、清空缓存；解锁后重新建立源绑定。断管和协议错误等同可恢复 helper 故障。
+
+## 6. 剪贴板及降级路径
+
+### 6.1 首版显式用户复制
+
+- `AddClipboardFormatListener` 在平台消息窗口监听；默认不开启业务处理。
+- `WM_CLIPBOARDUPDATE` 回调只记录 sequence 并投递事件；实际 `OpenClipboard/GetClipboardData` 只读工作由按需 `beek-selection-host.exe --role=clipboard-reader` 执行（最多一个，1,500ms 超时），返回纯值并复核 sequence。它不占用 UIA 两个槽、不持有 UIA 订阅。延迟渲染阻塞只回收该读取进程、对该剪贴板 owner/sequence 退避，不暂停 UIA、不使其他订阅丢失；退出时纳入同一个 Job 清理。只读路径不调用 EmptyClipboard/SetClipboardData。
+- 用户打开“复制即显示”后，仅对已关联的外部文本变化显示按钮。自身复制译文及写回操作的 sequence 必须忽略。
+- 限长、去空、URL 过滤复用 core 规则；显示按钮仍不请求翻译。不读取或上传图片、文件、非文本格式，不解析密码管理器等明确排除源。
+- 外部复制无法总是证明与一次 Ctrl+C 一一对应；界面名称和说明明确“复制文本后显示”，不能声称精准识别用户快捷键。快捷键查询失败时说明可手动复制后触发。
+- Clipboard 来源单独携带 sequence 和可选 owner，不把当前前台应用强行当作来源。读取时核对 `GetClipboardOwner` 的 PID/创建标识、最近前台源与短时外部复制线索，任何一项不明或不一致均不自动弹按钮；后台写入、历史恢复、同步与明确排除源跳过。以上只降低误关联，不能证明数据最初生产者，也不能据此宣称能过滤所有秘密文本。
+- 无法建立关联但用户确实要翻译时，使用托盘“读取剪贴板…”一次性动作：在可激活预览窗口标记“来自剪贴板”，不标伪造应用名、不自动发送；用户点击翻译才创建请求。这个动作不要求打开持续监听，避免快捷键查询失败后陷入不可操作的提示循环。
+
+### 6.2 后续实验性自动 Ctrl+C
+
+Windows 不承诺任意格式的剪贴板无损快照。首版不以一个文本剪贴板库宣称完成 macOS 原实现的全类型恢复。
+
+若实现此实验能力，必须同时满足：
+
+1. 独立开关、默认关闭；说明会短暂改写系统剪贴板，可能被剪贴板历史/同步观察到，恢复不能撤回历史。
+2. 仅白名单文本格式允许尝试：`CF_UNICODETEXT`、`CF_TEXT`、`CF_OEMTEXT`、`CF_LOCALE`。遇到图片、文件、私有格式、OLE/延迟渲染无法立即完整读取、锁竞争或不明 owner，返回 Unsupported，不清空、不发按键。
+3. 快照失败与“原来为空”分开。持有有效消息 HWND 作为 owner，遵守 Open/CloseClipboard 与内存所有权规则；不在持锁时 SendInput。
+4. 触发前再次验证源、前台、权限和修饰键状态；只对已确认的划词手势触发一次，不为普通单击发送 Ctrl+C。
+5. 记录备份 sequence、模拟输入后的文本和 sequence；仅在确认仍为本次复制状态时尝试恢复。检测到第三方变化时不覆盖最新剪贴板。
+6. Sequence 检查无法从理论上消除所有竞争；恢复失败要保留原备份并反馈，禁止承诺零副作用。用户可随时关闭此能力。
+7. 普通权限不能注入更高完整性级别目标；识别后返回 Protected，不提升权限、不循环重试。
+8. 必须单独通过剪贴板故障/并发测试后才可暴露开关；不通过不阻塞显式复制方案发布。
+
+### 6.3 翻译工作、取消与背压
+
+- 模型请求最多两个真实执行槽、一个“最新待执行”槽；相同点击不得重复发请求。slot 在真实 HTTP 工作结束后才释放，关闭弹窗只使 generation 过期，不能假装已经释放阻塞请求占用的资源。
+- 优先复用现有 blocking 翻译代码，使用固定工作池。满载时新点击成为唯一的最新 pending 请求，立即显示“等待正在执行的任务结束”；再次点击新选区替换尚未开始的 pending，并使被替换请求过期；不能替换已占用的真实执行槽，也不继续 spawn。任一执行槽释放后只执行仍有效的最新 pending。关闭窗口、锁屏或源失效移除对应 pending。总请求超时 60 秒，网络错误或逻辑取消不自动重试；当前请求已创建时冻结凭据配置快照。
+- 每个请求最多 256 KiB UTF-8 输出，SSE 单帧最多 64 KiB；达到限制终止读取并显示明确错误，不将无限输出保存在内存。流式增量每 30ms 或 4KiB 合并一次，UI 通道按请求保存有界最新正文快照，不积累无限 chunk 队列。
+- SSE 帧上限在读取过程中执行，不能先用无限制 `BufRead::lines` 分配整行再检查。HTTP 错误正文也有大小上限并脱敏，不将服务端回显的凭据或原文写入日志。
+- helper、输入和翻译消息使用分离通道；请求关闭、源切换与锁屏的控制消息不能被流式数据阻塞。禁用旧 generation 后，后续正文、完成和错误都不可重新打开窗口。
+- 测试连续开关 100 次、两个长期慢流、一个待执行替换、超长帧和超限输出；记录实际线程数、执行槽与队列峰值，证明上限与异常反馈。
+- 本方案“取消翻译”统一指 generation 过期和移除未执行 pending；首版 blocking HTTP 不承诺用户可中断。退出时不等两个槽自然耗完 60 秒：平台资源清理最多等待 2 秒，再结束进程，后台线程随进程结束；已发出的服务端请求无法撤回。
+
+## 7. 悬浮窗、焦点、坐标与交互
+
+- DPI awareness 在创建任何窗口前确定；目标 Per-Monitor V2，核对 GPUI 已有行为，不能在窗口创建后重复设置进程 DPI 模式。
+- 系统选区和鼠标统一为虚拟桌面物理坐标，保留负坐标；`MonitorFromPoint/Rect` 选屏，以该屏工作区布局，并在平台边界转换 GPUI 所需坐标。禁止复用主屏高度翻转。
+- 尺寸使用逻辑单位；UIA bounds、Win32 pixels、GPUI Pixels 的换算必须明确到显示器和 scale，不能仅全局乘一个 DPI 系数。
+- 非激活窗口适配优先在创建/首次显示前设置 `WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`，使用不激活的显示和移动方式；`WM_MOUSEACTIVATE` 策略须确保按钮仍能收到点击。
+- 置顶只对 BeeK 弹窗使用，处理全屏、锁屏和虚拟桌面边界；不抢占 UAC/安全桌面。点击卡片复制、朗读可工作，输入设置窗口则正常激活。
+- 普通无边框全屏（例如 Edge F11）属于首版支持的桌面场景：可选文本按普通 UIA 路径显示非激活小蜜蜂及弹窗，不改变原前台/输入焦点，不造成全屏退出或闪烁。进入/退出全屏、放映或目标窗口尺寸/样式变化时使旧几何与 selection_epoch 过期、隐藏旧悬浮窗，重新划词后再定位。不可选的放映画面不得用整页文本冒充选区；可选性不足时不弹按钮，用户可显式打开剪贴板预览。游戏、独占全屏和安全桌面仍排除。不能用“覆盖工作区”直接把正常最大化窗口判成全屏而抑制全部取词。
+- Win32 样式和 `SetWindowPos` 必须与 GPUI 实际 HWND、尺寸更新和生命周期一致；未通过 G0 不能把这些 API 名视作问题已解决。
+- 在选区末端/触发点附近显示小蜜蜂，优先不遮挡选区；多行以触发端附近的矩形定位。跨屏按锚点所在屏布局，越界时约束到工作区。
+- 外部按下关闭、按下小蜜蜂、卡片内按钮、拖动开始/结束在同一状态机排序；本轮按下不能立即关闭刚创建的弹窗。正在拖动或操作内部按钮时不得被取词检测撤销。
+- 收到显示器移除、DPI 改变和工作区改变时重算位置；原显示器消失则移动到仍可用显示器，不能留下不可访问弹窗。
+- 正常设置窗口支持键盘导航、中文 IME、粘贴、缩放和错误反馈；非激活卡片的键盘可访问替代路径由热键打开一个可激活结果窗口提供，关闭后恢复正常使用。
+
+## 8. 配置、凭据与生命周期
+
+- 用户配置放 `%APPDATA%\BeeK\config.json`；缓存和诊断放 `%LOCALAPPDATA%\BeeK\`；通过 Known Folders 获取路径，不拼接 HOME，不回退写工作目录。
+- schema_version 版本化，新增字段显式平台默认值；修复 Rust derive Default 与 serde default 不一致的问题。旧 macOS 配置的行为保持兼容。
+- 保存采用同目录临时文件、flush 和原子替换；失败保留旧文件并向设置窗口报告。损坏文件备份，不静默清空用户配置；配置修改串行化，防止读改写互相覆盖。
+- API Key 首选 Windows Credential Manager；配置保留 credential_ref，环境变量 `BEEK_ARK_KEY` 仍为兜底。已有明文迁移时先确认凭据保存成功，再移除明文；失败保持可恢复。卸载默认保留用户数据，显式清理才删除配置和凭据。
+- 配置和凭据跨存储更新遵循版本化引用提交：新 key 写入一个新的不可变 credential_ref，读回验证后，原子提交包含 provider/model/base_url/ref 的完整配置；配置提交失败保持旧引用、旧凭据和旧配置可用，不能先覆写稳定 target。配置提交成功后才回收不再引用的旧凭据；清理失败记为可重试垃圾，不影响已提交配置。提交前/后崩溃恢复以配置当前引用为准，未引用暂存项可清理；迁移同样执行该协议。必测凭据写失败、读回失败、配置替换失败、提交前后杀进程和旧项删除失败。
+- 翻译层经统一 CredentialResolver 获取平台凭据，不直接假定 `ProviderConfig.api_key` 总有值。优先级为已保存平台凭据 → 尚未迁移的旧明文配置 → 环境变量；配置存在但凭据读取失败时明确提示，不无声改用别的账户。开始每个请求时一次性冻结 key/model/base_url/provider/version 配置快照，设置变更只影响下一请求，避免三次 load 混用不同版本配置。
+- 保存模型设置时必须保留 `base_url` 等未编辑字段。日志不包含 API Key、完整请求正文、选区和译文；诊断仅 source 类型、错误码、耗时与尺寸，详细文本诊断需用户主动开启。
+- 单实例使用当前用户/会话范围 mutex；第二次启动激活设置或托盘，helper 和 updater 子命令不抢主实例锁。IPC 仅限当前用户，验证请求类型。
+- IPC 使用 Windows 本地命名管道：常规控制管道 `\\.\pipe\BeeK.control.v1.<UserSID>.<SessionID>`；重启私有管道额外包含随机 128-bit nonce。主实例先持有同作用域 mutex，再以 `FILE_FLAG_FIRST_PIPE_INSTANCE` 建端点；DACL 限当前用户 SID（必要系统账户权限按最小值），拒绝远程客户端。连接时通过 `GetNamedPipeServerProcessId`、进程创建标识及预期实例校验服务器身份，不能只因名字匹配就信任；重启握手也绑定指定父/子进程。被抢占/伪造时拒绝并给错误，不执行控制请求，不强行接管。
+- 管道协议为版本化、有界 JSON（单帧 ≤4KiB，连接/读写超时 1 秒）。常规消息仅 `Ping`、`ActivateSettings`；重启专用通道仅 `ChildReady`、`ParentExitCommitted`、`RestartFailed`。未知类型/版本拒绝；不接受 shell、任意路径、外部翻译正文或无条件 Quit 命令。
+- 自启动使用当前用户 Run 项，写入正确引用的绝对路径；安装迁移时更新，卸载时删除。不得把用户内容拼入命令行。普通退出保留自启动偏好，与 macOS 既有语义明确区分。
+- Windows 重启使用专用 `--restart-parent` 路径，附父进程 PID/创建标识和当前用户私有握手端点。子进程先报告已启动且参数/资源验证完成，然后等待旧父进程退出和主锁释放；旧进程收到预就绪回执后才退出。创建子进程失败、预就绪失败或等待超时，旧进程保留并提示；父已退出后子启动失败则保留诊断并允许普通手动启动。子不能抢锁失败后按普通第二实例路径直接退出，普通重复启动不得触发此协议。父身份通过进程句柄与创建标识核验，避免 PID 复用。
+- 退出先注销热键/钩子/监听和托盘、取消请求、停止 helper，再退出；无窗口常驻不能依赖一个短暂弹窗续命。
+- 上句取消遵循 §6.3 的逻辑取消与 2 秒退出上限。首版 Windows 不提供主进程崩溃后自动拉起的 watchdog；与 macOS launchd KeepAlive 明确不同。“常驻”只保证正常运行时无可见窗口也不退出。主进程崩溃后由用户手动或下次登录启动；崩溃恢复提示为后续能力。强杀主进程仍须由 Job 清理 helper，重启后可正常获取单实例锁。
+- Explorer 重启后处理 `TaskbarCreated` 重新注册托盘；睡眠恢复和网络恢复可重建必要资源。
+- 朗读使用 Windows 语音 API，专属正确 COM apartment 工作线程；不通过拼 PowerShell 字符串执行选区文本。没有语音或朗读失败不影响请求状态机。
+
+## 9. 更新、打包和兼容发布
+
+### 9.1 首版确定交付
+
+- 新增 Windows x64 zip 和按用户安装的签名 installer，安装在用户程序目录，无需管理员权限。预选 Inno Setup，使用 non-administrative install mode（`PrivilegesRequired=lowest`）、固定 AppId 和用户程序路径；G0 记录准确工具版本、下载校验和适用许可条件。若不适用，修订评审后替换，不能同时维护两套安装框架。
+- installer 升级先请求当前实例退出，用户拒绝/退出失败时停止安装，不能强杀后覆盖半套文件。支持交互升级及自动化测试用静默参数，明确退出码、需重启状态；安装完成不重复启动两个主实例。新安装、同版本重装、N→N+1、运行中升级、卸载与取消全部验收。
+- 包含主程序、selection helper、图标、许可证及实际依赖；检查 CRT、GPU/DirectX、资源路径和无控制台启动。程序资源定位相对 exe，不依赖 cwd。
+- Windows 资产使用独立名称 `BeeK-v<V>-windows-x64.zip`、`BeeK-v<V>-windows-x64-setup.exe`；保留既有 `BeeK-v<V>.zip` 和 DMG，不能破坏老 macOS 更新器。
+- 每个新公开 stable Release 必须同时携带当前版本 macOS 通用 zip/DMG 和 Windows zip/setup，不发布 Windows-only stable tag。聚合发布 job 在解除草稿前校验完整资产集合；任一平台失败则不发布。老 macOS 更新器按精确通用 zip 名查找，不能通过改名逼它识别新平台命名；对“仅 Windows 资产”的故障 fixture 验证发布 gate 拒绝，且 Windows 检查不得误取 macOS 包。
+- Windows 更新检查必须匹配平台、架构与发布通道，找不到 Windows 资产应提示该版本无 Windows 包，不能下载 macOS zip 或误报更新成功。
+- 首版仅打开固定仓库的 HTTPS 发布下载入口，由用户运行 installer；不静默下载、不执行在线任意 URL。签名缺失时只能产出内部预览包，不能标为正式发布通过。
+- 版本、exe 版本资源、包名、helper 协议和关于窗口保持一致。安装/卸载正确处理托盘进程、快捷方式和自启动；更新保留配置、凭据和用户偏好。
+
+### 9.2 后续自动更新门禁
+
+- 使用独立 updater helper，主程序仅检查、下载、校验并暂存；updater 等待指定 PID 真正退出后替换，不能原地覆盖正在使用的 exe。
+- 版本化 manifest 明确 platform/arch/version/package_type、大小和散列；散列只能检测损坏，真实性需要可信公钥签名元数据或固定发布者的 Authenticode 验证。不得将同站下载的 sha256 当作独立真实性证明。
+- 校验 HTTPS 来源、重定向、大小上限和超时；解压拒绝绝对路径、`..`、链接及逃逸。主程序/helper/updater 都验证来源与版本，失败保留旧版。
+- 安装过程采用 staging、备份、替换、成功标记、清理状态机；崩溃/断电/杀进程后能恢复，启动失败可回滚。不删除唯一可运行版本后再尝试复制。
+- portable 与 installer 模式必须有标记并分别处理；便携只读目录不自动提升权限。首次自动更新协议与签名信任根作为单独评审对象。
+- 没有签名基础设施、失败恢复或真实更新验收时继续使用手动更新，不以实现进度为由降低门禁。
+
+## 10. 构建、测试及证据
+
+### 10.1 开发环境与 CI
+
+- 在真实 Windows x64 环境准备固定 Rust MSVC 工具链、Windows SDK 和实际构建所需编译组件；GPUI 的 shader/图形依赖按最小构建结果记录，不猜测必需工具。
+- `Cargo.toml` 分 `cfg(target_os = "macos")` 和 `cfg(target_os = "windows")` 依赖。新增 helper 使用显式 bin，macOS 构建不得因 Windows helper 主入口缺失而失败。
+- Windows CI 完成 locked 构建、核心测试、协议故障测试、安装包组装和资产校验；macOS CI 执行原平台构建与关键回归。缓存 key 包含 OS、工具链、Cargo.lock。
+- 普通 PR CI 不持有发布密钥；签名发布仅受保护 tag/release 工作流。公共 GitHub runner 的非交互环境不作为 UIA、焦点和剪贴板真实桌面通过证据。
+- 发布先分别构建平台资产，再由单一发布 job 汇总，避免 macOS/Windows 两个 job 同时修改同一 Release。保留现有 macOS tag 和资产兼容。
+
+### 10.2 自动测试
+
+| 测试类 | 必须覆盖 |
+| --- | --- |
+| core | 负坐标、多屏/混合 DPI、边缘布局、过期 generation、超限、空选区、重复点击 |
+| 翻译 | 本地假 SSE 服务的分片、断流、错误、关闭后迟到响应；不使用真实 API Key |
+| helper | 协议版本错、超长帧、乱序、断管、挂起、进程崩溃、来源级退避；同一坏应用连续三次超时后健康应用仍成功；剪贴板连续挂起不影响 UIA/订阅；worker 回收重放订阅且进程总数有界 |
+| 配置 | 新安装默认、旧字段兼容、损坏恢复、写失败、保留 base_url、并发更新不丢字段 |
+| 生命周期 | 单实例、helper 清理、Explorer 重启、显式重启与登录启动独立、主进程强杀后手动恢复；IPC 被抢占/伪造与未知消息拒绝 |
+| 更新 | 资产选择无跨平台误取、坏签名/坏包、异常解压路径、替换失败与回滚（自动更新阶段） |
+
+测试围绕契约和故障，不为静态文件结构和实现细节堆镜像测试。
+
+### 10.3 交互桌面应用矩阵
+
+| 环境/应用 | 需要记录的结果 |
+| --- | --- |
+| Windows 11 x64 + Edge/Chrome 普通网页 | UIA 自动划词、输入区、跨行、双击、焦点不丢失 |
+| 记事本 | 拖选和键盘选区、中文/英文、空选区 |
+| Word 或明确选定的一款办公文档应用 | UIA 支持情况、跨行与非文本内容 |
+| VS Code/Electron 应用 | UIA 可用性；不支持时显式复制降级 |
+| Windows Terminal | 原生复制快捷键差异、UIA/显式复制，不强制 Ctrl+C 中断任务 |
+| Edge PDF/至少一种 PDF 阅读器 | 文本 PDF 选区；扫描 PDF 明确不支持 |
+| Edge F11 + 一款放映模式应用 | F11 可选文本必须 L1；全屏进入/退出使旧窗隐藏且重新定位，不抢焦点/不闪烁；放映不可选画面不弹出，不模拟复制，显式预览可用 |
+| 两屏 100%+150%/200%，副屏左置 | 位置、缩放、拖动、任务栏工作区、显示器拔插 |
+| 中文用户目录、空格路径、只读位置 | 安装、资源定位、配置写错处理和更新引导 |
+| 管理员程序、密码框、锁屏/恢复 | 失败安全，不模拟复制、不保留敏感或过期选区 |
+
+证据包含 OS build、应用版本、构建 SHA、用例步骤、预期/实际、脱敏截图或录屏和必要错误码。每个应用明确标记 L1 自动 UIA / L2 显式复制 / 不支持。首版支持清单根据实测填写，不能用模型推断冒充测试。
+
+G5 最小 L1 硬门槛固定为 Windows 11 记事本、Edge 普通网页、Chrome 普通网页：英文/中文拖选、双击单词、跨行文本、键盘选择、空选区及点击小蜜蜂后选区不丢失均必须通过。任一失败必须修复或修订产品范围并重审，不能标成 L2 后仍宣称 G5 通过。浏览器内部/受限页面、扫描 PDF 不混入该集合；其他应用按真实结果标 L1/L2/不支持。
+
+性能目标为初始验收门槛：支持的本地文本 UIA 路径从稳定选区到图标 p95 ≤ 800ms；UIA 操作硬超时 1,500ms，不能把超时失败剔出成功率统计后美化 p95，同时记录完整尝试数、成功率、超时率和每源分布。点击后本地加载态 ≤ 100ms；空闲 CPU 平均 ≤ 单核的 1%（固定测量环境记录方法）；主进程 + 所有 helper 空闲工作集目标 ≤ 150MiB，按实际常驻 worker 数测量。目标未达必须记录实测和处置，不能以网络首字时间代替本地响应。
+
+## 11. AI 实施任务与完成条件
+
+| 任务 | 前置 | 实施内容 | 完成条件 |
+| --- | --- | --- | --- |
+| G0 Windows 原型 | 无 | 独立 probe crate 锁依赖与最小编译、非激活透明窗、点击、托盘存活、DPI 转换、可激活文本输入及中文 IME | 有真实桌面与 IME 证据；失败则修订架构重审 |
+| G1 平台拆分 | G0 | core/controller/ui/platform，macOS 逻辑平移 | Windows cfg 无 macOS 引用；原 macOS 关键行为回归 |
+| G2 取词 | G1 | 事件触发、UIA worker/独立剪贴板 reader、协议、超时和过期结果 | fake provider 故障测试 + 固定公开 fixture 的记事本/Edge/Chrome 后端选区断言，不冒称完整产品 L1 |
+| G3 交互闭环 | G2 | 图标、流式弹窗、拖动、复制、关闭、设置、热键 | 请求时机、焦点、乱序及 DPI 用例通过；输入/IME 与 G0 结论一致，失败按 G0 路径重审 |
+| G4 桌面集成 | G1，最终依赖 G3 | 托盘、凭据、配置、单实例、自启动、朗读、显式复制 | 资源释放和失败降级通过，不更改 macOS 默认值 |
+| G5 可发布首版 | G2–G4 | 用户级安装、签名、CI、手动更新、应用矩阵 | 支持清单、安装/卸载、macOS 回归和全部必选门禁通过 |
+| G6 可选自动复制 | G5 | §6.2 独立实验能力 | 故障/竞争测试通过并重新评审；否则保持关闭 |
+| G7 可选自动更新 | G5 | §9.2 签名验证、updater、恢复/回滚 | N→N+1、失败回滚、损坏包和中断恢复实测通过 |
+
+允许 AI 对不重叠模块并行开发；必须各自使用独立分支/worktree，协调共享文件所有权。`Cargo.toml/Cargo.lock`、controller、协议和 Release workflow 由单一集成负责人合入。每个交接包含文件范围、协议版本、测试命令、真实证据、未解决项，不能以“工具调用成功”代替验收。
+
+G0–G5 为首版完成条件。G6/G7 是明确后续能力，不得用其未完成冒称首版功能齐全，也不得让它们的风险偷偷进入首版默认路径。
+
+G2 的可观察验收载体为只读诊断 harness：在记事本/Edge/Chrome 打开固定公开 fixture，人工/受控脚本选中指定文本，记录 OS/应用版本、构建 SHA、源 PID/创建标识、文本哈希/长度、矩形和截图，自动对照预期断言；默认不输出用户真实选区正文、不请求网络。它验证后端契约，正式图标/焦点/翻译 L1 闭环仍在 G3/G5 验收，不能以诊断打印取代最终交互证明。
+
+## 12. 三方对抗评审与共识规则
+
+原定评审者为本地 xiaok、Kimi 和当前 Codex。Kimi 因账户七日额度 403 未能评审；用户随后授权 ZCode 替补。本轮按实际 Codex + xiaok + ZCode 意见收敛，Kimi 明确记为未参与，不能冒记 Kimi 通过；若任一在场评审者未完成，不得用另一份意见同时填两个席位。
+
+xiaok 允许通过实际本地 CLI 或同一安装包的原生模型适配器调用，必须记录路径、实际默认模型和按次参数；ZCode 使用实际本地 CLI。不得由 Codex 扮演外部角色或补造外部响应。默认沿用已配置模型和推理设置，不修改全局配置，不打印凭据。若长思考调用因流提前关闭而无法形成意见，可对同一模型进行按次非思考复核，须事先说明并记录实际参数及观察到的模式，不能声称与深度思考等价或用无正文结果充当意见。长思考模型必须记录首包/事件进度，区分仍在生成与无响应；不能把固定时限内没有最终正文记为模型完全不可用。
+
+- Round 1：三方独立读取同一个冻结方案和必要源码。检查前提是否成立、设计能否实现、竞态与数据损失、测试是否可证明、阶段是否偷减范围。
+- Codex 汇总问题，但不能替外部评审者给出同意。为每项问题分配稳定 ID、严重性、证据、修订位置及状态。
+- 后续每轮将修订方案、已处理问题和其他两方异议发给每位评审者，请其检查修复并主动反驳；发现新 blocker 继续修订，不能以轮数达到上限宣布一致。
+- Blocking：会导致基本路径不可实现、错误翻译源、剪贴板/凭据损失、不可恢复安装或发布证据失真。Major：契约、职责和验收有实质歧义。Minor：不影响正确性的完善。
+- 每轮材料保存于 `docs/windows/reviews/`，包含冻结快照 SHA-256、输入提示、原始评审输出、Codex 独立意见和问题台账。
+- 达成一致要求：三方对相同最终快照明确 PASS；无未关闭 Blocking/Major；所有延期能力有明确不启用边界；运行验证项完整列为未来 gate，而非伪造已通过。
+- 若任一 CLI 不可用、超时或未给出判断，记录事实并继续可做工作，不把沉默当同意，也不由 Codex 自己补造外部意见。
+
+## 13. 外部依据及待验证假设
+
+以下仅证明 API 和设计约束存在，不证明 BeeK 已实现或通过：
+
+- [GPUI 0.2.2 平台源码](https://docs.rs/crate/gpui/0.2.2/source/src/platform.rs)：有 Windows 后端；非激活与 PopUp 具体语义需 G0 验证。
+- [GPUI 0.2.2 原始 crate](https://static.crates.io/crates/gpui/gpui-0.2.2.crate)：检查过 Windows window 实现，不能只据上层 `focus:false` 推断行为一致。
+- [Ely 当前 Cargo.toml](https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components/src/branch/main/Cargo.toml)：依赖与本地 BeeK GPUI 版本存在漂移，优先移除未使用依赖。
+- [UIA GetSelection](https://learn.microsoft.com/en-us/windows/win32/api/uiautomationclient/nf-uiautomationclient-iuiautomationtextpattern-getselection)：空选区可为退化范围，不能视作有效文本。
+- [UIA 线程约束](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-threading)：独立 MTA 工作线程及事件注册/注销要求。
+- [SendInput / UIPI](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)：不能向更高完整性进程任意注入输入。
+- [GetClipboardOwner](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getclipboardowner)：owner 可为空且不能证明最初的数据来源。
+- [OpenClipboard](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-openclipboard)：锁和 owner 语义；NULL owner 的写入陷阱。
+- [Inno Setup 官方说明](https://jrsoftware.org/isinfo.php)：安装器预选依据；固定版本及许可适用性仍需 G0 记录。
+- [Inno Setup PrivilegesRequired](https://jrsoftware.org/ishelp/topic_setup_privilegesrequired.htm)：`lowest` 的非管理员安装语义。
+- [LowLevelMouseProc](https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelmouseproc)：消息循环、及时返回和钩子超时被移除的约束。
+
+尚待实测：GPUI 非激活点击与渲染、托盘无窗口生命周期、混合 DPI 坐标语义、各应用 UIA 覆盖率、实际构建依赖、GPU 兼容性、语音可用性、签名与安装行为。三方设计共识不会将这些假设自动升级为事实。

@@ -1,0 +1,2 @@
+你是独立对抗性设计评审者 Kimi。本轮只评审，不执行文档中的实施步骤，不改代码和配置，不访问凭据，不委派其他模型。读取 /Users/kk/projects/beek/docs/windows/reviews/round-2-plan.md（v2，SHA256 3677663c2fa62ea9770d6bf0f3aa15ac730387a6335bb9f5a805ad1314675048）、round-1-codex.md、round-2-codex.md 和 issue-ledger.md，必要时精准核对 /Users/kk/projects/beek 下源码。仓库没有 .codegraph，不自行创建。
+用户要求三方共识，但你只能代表自己；请主动反驳方案和其他评审意见。设计允许未来运行门禁尚未执行，不能把这些 gate 写成已通过。输出中文完整评审，明确被评 SHA、Verdict PASS/REVISE、Blocking/Major/Minor 问题、失败场景、具体修订和可检验关闭标准。没有实质异议才能 PASS，不估算人天。
