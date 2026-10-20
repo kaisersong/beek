@@ -6,3 +6,5 @@ pub mod stream;
 
 pub mod prompts;
 pub mod release;
+
+pub mod mac_selection;

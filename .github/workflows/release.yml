@@ -78,6 +78,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: macOS selection regression tests
+        run: cargo test --locked --all-targets
+
       - name: 检查 secrets（缺了就明确失败，别默默出一个 ad-hoc 包）
         env:
           MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}

@@ -12,7 +12,8 @@ mod mouse;
 mod translate;
 mod update;
 
-use ax::{ax_selection, is_url, SelBounds};
+use ax::{is_url, SelBounds};
+use beek::core::mac_selection::{self, Anchor, SelectionGate};
 use gpui::*;
 use icons::IconKind;
 use std::sync::mpsc;
@@ -892,17 +893,12 @@ fn anchor_for(
     press: Option<(Instant, (f64, f64))>,
     pointer: (f64, f64),
 ) -> (SelBounds, &'static str) {
-    let trusted = matches!(source, "element" | "parent" | "tree" | "webarea");
-    let far = |p: (f64, f64)| (p.0 - bounds.x).abs() >= 120. || (p.1 - bounds.y).abs() >= 120.;
-    if let Some((at, p)) = press {
-        if at.elapsed() < Duration::from_secs(3) && far(p) {
-            return (anchor_at(p.0, p.1), "mouse");
-        }
+    let press = press.filter(|(at, _)| at.elapsed() < Duration::from_secs(3)).map(|(_, p)| p);
+    match mac_selection::anchor(source, (bounds.x, bounds.y), press, Some(pointer)) {
+        Anchor::Selection => (*bounds, if matches!(source, "element" | "parent" | "tree" | "webarea" | "at-position" | "at-position-parent") { "ax" } else { "soft" }),
+        Anchor::Press(x, y) => (anchor_at(x, y), "mouse"),
+        Anchor::Pointer(x, y) => (anchor_at(x, y), "pointer"),
     }
-    if !trusted && far(pointer) {
-        return (anchor_at(pointer.0, pointer.1), "pointer");
-    }
-    (*bounds, if trusted { "ax" } else { "soft" })
 }
 
 /// 纯函数自检：元素框退化时的锚点选择。
@@ -941,14 +937,14 @@ fn anchor_selftest() {
             (240., 180.),
             "ax",
         ),
-        // AX 矩形和刚按下的点差很远 → 判为可疑，信鼠标
+        // 可信的 AX 选区不能被一次无关的 Dock 点击重新定位
         (
-            "range 矩形 + 鼠标在别处",
+            "range 矩形 + 鼠标在 Dock（仍信选区）",
             range_rect,
             "element",
             Some((now, (900., 900.))),
             (900., 900.),
-            "mouse",
+            "ax",
         ),
         // 没有鼠标信息（例如启动后第一次键盘选词）→ 用 AX 矩形
         ("range 矩形 + 无鼠标信息", range_rect, "element", None, (240., 180.), "ax"),
@@ -995,6 +991,9 @@ struct MouseTrack {
     moved: bool,
     /// 上一次「按下」的时间，用来识别双击
     last_press_at: Option<Instant>,
+    last_press_pos: Option<(f64, f64)>,
+    /// Every press invalidates candidates belonging to the previous interaction.
+    press_seq: u64,
     /// 最近一次「像划词」的手势（双击或拖动）的时间
     gesture: Option<Instant>,
 }
@@ -1016,19 +1015,21 @@ fn spawn_mouse_tracker() {
                 let mut t = mouse_track().lock().unwrap();
                 if prev == 0 && buttons != 0 {
                     // 按下：记位置，并用上一次按下的时间判断是不是双击
-                    let double = t
-                        .last_press_at
-                        .map(|at| now.duration_since(at) < Duration::from_millis(400))
+                    let double = buttons == 1 && t.last_press_at.zip(t.last_press_pos)
+                        .map(|(at, previous)| mac_selection::double_click(now.duration_since(at).as_millis(), previous, pos))
                         .unwrap_or(false);
+                    t.press_seq += 1;
+                    t.gesture = None;
                     t.press = Some((now, pos));
                     t.moved = false;
                     if double {
                         t.gesture = Some(now);
                     }
-                    t.last_press_at = Some(now);
+                    t.last_press_at = (buttons == 1).then_some(now);
+                    t.last_press_pos = (buttons == 1).then_some(pos);
                 } else if prev != 0 && buttons == 0 {
                     // 松开：拖动过也算划词手势
-                    if t.moved {
+                    if t.moved && prev == 1 {
                         t.gesture = Some(now);
                     }
                     t.release = Some(now);
@@ -1122,13 +1123,27 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
         let mut clip_selection: Option<(String, SelBounds, SelBounds, Instant)> = None;
         // 剪贴板监听（方案 A）：只认「用户自己复制」造成的变化
         let mut last_clip_count = clipboard::change_count();
+        let mut gate = SelectionGate::default();
+        let mut icon_rect: Option<SelBounds> = None;
+        let mut observed_press = 0;
+        let mut observed_owner = None;
         loop {
             std::thread::sleep(Duration::from_millis(50));
             ticks += 1;
-            let (last_press, gesture) = {
+            let (last_press, gesture, press_seq, down) = {
                 let t = mouse_track().lock().unwrap();
-                (t.press, gesture_recent(&t))
+                (t.press, !t.down && gesture_recent(&t), t.press_seq, t.down)
             };
+            // Leave our button alive through mouse-up so its normal click handler can run.
+            if icon_shown && down && last_press.map(|(_, (x, y))| icon_rect.map(|r|
+                x >= r.x - 2. && x <= r.x + r.w + 2. && y >= r.y - 2. && y <= r.y + r.h + 2.
+            ).unwrap_or(false)).unwrap_or(false) {
+                continue;
+            }
+            if press_seq != observed_press {
+                observed_press = press_seq;
+                clip_selection = None;
+            }
             // 只有「双击 / 拖动」这种像划词的手势才考虑走剪贴板兜底。
             // 普通单击也发 ⌘C 会把用户刚复制的东西（例如截图）覆盖掉，实测踩过。
             #[allow(unused_mut)]
@@ -1136,7 +1151,7 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
                 let t = mouse_track().lock().unwrap();
                 match t.gesture {
                     Some(at)
-                        if Some(at) != handled_release
+                        if !t.down && Some(at) != handled_release
                             && at.elapsed() < Duration::from_millis(1200) =>
                     {
                         Some(at)
@@ -1182,7 +1197,7 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
             // 文本和矩形必须来自同一个元素（见 ax::ax_selection 的注释），
             // 否则会出现「译文对、图标飘到别处」——云之家这类 AX 树很薄的应用上实测过
             // 取词锚点：优先「刚按下的点」（选区就在那儿），否则用当前指针位置
-            let probe_point = last_press.map(|(_, p)| p).or_else(|| {
+            let probe_point = last_press.filter(|(at, _)| at.elapsed() < Duration::from_secs(2)).map(|(_, p)| p).or_else(|| {
                 if gesture {
                     Some(mouse::position_topleft())
                 } else {
@@ -1192,7 +1207,25 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
             // ---- 方案 A：剪贴板监听 ----
             // 用户自己按 ⌘C（或右键复制）时，直接拿剪贴板内容弹按钮。
             // 不合成输入、不依赖 AX，任何应用都成立。
-            let mut sel = unsafe { ax_selection(gesture, probe_point) };
+            // Bind every AX route to the current foreground app, never LAST_APP_PID.
+            let Some(owner) = appcopy::frontmost_pid().filter(|pid| *pid != std::process::id() as i32) else {
+                continue;
+            };
+            let context = (owner, unsafe { ax::focused_window_key(owner) });
+            if observed_owner != Some(context) {
+                observed_owner = Some(context);
+                clip_selection = None;
+            }
+            let gesture = mac_selection::gesture_for_point(gesture,
+                if gesture { probe_point.and_then(|point| unsafe { ax::point_owner_pid(point) }) } else { None }, owner);
+            if !gesture { pending_selection_check = None; }
+            let mut sel = unsafe { ax::ax_selection_for_pid(gesture, probe_point, Some(owner)) };
+            if appcopy::frontmost_pid() != Some(owner) { continue; }
+            if unsafe { ax::focused_window_key(owner) } != context.1 { continue; }
+            let allowed = gate.allows(context, press_seq, gesture, sel.as_ref().map(|s| s.text.as_str()));
+            if down || !allowed { sel = None; }
+            let gesture = gate.gesture_allowed(context, press_seq, gesture);
+            if !gesture { pending_selection_check = None; }
             {
                 let count = clipboard::change_count();
                 if count != last_clip_count {
@@ -1297,6 +1330,7 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
             } else {
                 pending_selection_check = None;
             }
+            if appcopy::frontmost_pid() != Some(owner) || unsafe { ax::focused_window_key(owner) } != context.1 { continue; }
             let cur = sel.as_ref().map(|s| s.text.clone()).or_else(|| {
                 clip_selection
                     .as_ref()
@@ -1339,17 +1373,18 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
                                     // clip_selection 里存的就是算好的锚点，直接用
                                     (bounds, "clipboard-watch")
                                 } else {
-                                    anchor_for(
-                                        &bounds,
-                                        source,
-                                        last_press,
-                                        mouse::position_topleft(),
-                                    )
+                                    if gesture {
+                                        anchor_for(&bounds, source, last_press, mouse::position_topleft())
+                                    } else {
+                                        // Keyboard selections must not borrow an unrelated mouse click.
+                                        (bounds, "ax-keyboard")
+                                    }
                                 };
                                 eprintln!(
                                     "[beek] 选区矩形（来源={}，锚点={}）：x={:.0} y={:.0} w={:.0} h={:.0}",
                                     source, anchor, b.x, b.y, b.w, b.h
                                 );
+                                icon_rect = Some(icon_rect_for(&b));
                                 let _ = tx.send(UiEvent::ShowIcon(b, last.clone()));
                                 icon_shown = true;
                                 stable_since = None;

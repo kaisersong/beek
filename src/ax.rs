@@ -461,6 +461,15 @@ unsafe fn element_at_position(x: f64, y: f64) -> Option<AXUIElementRef> {
     }
 }
 
+/// Identify the owner of the press before allowing mouse-driven copy fallbacks.
+pub unsafe fn point_owner_pid(point: (f64, f64)) -> Option<i32> {
+    let el = element_at_position(point.0, point.1)?;
+    let mut pid = 0;
+    let result = (AXUIElementGetPid(el, &mut pid) == 0 && pid > 0).then_some(pid);
+    core_foundation::base::CFRelease(el as _);
+    result
+}
+
 /// 给「取词失败」日志用：鼠标位置那个元素是什么、它有没有选中文本。
 /// 注意：这条信息只有在**目标应用处于活动状态**时才有意义 ——
 /// 从终端里跑探针时目标应用往往不是活动应用，那时它不会报选区（会误导判断）。
@@ -487,6 +496,28 @@ pub unsafe fn describe_at_position(x: f64, y: f64) -> String {
 /// 监视器每 tick 都调这个函数，所以平时靠 `deep=false` 只走便宜的路
 /// （焦点元素 → 父链 → 焦点元素子树）；只有刚发生过划词动作时才放开深层搜索。
 pub unsafe fn ax_selection(deep: bool, point: Option<(f64, f64)>) -> Option<Selection> {
+    ax_selection_for_pid(deep, point, None)
+}
+
+/// AXUIElement identity is stable across repeated copies of the same focused window.
+pub unsafe fn focused_window_key(pid: i32) -> u64 {
+    use core_foundation::base::{CFHash, CFRelease};
+    let app = AXUIElementCreateApplication(pid);
+    AXUIElementSetMessagingTimeout(app, 0.5);
+    let key = match ax_get_attr(app, kAXFocusedWindowAttribute) {
+        Ok(window) => {
+            let key = CFHash(window) as u64;
+            CFRelease(window);
+            key
+        }
+        Err(_) => 0,
+    };
+    CFRelease(app as _);
+    key
+}
+
+/// The live monitor supplies a foreground PID. Diagnostics may use the legacy focus lookup.
+pub unsafe fn ax_selection_for_pid(deep: bool, point: Option<(f64, f64)>, expected_pid: Option<i32>) -> Option<Selection> {
     // 自己的界面在最前面（对话框/菜单开着）→ 直接不问 AX：
     // 问自己的视图会和主线程的布局刷新抢锁，死锁（见 SELF_FRONTMOST）
     if self_ui_in_front() {
@@ -497,51 +528,55 @@ pub unsafe fn ax_selection(deep: bool, point: Option<(f64, f64)>) -> Option<Sele
         );
         return None;
     }
-    // 先确保前台应用的完整 AX 树是打开的（WebKit/Electron 不打开就一个选区都读不到）
-    let last = LAST_APP_PID.load(std::sync::atomic::Ordering::Relaxed);
-    if last > 0 {
-        enable_ax_tree(last);
-    }
     // ① 先问「鼠标下面是谁」——豆包的路线。这一条不依赖焦点元素，
     //    对 Safari 这类不提供焦点元素的应用是唯一可行的 AX 路子。
     if let Some((x, y)) = point {
         if let Some(el) = element_at_position(x, y) {
-            let mut cur = el;
-            for level in 0..5 {
-                let base: &'static str = if level == 0 { "at-position" } else { "at-position-parent" };
-                if let Some(hit) = node_hit(cur, base, false) {
-                    match hit.bounds {
-                        // 有文本也有矩形：直接用
-                        Some(bounds) => {
-                            return Some(Selection { text: hit.text, bounds, source: base })
-                        }
-                        // 只有文本：也认（位置交给鼠标锚点兜底）
-                        None => {
-                            let win = ax_get_attr(cur, kAXWindowAttribute)
-                                .ok()
-                                .map(|v| v as AXUIElementRef);
-                            let bounds = win
-                                .and_then(|w| element_frame(w))
-                                .unwrap_or(SelBounds { x, y, w: 0., h: 0. });
-                            return Some(Selection {
-                                text: hit.text,
-                                bounds,
-                                source: "at-position",
-                            });
+            let mut point_pid = 0;
+            // Dock/menu elements belong to a different process. Do not treat them as text,
+            // and do not reuse an unrelated cached click to query another application's tree.
+            let same_owner = expected_pid.map(|pid| AXUIElementGetPid(el, &mut point_pid) == 0 && point_pid == pid).unwrap_or(true);
+            if same_owner {
+                let mut cur = el;
+                for level in 0..5 {
+                    let base: &'static str = if level == 0 { "at-position" } else { "at-position-parent" };
+                    if let Some(hit) = node_hit(cur, base, false) {
+                        match hit.bounds {
+                            // 有文本也有矩形：直接用
+                            Some(bounds) => {
+                                return Some(Selection { text: hit.text, bounds, source: hit.source })
+                            }
+                            // 只有文本：也认（位置交给鼠标锚点兜底）
+                            None => {
+                                let win = ax_get_attr(cur, kAXWindowAttribute)
+                                    .ok()
+                                    .map(|v| v as AXUIElementRef);
+                                let bounds = win
+                                    .and_then(|w| element_frame(w))
+                                    .unwrap_or(SelBounds { x, y, w: 0., h: 0. });
+                                return Some(Selection {
+                                    text: hit.text,
+                                    bounds,
+                                    source: "no-rect",
+                                });
+                            }
                         }
                     }
-                }
-                match ax_get_attr(cur, kAXParentAttribute) {
-                    Ok(p) => cur = p as AXUIElementRef,
-                    Err(_) => break,
+                    match ax_get_attr(cur, kAXParentAttribute) {
+                        Ok(p) => cur = p as AXUIElementRef,
+                        Err(_) => break,
+                    }
                 }
             }
         }
     }
 
-    // 前台应用统一走 focused_app()：它带重试，并在焦点切换瞬间沿用上次的应用
-    let app = focused_app()?;
-    let pid_now = LAST_APP_PID.load(std::sync::atomic::Ordering::Relaxed);
+    // Runtime requests use a fixed owner; never fall back to another application's old selection.
+    let app = match expected_pid {
+        Some(pid) => AXUIElementCreateApplication(pid),
+        None => focused_app()?,
+    };
+    let pid_now = expected_pid.unwrap_or_else(|| LAST_APP_PID.load(std::sync::atomic::Ordering::Relaxed));
     let just_enabled = pid_now > 0 && enable_ax_tree(pid_now);
     let focused_el = ax_get_attr(app, kAXFocusedUIElementAttribute)
         .ok()
@@ -590,7 +625,7 @@ pub unsafe fn ax_selection(deep: bool, point: Option<(f64, f64)>) -> Option<Sele
         if let Some(w) = win {
             windows.push(w);
         }
-        if let Ok(ws) = ax_get_attr(app, kAXWindowsAttribute) {
+        if let Some(ws) = expected_pid.is_none().then(|| ax_get_attr(app, kAXWindowsAttribute).ok()).flatten() {
             let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(ws as _);
             for i in 0..arr.len().min(6) {
                 let w = *arr.get(i).unwrap() as AXUIElementRef;
