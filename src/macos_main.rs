@@ -9,6 +9,7 @@ mod dialogs;
 mod icons;
 mod menubar;
 mod mouse;
+mod macos_runtime;
 mod translate;
 mod update;
 
@@ -1008,6 +1009,7 @@ fn spawn_mouse_tracker() {
     std::thread::spawn(|| {
         let mut prev: i64 = 0;
         loop {
+            let _pool = macos_runtime::AutoreleasePool::new();
             let (_, _, buttons) = mouse::state();
             if buttons != prev {
                 let now = Instant::now();
@@ -1129,6 +1131,7 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
         let mut observed_owner = None;
         loop {
             std::thread::sleep(Duration::from_millis(50));
+            let _pool = macos_runtime::AutoreleasePool::new();
             ticks += 1;
             let (last_press, gesture, press_seq, down) = {
                 let t = mouse_track().lock().unwrap();
@@ -1917,6 +1920,20 @@ fn main() {
         return;
     }
 
+    let lock_path = config::config_path().with_file_name("runtime.lock");
+    if let Some(dir) = lock_path.parent() {
+        if let Err(error) = std::fs::create_dir_all(dir) {
+            eprintln!("[beek] 无法创建运行目录：{error}");
+            return;
+        }
+    }
+    let _instance = match macos_runtime::lock_instance(&lock_path) {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!("[beek] 无法取得单实例锁（可能已有 BeeK 在运行）：{error}");
+            return;
+        }
+    };
     let app = Application::new();
     // 这个 app 没有任何窗口：点 Dock 图标时 macOS 发的是「重新打开」
     // （applicationShouldHandleReopen）。不处理的话用户看起来就是「点了没反应」。

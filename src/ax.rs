@@ -1,38 +1,45 @@
 // BeeK AX 取词模块 — 从 v0.11 移植
 // AX-only，不模拟按键，不读剪贴板
 use accessibility_sys::*;
-use core_foundation::base::TCFType;
+use core_foundation::base::{CFType, TCFType};
 use core_foundation::string::{CFString, CFStringRef};
 use std::ffi::c_void;
 
-unsafe fn ax_get_attr(e: AXUIElementRef, n: &str) -> Result<*const c_void, i32> {
+unsafe fn ax_get_attr(e: &CFType, n: &str) -> Result<CFType, i32> {
     let a = CFString::new(n);
     let mut v: *const c_void = std::ptr::null();
-    let err = AXUIElementCopyAttributeValue(e, a.as_concrete_TypeRef(), &mut v as *mut *const c_void);
-    if err != 0 || v.is_null() { return Err(err); }
-    Ok(v)
+    let err = AXUIElementCopyAttributeValue(e.as_CFTypeRef() as _, a.as_concrete_TypeRef(), &mut v as *mut *const c_void);
+    owned_copy_result(err, v)
 }
 
-unsafe fn ax_param_attr(el: AXUIElementRef, attr: &str, param: *const c_void) -> Result<*const c_void, i32> {
+unsafe fn ax_param_attr(el: &CFType, attr: &str, param: &CFType) -> Result<CFType, i32> {
     let a = CFString::new(attr);
     let mut v: *const c_void = std::ptr::null();
-    let err = AXUIElementCopyParameterizedAttributeValue(el, a.as_concrete_TypeRef(), param as _, &mut v as *mut *const c_void);
-    if err != 0 || v.is_null() { return Err(err); }
-    Ok(v)
+    let err = AXUIElementCopyParameterizedAttributeValue(el.as_CFTypeRef() as _, a.as_concrete_TypeRef(), param.as_CFTypeRef() as _, &mut v as *mut *const c_void);
+    owned_copy_result(err, v)
 }
 
-unsafe fn cfstring_to_string(v: *const c_void) -> Option<String> {
-    if v.is_null() { return None; }
-    let s = CFString::wrap_under_get_rule(v as CFStringRef);
+
+/// Adopt the +1 reference from a Copy API, even on an error/early-return path.
+unsafe fn owned_copy_result(error: i32, value: *const c_void) -> Result<CFType, i32> {
+    let owned = (!value.is_null()).then(|| CFType::wrap_under_create_rule(value));
+    if error != 0 {
+        return Err(error);
+    }
+    owned.ok_or(kAXErrorNoValue)
+}
+
+unsafe fn cfstring_to_string(v: &CFType) -> Option<String> {
+    let s = CFString::wrap_under_get_rule(v.as_CFTypeRef() as CFStringRef);
     let text = s.to_string();
     if text.trim().is_empty() { return None; }
     if text.chars().count() > 2000 { return None; }
     Some(text)
 }
 
-unsafe fn try_get_text(el: AXUIElementRef) -> Option<String> {
+unsafe fn try_get_text(el: &CFType) -> Option<String> {
     let v = ax_get_attr(el, kAXSelectedTextAttribute).ok()?;
-    cfstring_to_string(v)
+    cfstring_to_string(&v)
 }
 
 /// 选区矩形 (x, y, w, h)。坐标是「显示器左上角为原点、y 轴向下」的屏幕坐标，
@@ -45,26 +52,26 @@ fn debug_on() -> bool {
 }
 
 /// 当前焦点元素（取词与取矩形共用同一条链路）
-unsafe fn focused_element() -> Option<AXUIElementRef> {
+unsafe fn focused_element() -> Option<CFType> {
     focused_app_and_element().map(|(_, el)| el)
 }
 
 /// 焦点 app + 焦点元素。搜索选区的兜底路线需要 app（拿焦点窗口）
-unsafe fn focused_app_and_element() -> Option<(AXUIElementRef, AXUIElementRef)> {
-    let sys = AXUIElementCreateSystemWide();
-    AXUIElementSetMessagingTimeout(sys, 0.5);
-    let app = ax_get_attr(sys, kAXFocusedApplicationAttribute).ok()? as AXUIElementRef;
-    let el = ax_get_attr(app, kAXFocusedUIElementAttribute).ok()? as AXUIElementRef;
-    AXUIElementSetMessagingTimeout(el, 0.5);
+unsafe fn focused_app_and_element() -> Option<(CFType, CFType)> {
+    let sys = CFType::wrap_under_create_rule(AXUIElementCreateSystemWide() as _);
+    AXUIElementSetMessagingTimeout(sys.as_CFTypeRef() as _, 0.5);
+    let app = ax_get_attr(&sys, kAXFocusedApplicationAttribute).ok()?;
+    let el = ax_get_attr(&app, kAXFocusedUIElementAttribute).ok()?;
+    AXUIElementSetMessagingTimeout(el.as_CFTypeRef() as _, 0.5);
     Some((app, el))
 }
 
 /// AXBoundsForRange：给一个 range 取屏幕矩形
-unsafe fn bounds_from_range(el: AXUIElementRef, range: *const c_void) -> Option<SelBounds> {
+unsafe fn bounds_from_range(el: &CFType, range: &CFType) -> Option<SelBounds> {
     let val = ax_param_attr(el, "AXBoundsForRange", range).ok()?;
     let mut rect = [0f64; 4];
     // CGRect 的 type code 是 kAXValueTypeCGRect(3)，不是 kAXValueTypeCGSize(2)
-    let ok: bool = AXValueGetValue(val as _, kAXValueTypeCGRect, rect.as_mut_ptr() as *mut c_void);
+    let ok: bool = AXValueGetValue(val.as_CFTypeRef() as _, kAXValueTypeCGRect, rect.as_mut_ptr() as *mut c_void);
     if ok && rect[2] > 0. && rect[3] > 0. {
         Some(SelBounds { x: rect[0], y: rect[1], w: rect[2], h: rect[3] })
     } else {
@@ -74,22 +81,22 @@ unsafe fn bounds_from_range(el: AXUIElementRef, range: *const c_void) -> Option<
 
 /// 单个元素上的三条取矩形路线：原生 AXSelectedTextRange / WebKit·Chromium
 /// AXSelectedTextMarkerRange / 多选区 AXSelectedTextRanges
-unsafe fn bounds_routes(el: AXUIElementRef) -> Option<SelBounds> {
+unsafe fn bounds_routes(el: &CFType) -> Option<SelBounds> {
     if let Ok(r) = ax_get_attr(el, "AXSelectedTextRange") {
-        if let Some(b) = bounds_from_range(el, r) {
+        if let Some(b) = bounds_from_range(el, &r) {
             return Some(b);
         }
     }
     if let Ok(r) = ax_get_attr(el, "AXSelectedTextMarkerRange") {
-        if let Some(b) = bounds_from_range(el, r) {
+        if let Some(b) = bounds_from_range(el, &r) {
             return Some(b);
         }
     }
     if let Ok(arr) = ax_get_attr(el, "AXSelectedTextRanges") {
-        let a = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(arr as _);
+        let a = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(arr.as_CFTypeRef() as _);
         if !a.is_empty() {
             if let Some(first) = a.get(0) {
-                if let Some(b) = bounds_from_range(el, *first) {
+                if let Some(b) = bounds_from_range(el, &CFType::wrap_under_get_rule(*first)) {
                     return Some(b);
                 }
             }
@@ -99,13 +106,13 @@ unsafe fn bounds_routes(el: AXUIElementRef) -> Option<SelBounds> {
 }
 
 /// 兜底：用元素自身矩形（取左下角一小块），保证图标至少出现在文本区域附近
-unsafe fn element_frame(el: AXUIElementRef) -> Option<SelBounds> {
+unsafe fn element_frame(el: &CFType) -> Option<SelBounds> {
     let pos = ax_get_attr(el, kAXPositionAttribute).ok()?;
     let size = ax_get_attr(el, kAXSizeAttribute).ok()?;
     let mut p = [0f64; 2];
     let mut s = [0f64; 2];
-    let okp: bool = AXValueGetValue(pos as _, kAXValueTypeCGPoint, p.as_mut_ptr() as *mut c_void);
-    let oks: bool = AXValueGetValue(size as _, kAXValueTypeCGSize, s.as_mut_ptr() as *mut c_void);
+    let okp: bool = AXValueGetValue(pos.as_CFTypeRef() as _, kAXValueTypeCGPoint, p.as_mut_ptr() as *mut c_void);
+    let oks: bool = AXValueGetValue(size.as_CFTypeRef() as _, kAXValueTypeCGSize, s.as_mut_ptr() as *mut c_void);
     if okp && oks && s[0] > 0. && s[1] > 0. {
         Some(SelBounds { x: p[0], y: p[1], w: s[0].min(40.), h: s[1].min(20.) })
     } else {
@@ -139,17 +146,17 @@ fn rect_ok(b: &SelBounds) -> bool {
 }
 
 /// 元素自己持有的选中文本（AXSelectedText 优先；Chromium/WebKit 只有 marker range 时走它）
-unsafe fn element_text(el: AXUIElementRef) -> Option<String> {
+unsafe fn element_text(el: &CFType) -> Option<String> {
     if let Some(t) = try_get_text(el) {
         return Some(t);
     }
     let range = ax_get_attr(el, "AXSelectedTextMarkerRange").ok()?;
-    let v = ax_param_attr(el, "AXStringForRange", range).ok()?;
-    cfstring_to_string(v)
+    let v = ax_param_attr(el, "AXStringForRange", &range).ok()?;
+    cfstring_to_string(&v)
 }
 
 /// 元素自己的矩形：range 矩形优先，退化为元素自身的 frame
-unsafe fn element_bounds(el: AXUIElementRef) -> Option<(SelBounds, &'static str)> {
+unsafe fn element_bounds(el: &CFType) -> Option<(SelBounds, &'static str)> {
     if let Some(b) = bounds_routes(el) {
         if rect_ok(&b) {
             return Some((b, "element"));
@@ -167,7 +174,7 @@ struct Hit {
     source: &'static str,
 }
 
-unsafe fn node_hit(el: AXUIElementRef, base: &'static str, want_webarea: bool) -> Option<Hit> {
+unsafe fn node_hit(el: &CFType, base: &'static str, want_webarea: bool) -> Option<Hit> {
     if want_webarea && get_role(el).map(|r| r != "AXWebArea").unwrap_or(true) {
         return None;
     }
@@ -180,7 +187,7 @@ unsafe fn node_hit(el: AXUIElementRef, base: &'static str, want_webarea: bool) -
 }
 
 /// 树里有没有 AXWebArea（用来区分「这个应用压根不用 WebArea」和「有 WebArea 但没选中文本」）
-unsafe fn has_webarea(el: AXUIElementRef, depth: u32, budget: &mut u32) -> bool {
+unsafe fn has_webarea(el: &CFType, depth: u32, budget: &mut u32) -> bool {
     if depth > 8 || *budget == 0 {
         return false;
     }
@@ -189,10 +196,10 @@ unsafe fn has_webarea(el: AXUIElementRef, depth: u32, budget: &mut u32) -> bool 
         return true;
     }
     if let Ok(children) = ax_get_attr(el, kAXChildrenAttribute) {
-        let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(children as _);
+        let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(children.as_CFTypeRef() as _);
         for i in 0..arr.len().min(50) {
-            let child = *arr.get(i).unwrap() as AXUIElementRef;
-            if has_webarea(child, depth + 1, budget) {
+            let child = CFType::wrap_under_get_rule(*arr.get(i).unwrap());
+            if has_webarea(&child, depth + 1, budget) {
                 return true;
             }
         }
@@ -202,7 +209,7 @@ unsafe fn has_webarea(el: AXUIElementRef, depth: u32, budget: &mut u32) -> bool 
 
 /// 子树搜索。`want_webarea` = 只认 AXWebArea（Safari / Chromium 的选区挂在那里）。
 unsafe fn search_tree(
-    el: AXUIElementRef,
+    el: &CFType,
     depth: u32,
     budget: &mut u32,
     want_webarea: bool,
@@ -215,10 +222,10 @@ unsafe fn search_tree(
         return Some(hit);
     }
     if let Ok(children) = ax_get_attr(el, kAXChildrenAttribute) {
-        let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(children as _);
+        let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(children.as_CFTypeRef() as _);
         for i in 0..arr.len().min(50) {
-            let child = *arr.get(i).unwrap() as AXUIElementRef;
-            if let Some(hit) = search_tree(child, depth + 1, budget, want_webarea) {
+            let child = CFType::wrap_under_get_rule(*arr.get(i).unwrap());
+            if let Some(hit) = search_tree(&child, depth + 1, budget, want_webarea) {
                 return Some(hit);
             }
         }
@@ -228,21 +235,20 @@ unsafe fn search_tree(
 
 /// 给「取词失败」的日志用：当前前台应用叫什么、它的 AX 形态（有没有焦点元素 / 窗口 / WebArea）
 pub unsafe fn describe_frontmost() -> String {
-    let sys = AXUIElementCreateSystemWide();
-    AXUIElementSetMessagingTimeout(sys, 0.5);
-    let app = match ax_get_attr(sys, kAXFocusedApplicationAttribute) {
-        Ok(a) => a as AXUIElementRef,
+    let sys = CFType::wrap_under_create_rule(AXUIElementCreateSystemWide() as _);
+    AXUIElementSetMessagingTimeout(sys.as_CFTypeRef() as _, 0.5);
+    let app = match ax_get_attr(&sys, kAXFocusedApplicationAttribute) {
+        Ok(a) => a,
         Err(_) => return "拿不到系统级焦点应用".to_string(),
     };
-    let name = el_string(app, kAXTitleAttribute);
-    let has_el = ax_get_attr(app, kAXFocusedUIElementAttribute).is_ok();
-    let win = ax_get_attr(app, kAXFocusedWindowAttribute)
-        .ok()
-        .map(|v| v as AXUIElementRef);
-    let web = match win {
+    let name = el_string(&app, kAXTitleAttribute);
+    let has_el = ax_get_attr(&app, kAXFocusedUIElementAttribute).is_ok();
+    let win = ax_get_attr(&app, kAXFocusedWindowAttribute)
+        .ok();
+    let web = match win.as_ref() {
         Some(w) => {
             let mut budget: u32 = 800;
-            has_webarea(w, 0, &mut budget)
+            has_webarea(&w, 0, &mut budget)
         }
         None => false,
     };
@@ -295,8 +301,8 @@ pub unsafe fn enable_ax_tree(pid: i32) -> bool {
     use core_foundation::boolean::CFBoolean;
     use core_foundation::base::TCFType;
     use core_foundation::string::CFString;
-    let app = AXUIElementCreateApplication(pid);
-    AXUIElementSetMessagingTimeout(app, 0.5);
+    let app = CFType::wrap_under_create_rule(AXUIElementCreateApplication(pid) as _);
+    AXUIElementSetMessagingTimeout(app.as_CFTypeRef() as _, 0.5);
     // Chromium / Electron 是「懒开启」：第一次设置 AXManualAccessibility 会返回
     // 不支持(-25205)或未实现，**应用收到这次调用后才去建 AX 树**，再设一次就成了（实测 Chrome/Muse）。
     // 所以这里每个属性都试两轮，中间等一下。
@@ -308,7 +314,7 @@ pub unsafe fn enable_ax_tree(pid: i32) -> bool {
             let key = CFString::new(attr);
             let val = CFBoolean::true_value().as_CFType();
             let err =
-                AXUIElementSetAttributeValue(app, key.as_concrete_TypeRef(), val.as_CFTypeRef());
+                AXUIElementSetAttributeValue(app.as_CFTypeRef() as _, key.as_concrete_TypeRef(), val.as_CFTypeRef());
             if err == 0 {
                 ok = true;
                 eprintln!("[beek] 打开 AX 树：{} 第 {} 轮成功", attr, round + 1);
@@ -332,14 +338,14 @@ pub unsafe fn enable_ax_tree(pid: i32) -> bool {
 /// pid_t 就是 i32；只为 AXUIElementGetPid 的签名服务，避免为它引 libc
 type LibcPid = i32;
 
-unsafe fn focused_app() -> Option<AXUIElementRef> {
+unsafe fn focused_app() -> Option<CFType> {
     for _ in 0..3 {
-        let sys = AXUIElementCreateSystemWide();
-        AXUIElementSetMessagingTimeout(sys, 0.5);
-        if let Ok(a) = ax_get_attr(sys, kAXFocusedApplicationAttribute) {
-            let app = a as AXUIElementRef;
+        let sys = CFType::wrap_under_create_rule(AXUIElementCreateSystemWide() as _);
+        AXUIElementSetMessagingTimeout(sys.as_CFTypeRef() as _, 0.5);
+        if let Ok(a) = ax_get_attr(&sys, kAXFocusedApplicationAttribute) {
+            let app = a;
             let mut pid: LibcPid = 0;
-            if AXUIElementGetPid(app, &mut pid) == 0 && pid > 0 {
+            if AXUIElementGetPid(app.as_CFTypeRef() as _, &mut pid) == 0 && pid > 0 {
                 if pid == std::process::id() as LibcPid {
                     // 前台是我们自己（对话框/面板在前面）：绝对不要问自己，会死锁
                     log_throttled(
@@ -366,7 +372,7 @@ unsafe fn focused_app() -> Option<AXUIElementRef> {
                 pid
             ),
         );
-        return Some(AXUIElementCreateApplication(pid));
+        return Some(CFType::wrap_under_create_rule(AXUIElementCreateApplication(pid) as _));
     }
     // 注意：这个函数每 50ms 被调一次，消息必须节流，否则会在日志里刷屏
     // （实测：前台没有「别人的应用」时——比如我们自己的面板在最前面——会一直走到这里）
@@ -448,14 +454,14 @@ fn self_ui_in_front() -> bool {
 /// 不用去问「系统级焦点元素」——Safari 这类应用根本不提供 app 级焦点元素
 /// （实测返回 nil），只问「鼠标下面是谁」就绕开了这个坑。
 /// 坐标是 AX 屏幕坐标：左上原点、y 向下，与 mouse::position_topleft() 一致。
-unsafe fn element_at_position(x: f64, y: f64) -> Option<AXUIElementRef> {
-    let sys = AXUIElementCreateSystemWide();
-    AXUIElementSetMessagingTimeout(sys, 0.5);
+unsafe fn element_at_position(x: f64, y: f64) -> Option<CFType> {
+    let sys = CFType::wrap_under_create_rule(AXUIElementCreateSystemWide() as _);
+    AXUIElementSetMessagingTimeout(sys.as_CFTypeRef() as _, 0.5);
     let mut el: AXUIElementRef = std::ptr::null_mut();
-    let err = AXUIElementCopyElementAtPosition(sys, x as f32, y as f32, &mut el);
+    let err = AXUIElementCopyElementAtPosition(sys.as_CFTypeRef() as _, x as f32, y as f32, &mut el);
     if err == 0 && !el.is_null() {
         AXUIElementSetMessagingTimeout(el, 0.5);
-        Some(el)
+        Some(CFType::wrap_under_create_rule(el as _))
     } else {
         None
     }
@@ -465,8 +471,8 @@ unsafe fn element_at_position(x: f64, y: f64) -> Option<AXUIElementRef> {
 pub unsafe fn point_owner_pid(point: (f64, f64)) -> Option<i32> {
     let el = element_at_position(point.0, point.1)?;
     let mut pid = 0;
-    let result = (AXUIElementGetPid(el, &mut pid) == 0 && pid > 0).then_some(pid);
-    core_foundation::base::CFRelease(el as _);
+    let result = (AXUIElementGetPid(el.as_CFTypeRef() as _, &mut pid) == 0 && pid > 0).then_some(pid);
+
     result
 }
 
@@ -477,8 +483,8 @@ pub unsafe fn describe_at_position(x: f64, y: f64) -> String {
     match element_at_position(x, y) {
         Some(el) => format!(
             "鼠标处 role={} 选区={}",
-            get_role(el).unwrap_or_else(|| "?".to_string()),
-            el_selection_desc(el).unwrap_or_else(|| "无".to_string())
+            get_role(&el).unwrap_or_else(|| "?".to_string()),
+            el_selection_desc(&el).unwrap_or_else(|| "无".to_string())
         ),
         None => "鼠标处取不到元素".to_string(),
     }
@@ -501,18 +507,16 @@ pub unsafe fn ax_selection(deep: bool, point: Option<(f64, f64)>) -> Option<Sele
 
 /// AXUIElement identity is stable across repeated copies of the same focused window.
 pub unsafe fn focused_window_key(pid: i32) -> u64 {
-    use core_foundation::base::{CFHash, CFRelease};
-    let app = AXUIElementCreateApplication(pid);
-    AXUIElementSetMessagingTimeout(app, 0.5);
-    let key = match ax_get_attr(app, kAXFocusedWindowAttribute) {
+    use core_foundation::base::CFHash;
+    let app = CFType::wrap_under_create_rule(AXUIElementCreateApplication(pid) as _);
+    AXUIElementSetMessagingTimeout(app.as_CFTypeRef() as _, 0.5);
+    let key = match ax_get_attr(&app, kAXFocusedWindowAttribute) {
         Ok(window) => {
-            let key = CFHash(window) as u64;
-            CFRelease(window);
+            let key = CFHash(window.as_CFTypeRef()) as u64;
             key
         }
         Err(_) => 0,
     };
-    CFRelease(app as _);
     key
 }
 
@@ -535,12 +539,12 @@ pub unsafe fn ax_selection_for_pid(deep: bool, point: Option<(f64, f64)>, expect
             let mut point_pid = 0;
             // Dock/menu elements belong to a different process. Do not treat them as text,
             // and do not reuse an unrelated cached click to query another application's tree.
-            let same_owner = expected_pid.map(|pid| AXUIElementGetPid(el, &mut point_pid) == 0 && point_pid == pid).unwrap_or(true);
+            let same_owner = expected_pid.map(|pid| AXUIElementGetPid(el.as_CFTypeRef() as _, &mut point_pid) == 0 && point_pid == pid).unwrap_or(true);
             if same_owner {
-                let mut cur = el;
+                let mut cur = el.clone();
                 for level in 0..5 {
                     let base: &'static str = if level == 0 { "at-position" } else { "at-position-parent" };
-                    if let Some(hit) = node_hit(cur, base, false) {
+                    if let Some(hit) = node_hit(&cur, base, false) {
                         match hit.bounds {
                             // 有文本也有矩形：直接用
                             Some(bounds) => {
@@ -548,11 +552,10 @@ pub unsafe fn ax_selection_for_pid(deep: bool, point: Option<(f64, f64)>, expect
                             }
                             // 只有文本：也认（位置交给鼠标锚点兜底）
                             None => {
-                                let win = ax_get_attr(cur, kAXWindowAttribute)
-                                    .ok()
-                                    .map(|v| v as AXUIElementRef);
+                                let win = ax_get_attr(&cur, kAXWindowAttribute)
+                                    .ok();
                                 let bounds = win
-                                    .and_then(|w| element_frame(w))
+                                    .and_then(|w| element_frame(&w))
                                     .unwrap_or(SelBounds { x, y, w: 0., h: 0. });
                                 return Some(Selection {
                                     text: hit.text,
@@ -562,8 +565,8 @@ pub unsafe fn ax_selection_for_pid(deep: bool, point: Option<(f64, f64)>, expect
                             }
                         }
                     }
-                    match ax_get_attr(cur, kAXParentAttribute) {
-                        Ok(p) => cur = p as AXUIElementRef,
+                    match ax_get_attr(&cur, kAXParentAttribute) {
+                        Ok(p) => cur = p,
                         Err(_) => break,
                     }
                 }
@@ -573,17 +576,15 @@ pub unsafe fn ax_selection_for_pid(deep: bool, point: Option<(f64, f64)>, expect
 
     // Runtime requests use a fixed owner; never fall back to another application's old selection.
     let app = match expected_pid {
-        Some(pid) => AXUIElementCreateApplication(pid),
+        Some(pid) => CFType::wrap_under_create_rule(AXUIElementCreateApplication(pid) as _),
         None => focused_app()?,
     };
     let pid_now = expected_pid.unwrap_or_else(|| LAST_APP_PID.load(std::sync::atomic::Ordering::Relaxed));
     let just_enabled = pid_now > 0 && enable_ax_tree(pid_now);
-    let focused_el = ax_get_attr(app, kAXFocusedUIElementAttribute)
-        .ok()
-        .map(|v| v as AXUIElementRef);
-    let win = ax_get_attr(app, kAXFocusedWindowAttribute)
-        .ok()
-        .map(|v| v as AXUIElementRef);
+    let focused_el = ax_get_attr(&app, kAXFocusedUIElementAttribute)
+        .ok();
+    let win = ax_get_attr(&app, kAXFocusedWindowAttribute)
+        .ok();
 
     // 候选顺序：焦点元素自己 → 父链 → 焦点元素子树 → 焦点窗口里的 AXWebArea → 焦点窗口子树
     let mut candidates: Vec<Hit> = Vec::new();
@@ -599,47 +600,47 @@ pub unsafe fn ax_selection_for_pid(deep: bool, point: Option<(f64, f64)>, expect
         }
     }
 
-    if let Some(el) = focused_el {
-        AXUIElementSetMessagingTimeout(el, 0.5);
-        let mut cur = el;
+    if let Some(el) = focused_el.as_ref() {
+        AXUIElementSetMessagingTimeout(el.as_CFTypeRef() as _, 0.5);
+        let mut cur = el.clone();
         for level in 0..5 {
             let base: &'static str = if level == 0 { "element" } else { "parent" };
-            record(node_hit(cur, base, false), &mut candidates, &mut text_only);
+            record(node_hit(&cur, base, false), &mut candidates, &mut text_only);
             if !candidates.is_empty() {
                 break;
             }
-            match ax_get_attr(cur, kAXParentAttribute) {
-                Ok(p) => cur = p as AXUIElementRef,
+            match ax_get_attr(&cur, kAXParentAttribute) {
+                Ok(p) => cur = p,
                 Err(_) => break,
             }
         }
         if candidates.is_empty() {
             let mut budget: u32 = 400;
-            record(search_tree(el, 0, &mut budget, false), &mut candidates, &mut text_only);
+            record(search_tree(&el, 0, &mut budget, false), &mut candidates, &mut text_only);
         }
     }
     if candidates.is_empty() && deep {
         // 先焦点窗口，再（找不到时）该应用的其它窗口：
         // Safari / Muse 这类应用可能开了多个窗口或标签页，选区不一定在焦点窗口里
-        let mut windows: Vec<AXUIElementRef> = Vec::new();
-        if let Some(w) = win {
-            windows.push(w);
+        let mut windows: Vec<CFType> = Vec::new();
+        if let Some(w) = win.as_ref() {
+            windows.push(w.clone());
         }
-        if let Some(ws) = expected_pid.is_none().then(|| ax_get_attr(app, kAXWindowsAttribute).ok()).flatten() {
-            let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(ws as _);
+        if let Some(ws) = expected_pid.is_none().then(|| ax_get_attr(&app, kAXWindowsAttribute).ok()).flatten() {
+            let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(ws.as_CFTypeRef() as _);
             for i in 0..arr.len().min(6) {
-                let w = *arr.get(i).unwrap() as AXUIElementRef;
-                if Some(w) != win {
+                let w = CFType::wrap_under_get_rule(*arr.get(i).unwrap());
+                if Some(&w) != win.as_ref() {
                     windows.push(w);
                 }
             }
         }
         for (idx, w) in windows.iter().enumerate() {
             let mut budget: u32 = 800;
-            record(search_tree(*w, 0, &mut budget, true), &mut candidates, &mut text_only);
+            record(search_tree(w, 0, &mut budget, true), &mut candidates, &mut text_only);
             if candidates.is_empty() {
                 let mut budget: u32 = 800;
-                record(search_tree(*w, 0, &mut budget, false), &mut candidates, &mut text_only);
+                record(search_tree(w, 0, &mut budget, false), &mut candidates, &mut text_only);
             }
             if !candidates.is_empty() {
                 eprintln!("[beek] 取词：选区在第 {} 个窗口里找到（共扫 {} 个）", idx + 1, windows.len());
@@ -652,10 +653,10 @@ pub unsafe fn ax_selection_for_pid(deep: bool, point: Option<(f64, f64)>, expect
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 for w in windows.iter() {
                     let mut budget: u32 = 800;
-                    record(search_tree(*w, 0, &mut budget, true), &mut candidates, &mut text_only);
+                    record(search_tree(w, 0, &mut budget, true), &mut candidates, &mut text_only);
                     if candidates.is_empty() {
                         let mut budget: u32 = 800;
-                        record(search_tree(*w, 0, &mut budget, false), &mut candidates, &mut text_only);
+                        record(search_tree(w, 0, &mut budget, false), &mut candidates, &mut text_only);
                     }
                     if !candidates.is_empty() {
                         eprintln!("[beek] 取词：打开 AX 树后重查，拿到了选区");
@@ -674,7 +675,7 @@ pub unsafe fn ax_selection_for_pid(deep: bool, point: Option<(f64, f64)>, expect
         Some(hit) => {
             let bounds = hit.bounds.unwrap_or_else(|| {
                 // 连元素框都拿不到：用焦点窗口的矩形当占位（位置最终由鼠标锚点决定）
-                win.and_then(|w| element_frame(w))
+                win.as_ref().and_then(|w| element_frame(&w))
                     .unwrap_or(SelBounds { x: 0., y: 0., w: 0., h: 0. })
             });
             let source = if hit.bounds.is_none() { "no-rect" } else { hit.source };
@@ -682,12 +683,12 @@ pub unsafe fn ax_selection_for_pid(deep: bool, point: Option<(f64, f64)>, expect
         }
         None => {
             // 最后：app 自己的 AXSelectedText（同样没有矩形）
-            if let Ok(v) = ax_get_attr(app, kAXSelectedTextAttribute) {
-                if let Some(text) = cfstring_to_string(v) {
+            if let Ok(v) = ax_get_attr(&app, kAXSelectedTextAttribute) {
+                if let Some(text) = cfstring_to_string(&v) {
                     return Some(Selection {
                         text,
-                        bounds: win
-                            .and_then(|w| element_frame(w))
+                        bounds: win.as_ref()
+                            .and_then(|w| element_frame(&w))
                             .unwrap_or(SelBounds { x: 0., y: 0., w: 0., h: 0. }),
                         source: "no-rect",
                     });
@@ -696,7 +697,7 @@ pub unsafe fn ax_selection_for_pid(deep: bool, point: Option<(f64, f64)>, expect
             if deep {
                 if let Some(win) = win {
                     let mut budget: u32 = 800;
-                    if has_webarea(win, 0, &mut budget) {
+                    if has_webarea(&win, 0, &mut budget) {
                     eprintln!(
                         "[beek] 取词：焦点窗口里有 AXWebArea，但它没有任何选中文本 \
                          → 该应用这次没有把选区暴露给 AX"
@@ -719,29 +720,29 @@ pub unsafe fn ax_selection_bounds() -> Option<SelBounds> {
     ax_selection(true, None).map(|s| s.bounds)
 }
 
-unsafe fn get_role(el: AXUIElementRef) -> Option<String> {
+unsafe fn get_role(el: &CFType) -> Option<String> {
     let v = ax_get_attr(el, kAXRoleAttribute).ok()?;
-    cfstring_to_string(v)
+    cfstring_to_string(&v)
 }
 
 /// WebArea 兜底：Chromium/WebKit 里选区常挂在 AXWebArea 上
-unsafe fn find_webarea_text(el: AXUIElementRef, depth: u32) -> Option<String> {
+unsafe fn find_webarea_text(el: &CFType, depth: u32) -> Option<String> {
     if depth > 8 { return None; }
     if let Some(role) = get_role(el) {
         if role == "AXWebArea" {
             if let Some(t) = try_get_text(el) { return Some(t); }
             if let Ok(range) = ax_get_attr(el, "AXSelectedTextMarkerRange") {
-                if let Ok(v) = ax_param_attr(el, "AXStringForRange", range) {
-                    if let Some(t) = cfstring_to_string(v) { return Some(t); }
+                if let Ok(v) = ax_param_attr(el, "AXStringForRange", &range) {
+                    if let Some(t) = cfstring_to_string(&v) { return Some(t); }
                 }
             }
         }
     }
     if let Ok(children) = ax_get_attr(el, kAXChildrenAttribute) {
-        let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(children as _);
+        let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(children.as_CFTypeRef() as _);
         for i in 0..arr.len().min(50) {
-            let child = *arr.get(i).unwrap() as AXUIElementRef;
-            if let Some(t) = find_webarea_text(child, depth + 1) { return Some(t); }
+            let child = CFType::wrap_under_get_rule(*arr.get(i).unwrap());
+            if let Some(t) = find_webarea_text(&child, depth + 1) { return Some(t); }
         }
     }
     None
@@ -772,19 +773,19 @@ pub fn is_url(s: &str) -> bool {
 // 焦点元素链上有没有选中文本、有没有 AXWebArea、各节点的 role/frame、
 // AXBoundsForRange 能不能出矩形。不做任何 UI 操作，不翻译，打印完就退出。
 
-unsafe fn el_string(el: AXUIElementRef, attr: &str) -> String {
+unsafe fn el_string(el: &CFType, attr: &str) -> String {
     match ax_get_attr(el, attr) {
-        Ok(v) => cfstring_to_string(v).unwrap_or_else(|| "(空)".to_string()),
+        Ok(v) => cfstring_to_string(&v).unwrap_or_else(|| "(空)".to_string()),
         Err(e) => format!("(err {})", e),
     }
 }
 
-unsafe fn el_frame(el: AXUIElementRef) -> String {
+unsafe fn el_frame(el: &CFType) -> String {
     let pos = ax_get_attr(el, kAXPositionAttribute).ok();
     let size = ax_get_attr(el, kAXSizeAttribute).ok();
     let (mut p, mut z) = ([0f64; 2], [0f64; 2]);
-    let okp = pos.map(|v| AXValueGetValue(v as _, kAXValueTypeCGPoint, p.as_mut_ptr() as *mut c_void)).unwrap_or(false);
-    let okz = size.map(|v| AXValueGetValue(v as _, kAXValueTypeCGSize, z.as_mut_ptr() as *mut c_void)).unwrap_or(false);
+    let okp = pos.map(|v| AXValueGetValue(v.as_CFTypeRef() as _, kAXValueTypeCGPoint, p.as_mut_ptr() as *mut c_void)).unwrap_or(false);
+    let okz = size.map(|v| AXValueGetValue(v.as_CFTypeRef() as _, kAXValueTypeCGSize, z.as_mut_ptr() as *mut c_void)).unwrap_or(false);
     if okp && okz {
         format!("({:.0},{:.0} {:.0}x{:.0})", p[0], p[1], z[0], z[1])
     } else {
@@ -793,14 +794,14 @@ unsafe fn el_frame(el: AXUIElementRef) -> String {
 }
 
 /// 这个节点自己有没有选中文本；有的话顺便试一下矩形
-unsafe fn el_selection_desc(el: AXUIElementRef) -> Option<String> {
+unsafe fn el_selection_desc(el: &CFType) -> Option<String> {
     let direct = match ax_get_attr(el, kAXSelectedTextAttribute) {
-        Ok(v) => cfstring_to_string(v),
+        Ok(v) => cfstring_to_string(&v),
         Err(_) => None,
     };
     let marker = match ax_get_attr(el, "AXSelectedTextMarkerRange") {
-        Ok(r) => match ax_param_attr(el, "AXStringForRange", r) {
-            Ok(v) => cfstring_to_string(v),
+        Ok(r) => match ax_param_attr(el, "AXStringForRange", &r) {
+            Ok(v) => cfstring_to_string(&v),
             Err(_) => None,
         },
         Err(_) => None,
@@ -819,7 +820,7 @@ unsafe fn el_selection_desc(el: AXUIElementRef) -> Option<String> {
     ))
 }
 
-unsafe fn probe_walk(el: AXUIElementRef, depth: u32, visited: &mut u32, hits: &mut u32) {
+unsafe fn probe_walk(el: &CFType, depth: u32, visited: &mut u32, hits: &mut u32) {
     if depth > 10 || *visited > 300 {
         return;
     }
@@ -833,15 +834,16 @@ unsafe fn probe_walk(el: AXUIElementRef, depth: u32, visited: &mut u32, hits: &m
         eprintln!("[探针] AXWebArea：frame={} 标题={:?}（本身没有选中文本）", el_frame(el), el_string(el, kAXTitleAttribute));
     }
     if let Ok(children) = ax_get_attr(el, kAXChildrenAttribute) {
-        let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(children as _);
+        let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(children.as_CFTypeRef() as _);
         for i in 0..arr.len().min(50) {
-            let child = *arr.get(i).unwrap() as AXUIElementRef;
-            probe_walk(child, depth + 1, visited, hits);
+            let child = CFType::wrap_under_get_rule(*arr.get(i).unwrap());
+            probe_walk(&child, depth + 1, visited, hits);
         }
     }
 }
 
 pub unsafe fn ax_probe() {
+    let _pool = crate::macos_runtime::AutoreleasePool::new();
     eprintln!("[探针] 辅助功能权限：{}", AXIsProcessTrusted());
     // 可以指定 pid（BEEK_AX_PROBE_PID）去探某个应用；不指定就用当前焦点应用。
     // 指定 pid 很有用：探针一般是在终端里跑的，那时焦点应用是终端而不是目标应用。
@@ -855,10 +857,9 @@ pub unsafe fn ax_probe() {
                 eprintln!("[探针] 已打开该应用的完整 AX 树，等 250ms 让它重建…");
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
-            let app = AXUIElementCreateApplication(p);
-            let el = ax_get_attr(app, kAXFocusedUIElementAttribute)
-                .ok()
-                .map(|v| v as AXUIElementRef);
+            let app = CFType::wrap_under_create_rule(AXUIElementCreateApplication(p) as _);
+            let el = ax_get_attr(&app, kAXFocusedUIElementAttribute)
+                .ok();
             (app, el)
         }
         None => match focused_app_and_element() {
@@ -871,48 +872,48 @@ pub unsafe fn ax_probe() {
     };
     eprintln!(
         "[探针] app={:?} pid={:?} 焦点元素={:?}",
-        el_string(app, kAXTitleAttribute),
+        el_string(&app, kAXTitleAttribute),
         pid,
-        focused_el.map(|e| format!("role={} frame={}", get_role(e).unwrap_or_default(), el_frame(e)))
+        focused_el.as_ref().map(|e| format!("role={} frame={}", get_role(&e).unwrap_or_default(), el_frame(&e)))
     );
 
-    if let Some(el) = focused_el {
-        eprintln!("[探针] 焦点元素 selectedText={:?}", el_string(el, kAXSelectedTextAttribute));
-        let mut cur = el;
+    if let Some(el) = focused_el.as_ref() {
+        eprintln!("[探针] 焦点元素 selectedText={:?}", el_string(&el, kAXSelectedTextAttribute));
+        let mut cur = el.clone();
         for level in 0..6 {
             eprintln!(
                 "[探针] 焦点链 {}：role={} frame={} 选区={:?}",
                 level,
-                get_role(cur).unwrap_or_else(|| "?".to_string()),
-                el_frame(cur),
-                el_selection_desc(cur).unwrap_or_else(|| "无".to_string())
+                get_role(&cur).unwrap_or_else(|| "?".to_string()),
+                el_frame(&cur),
+                el_selection_desc(&cur).unwrap_or_else(|| "无".to_string())
             );
-            match ax_get_attr(cur, kAXParentAttribute) {
-                Ok(p) => cur = p as AXUIElementRef,
+            match ax_get_attr(&cur, kAXParentAttribute) {
+                Ok(p) => cur = p,
                 Err(_) => break,
             }
         }
     }
 
     // 窗口：优先焦点窗口；拿不到就把该 app 的所有窗口都扫一遍
-    let mut roots: Vec<AXUIElementRef> = Vec::new();
-    match ax_get_attr(app, kAXFocusedWindowAttribute) {
-        Ok(w) => roots.push(w as AXUIElementRef),
+    let mut roots: Vec<CFType> = Vec::new();
+    match ax_get_attr(&app, kAXFocusedWindowAttribute) {
+        Ok(w) => roots.push(w),
         Err(_) => {
-            if let Ok(ws) = ax_get_attr(app, kAXWindowsAttribute) {
-                let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(ws as _);
+            if let Ok(ws) = ax_get_attr(&app, kAXWindowsAttribute) {
+                let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(ws.as_CFTypeRef() as _);
                 for i in 0..arr.len().min(8) {
-                    roots.push(*arr.get(i).unwrap() as AXUIElementRef);
+                    roots.push(CFType::wrap_under_get_rule(*arr.get(i).unwrap()));
                 }
             }
         }
     }
     // 再报告一次「app 运行时真正走的那条路」：系统级焦点应用 → ax_selection()
-    let sys = AXUIElementCreateSystemWide();
-    if let Ok(a) = ax_get_attr(sys, kAXFocusedApplicationAttribute) {
+    let sys = CFType::wrap_under_create_rule(AXUIElementCreateSystemWide() as _);
+    if let Ok(a) = ax_get_attr(&sys, kAXFocusedApplicationAttribute) {
         eprintln!(
             "[探针] 系统级焦点 app = {:?}（app 的监视器就是用这个决定的）",
-            el_string(a as AXUIElementRef, kAXTitleAttribute)
+            el_string(&a, kAXTitleAttribute)
         );
     } else {
         eprintln!("[探针] 系统级焦点 app 取不到");
@@ -925,22 +926,22 @@ pub unsafe fn ax_probe() {
                 "[探针] 鼠标位置 ({:.0},{:.0}) 的元素：role={} frame={} 选区={:?}",
                 mx,
                 my,
-                get_role(el).unwrap_or_else(|| "?".to_string()),
-                el_frame(el),
-                el_selection_desc(el).unwrap_or_else(|| "无".to_string())
+                get_role(&el).unwrap_or_else(|| "?".to_string()),
+                el_frame(&el),
+                el_selection_desc(&el).unwrap_or_else(|| "无".to_string())
             );
             // 往上找 3 层，看有没有哪一层带选区
-            let mut cur = el;
+            let mut cur = el.clone();
             for level in 0..3 {
-                match ax_get_attr(cur, kAXParentAttribute) {
+                match ax_get_attr(&cur, kAXParentAttribute) {
                     Ok(p) => {
-                        cur = p as AXUIElementRef;
+                        cur = p;
                         eprintln!(
                             "[探针]   父层 {}：role={} frame={} 选区={:?}",
                             level + 1,
-                            get_role(cur).unwrap_or_else(|| "?".to_string()),
-                            el_frame(cur),
-                            el_selection_desc(cur).unwrap_or_else(|| "无".to_string())
+                            get_role(&cur).unwrap_or_else(|| "?".to_string()),
+                            el_frame(&cur),
+                            el_selection_desc(&cur).unwrap_or_else(|| "无".to_string())
                         );
                     }
                     Err(_) => break,
@@ -965,11 +966,11 @@ pub unsafe fn ax_probe() {
     for win in roots {
         eprintln!(
             "[探针] 扫窗口：frame={} title={:?}",
-            el_frame(win),
-            el_string(win, kAXTitleAttribute)
+            el_frame(&win),
+            el_string(&win, kAXTitleAttribute)
         );
         let (mut visited, mut hits) = (0u32, 0u32);
-        probe_walk(win, 0, &mut visited, &mut hits);
+        probe_walk(&win, 0, &mut visited, &mut hits);
         eprintln!("[探针] 该窗口：访问 {} 个节点，{} 个有选区", visited, hits);
     }
 }
@@ -985,8 +986,13 @@ pub unsafe fn ax_watch() {
         return;
     }
     eprintln!("[监听] 请在目标应用里划一次词（双击 / 拖选 / 键盘选都行），我在那一刻报告现场…");
+    let seconds = std::env::var("BEEK_AX_WATCH_SECONDS").ok()
+        .and_then(|s| s.parse::<u64>().ok()).unwrap_or(120).clamp(1, 3600);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    eprintln!("[监听] 最多运行 {seconds} 秒，到时自动退出");
     let mut seen_seq = 0u64;
-    loop {
+    while std::time::Instant::now() < deadline {
+        let _pool = crate::macos_runtime::AutoreleasePool::new();
         std::thread::sleep(std::time::Duration::from_millis(30));
         let Some((seq, kind, x, y, _at)) = crate::eventtap::last_event() else {
             continue;
@@ -1002,17 +1008,16 @@ pub unsafe fn ax_watch() {
             continue;
         }
         std::thread::sleep(std::time::Duration::from_millis(120));
-        let sys = AXUIElementCreateSystemWide();
-        AXUIElementSetMessagingTimeout(sys, 0.5);
-        let app = ax_get_attr(sys, kAXFocusedApplicationAttribute)
-            .ok()
-            .map(|a| a as AXUIElementRef);
-        let who = app
-            .map(|a| el_string(a, kAXTitleAttribute))
+        let sys = CFType::wrap_under_create_rule(AXUIElementCreateSystemWide() as _);
+        AXUIElementSetMessagingTimeout(sys.as_CFTypeRef() as _, 0.5);
+        let app = ax_get_attr(&sys, kAXFocusedApplicationAttribute)
+            .ok();
+        let who = app.as_ref()
+            .map(|a| el_string(&a, kAXTitleAttribute))
             .unwrap_or_else(|| "?".to_string());
-        let pid = app.and_then(|a| {
+        let pid = app.as_ref().and_then(|a| {
             let mut p: i32 = 0;
-            if AXUIElementGetPid(a, &mut p) == 0 && p > 0 {
+            if AXUIElementGetPid(a.as_CFTypeRef() as _, &mut p) == 0 && p > 0 {
                 Some(p)
             } else {
                 None
@@ -1032,21 +1037,21 @@ pub unsafe fn ax_watch() {
         if let Some(el) = element_at_position(x, y) {
             eprintln!(
                 "[监听]   坐标处：role={} frame={} 选区={:?}",
-                get_role(el).unwrap_or_else(|| "?".to_string()),
-                el_frame(el),
-                el_selection_desc(el).unwrap_or_else(|| "无".to_string())
+                get_role(&el).unwrap_or_else(|| "?".to_string()),
+                el_frame(&el),
+                el_selection_desc(&el).unwrap_or_else(|| "无".to_string())
             );
-            let mut cur = el;
+            let mut cur = el.clone();
             for level in 0..4 {
-                match ax_get_attr(cur, kAXParentAttribute) {
+                match ax_get_attr(&cur, kAXParentAttribute) {
                     Ok(pp) => {
-                        cur = pp as AXUIElementRef;
+                        cur = pp;
                         eprintln!(
                             "[监听]     父层 {}：role={} frame={} 选区={:?}",
                             level + 1,
-                            get_role(cur).unwrap_or_else(|| "?".to_string()),
-                            el_frame(cur),
-                            el_selection_desc(cur).unwrap_or_else(|| "无".to_string())
+                            get_role(&cur).unwrap_or_else(|| "?".to_string()),
+                            el_frame(&cur),
+                            el_selection_desc(&cur).unwrap_or_else(|| "无".to_string())
                         );
                     }
                     Err(_) => break,
@@ -1073,17 +1078,17 @@ pub unsafe fn ax_watch() {
 // 但「按它自己的『拷贝』菜单项」是让**应用自己**执行拷贝 —— 走的是它的菜单体系，
 // 不依赖它是否响应合成键。实测这也是开机就稳定的那条路。
 
-unsafe fn identifier_of(el: AXUIElementRef) -> Option<String> {
+unsafe fn identifier_of(el: &CFType) -> Option<String> {
     let v = ax_get_attr(el, "AXIdentifier").ok()?;
-    cfstring_to_string(v)
+    cfstring_to_string(&v)
 }
 
-unsafe fn children_of(el: AXUIElementRef) -> Vec<AXUIElementRef> {
+unsafe fn children_of(el: &CFType) -> Vec<CFType> {
     let mut out = Vec::new();
     if let Ok(children) = ax_get_attr(el, kAXChildrenAttribute) {
-        let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(children as _);
+        let arr = core_foundation::array::CFArray::<*const c_void>::wrap_under_get_rule(children.as_CFTypeRef() as _);
         for i in 0..arr.len().min(60) {
-            out.push(*arr.get(i).unwrap() as AXUIElementRef);
+            out.push(CFType::wrap_under_get_rule(*arr.get(i).unwrap()));
         }
     }
     out
@@ -1101,12 +1106,12 @@ const COPY_TITLES: &[&str] = &[
 /// 标题在拷贝标题表里且快捷键字符是 C。
 /// 为什么需要第二条：AppKit 应用（如 Ghostty/TextEdit）的菜单项 identifier 是
 /// 自动生成的 `_NS:63` 这种，根本不叫 `copy:`（实测）。
-unsafe fn is_copy_item(el: AXUIElementRef) -> bool {
+unsafe fn is_copy_item(el: &CFType) -> bool {
     if identifier_of(el).map(|i| i == "copy:").unwrap_or(false) {
         return true;
     }
     let title = match ax_get_attr(el, kAXTitleAttribute) {
-        Ok(v) => match cfstring_to_string(v) {
+        Ok(v) => match cfstring_to_string(&v) {
             Some(t) => t,
             None => return false,
         },
@@ -1119,7 +1124,7 @@ unsafe fn is_copy_item(el: AXUIElementRef) -> bool {
     // 但不少应用（实测 Ghostty）根本不暴露 cmdChar，所以「没有」也算通过。
     match ax_get_attr(el, "AXMenuItemCmdChar")
         .ok()
-        .and_then(|v| cfstring_to_string(v))
+        .and_then(|v| cfstring_to_string(&v))
     {
         Some(c) => c.eq_ignore_ascii_case("C"),
         None => true,
@@ -1127,16 +1132,16 @@ unsafe fn is_copy_item(el: AXUIElementRef) -> bool {
 }
 
 /// 深度优先找「拷贝」菜单项
-unsafe fn find_copy_item(el: AXUIElementRef, depth: u32, budget: &mut u32) -> Option<AXUIElementRef> {
+unsafe fn find_copy_item(el: &CFType, depth: u32, budget: &mut u32) -> Option<CFType> {
     if depth > 6 || *budget == 0 {
         return None;
     }
     *budget -= 1;
     if is_copy_item(el) {
-        return Some(el);
+        return Some(el.clone());
     }
     for child in children_of(el) {
-        if let Some(hit) = find_copy_item(child, depth + 1, budget) {
+        if let Some(hit) = find_copy_item(&child, depth + 1, budget) {
             return Some(hit);
         }
     }
@@ -1146,11 +1151,11 @@ unsafe fn find_copy_item(el: AXUIElementRef, depth: u32, budget: &mut u32) -> Op
 /// 在目标应用的菜单栏里找「拷贝」菜单项，返回 (菜单项, 是否可用)。
 /// 菜单顺序按 SelectedTextKit 的策略：先第 4 个（通常是「编辑」），再左右交替展开，
 /// 最后整棵菜单兜底 —— 这样既快又不依赖菜单标题的本地化文本。
-pub unsafe fn menu_copy_item(pid: i32) -> Option<(AXUIElementRef, bool)> {
-    let app = AXUIElementCreateApplication(pid);
-    AXUIElementSetMessagingTimeout(app, 0.5);
-    let menubar = ax_get_attr(app, kAXMenuBarAttribute).ok()? as AXUIElementRef;
-    let items = children_of(menubar);
+pub unsafe fn menu_copy_item(pid: i32) -> Option<(CFType, bool)> {
+    let app = CFType::wrap_under_create_rule(AXUIElementCreateApplication(pid) as _);
+    AXUIElementSetMessagingTimeout(app.as_CFTypeRef() as _, 0.5);
+    let menubar = ax_get_attr(&app, kAXMenuBarAttribute).ok()?;
+    let items = children_of(&menubar);
     if items.is_empty() {
         return None;
     }
@@ -1186,12 +1191,12 @@ pub unsafe fn menu_copy_item(pid: i32) -> Option<(AXUIElementRef, bool)> {
     let debug_menu = std::env::var("BEEK_MENU_DUMP").is_ok();
     for idx in order {
         let mut budget: u32 = 400;
-        if let Some(item) = find_copy_item(items[idx], 0, &mut budget) {
+        if let Some(item) = find_copy_item(&items[idx], 0, &mut budget) {
             // 可用性：菜单项灰掉 = 当前没有可拷贝的内容（也就是没选中）
-            let enabled = ax_get_attr(item, kAXEnabledAttribute)
+            let enabled = ax_get_attr(&item, kAXEnabledAttribute)
                 .ok()
                 .map(|v| {
-                    core_foundation::boolean::CFBoolean::wrap_under_get_rule(v as _)
+                    core_foundation::boolean::CFBoolean::wrap_under_get_rule(v.as_CFTypeRef() as _)
                         == core_foundation::boolean::CFBoolean::true_value()
                 })
                 .unwrap_or(true);
@@ -1203,16 +1208,16 @@ pub unsafe fn menu_copy_item(pid: i32) -> Option<(AXUIElementRef, bool)> {
             eprintln!(
                 "[菜单] 菜单栏项 {}：title={:?} identifier={:?}",
                 i,
-                ax_get_attr(*bar_item, kAXTitleAttribute)
+                ax_get_attr(bar_item, kAXTitleAttribute)
                     .ok()
-                    .and_then(|v| cfstring_to_string(v)),
-                identifier_of(*bar_item)
+                    .and_then(|v| cfstring_to_string(&v)),
+                identifier_of(bar_item)
             );
         }
         for (i, bar_item) in items.iter().enumerate() {
-            let subs = children_of(*bar_item);
+            let subs = children_of(bar_item);
             for sub in subs {
-                let entries = children_of(sub);
+                let entries = children_of(&sub);
                 if entries.is_empty() {
                     continue;
                 }
@@ -1221,14 +1226,14 @@ pub unsafe fn menu_copy_item(pid: i32) -> Option<(AXUIElementRef, bool)> {
                     eprintln!(
                         "[菜单]   {}: title={:?} cmdChar={:?} identifier={:?} role={}",
                         k,
-                        ax_get_attr(*e, kAXTitleAttribute)
+                        ax_get_attr(e, kAXTitleAttribute)
                             .ok()
-                            .and_then(|v| cfstring_to_string(v)),
-                        ax_get_attr(*e, "AXMenuItemCmdChar")
+                            .and_then(|v| cfstring_to_string(&v)),
+                        ax_get_attr(e, "AXMenuItemCmdChar")
                             .ok()
-                            .and_then(|v| cfstring_to_string(v)),
-                        identifier_of(*e),
-                        get_role(*e).unwrap_or_default()
+                            .and_then(|v| cfstring_to_string(&v)),
+                        identifier_of(e),
+                        get_role(e).unwrap_or_default()
                     );
                 }
             }
@@ -1238,7 +1243,51 @@ pub unsafe fn menu_copy_item(pid: i32) -> Option<(AXUIElementRef, bool)> {
 }
 
 /// 对元素执行 AXPress（等于用户点了它）
-pub unsafe fn press(el: AXUIElementRef) -> bool {
+pub unsafe fn press(el: &CFType) -> bool {
     let action = CFString::new("AXPress");
-    AXUIElementPerformAction(el, action.as_concrete_TypeRef()) == 0
+    AXUIElementPerformAction(el.as_CFTypeRef() as _, action.as_concrete_TypeRef()) == 0
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use core_foundation::base::CFRetain;
+
+    #[test]
+    fn copied_values_release_on_success_error_and_early_return() {
+        let fixture = CFString::new(&"BeeK owned AX value fixture ".repeat(20));
+        let baseline = fixture.retain_count();
+        for error in [0, kAXErrorNoValue, kAXErrorCannotComplete] {
+            for _ in 0..1000 {
+                let query = || -> Option<()> {
+                    let raw_copy = unsafe { CFRetain(fixture.as_CFTypeRef()) };
+                    let _value = unsafe { owned_copy_result(error, raw_copy) }.ok()?;
+                    assert_eq!(fixture.retain_count(), baseline + 1);
+                    None?;
+                    Some(())
+                };
+                assert_eq!(query(), None);
+                assert_eq!(fixture.retain_count(), baseline);
+            }
+        }
+        assert!(unsafe { owned_copy_result(0, std::ptr::null()) }.is_err());
+    }
+
+    #[test]
+    fn retained_child_survives_parent_array_release() {
+        use core_foundation::array::CFArray;
+        let fixture = CFString::new(&"BeeK AX child fixture ".repeat(20));
+        let baseline = fixture.retain_count();
+        let child = {
+            let array = CFArray::from_CFTypes(&[fixture.clone()]);
+            let borrowed = unsafe {
+                CFArray::<*const c_void>::wrap_under_get_rule(array.as_CFTypeRef() as _)
+            };
+            unsafe { CFType::wrap_under_get_rule(*borrowed.get(0).unwrap()) }
+        };
+        assert_eq!(fixture.retain_count(), baseline + 1);
+        assert_eq!(unsafe { cfstring_to_string(&child) }.as_deref(), Some(fixture.to_string().as_str()));
+        drop(child);
+        assert_eq!(fixture.retain_count(), baseline);
+    }
 }

@@ -142,6 +142,16 @@ BEEK_MENU_DUMP=1 BEEK_APPCOPY_SELFTEST=1 /Applications/BeeK.app/Contents/MacOS/B
 BEEK_AX_WATCH=1 /Applications/BeeK.app/Contents/MacOS/BeeK
 ```
 
+监听默认 120 秒后退出，`BEEK_AX_WATCH_SECONDS` 可设为 1–3600 秒。
+排查长时间运行后的内存增长时，可用不读取用户文本的原生测试窗口复测：
+
+```bash
+cargo test --bin beek --lib
+python3 scripts/check_macos_memory.py
+# 可选：与修复前的版本对照
+python3 scripts/check_macos_memory.py --baseline-ref ae7713f
+```
+
 ## 权限
 
 取词依赖辅助功能权限。
@@ -278,7 +288,7 @@ CI 需要的 repo secrets（**值只能由仓库所有者添加**）：
 | `BEEK_APPCOPY_SELFTEST=1` | 验证「让应用自己交选区」两条路（AppleScript / 拷贝菜单项） |
 | `BEEK_MENU_DUMP=1` | 配合上一条，把目标应用的菜单结构打出来 |
 | `BEEK_AX_PROBE=1` + `BEEK_AX_PROBE_PID=<pid>` | 看某个应用的 AX 选区情况 |
-| `BEEK_AX_WATCH=1` | 装 CGEventTap，在用户划词的那一刻报告 AX 现场 |
+| `BEEK_AX_WATCH=1` | 装 CGEventTap，在用户划词的那一刻报告 AX 现场；默认 120 秒后退出，`BEEK_AX_WATCH_SECONDS` 可设为 1–3600 秒 |
 | `BEEK_UPDATE_CHECK=1` | 跑一次「检查更新」并打印结果 |
 | `BEEK_UPDATE_PREPARE=<zip 地址>` | 配合上一条，把「下载 → 解压」也跑一遍（不碰 /Applications） |
 | `BEEK_UPDATE_APPLY=1`（可用 `BEEK_UPDATE_SELFTEST_URL=<zip 地址>` 换源） | 端到端：检查 → 下载 → 解压 → 生成替换脚本 → 退出自己 |

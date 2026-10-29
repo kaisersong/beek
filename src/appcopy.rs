@@ -193,7 +193,7 @@ pub fn selected_text_via_app(pid: i32, bundle_id: &str) -> Outcome {
         Some((item, true)) => {
             let snap = clipboard::snapshot();
             let before = clipboard::change_count();
-            let pressed = unsafe { crate::ax::press(item) };
+            let pressed = unsafe { crate::ax::press(&item) };
             if !pressed {
                 eprintln!("[beek] 取词：AXPress 菜单项失败");
                 return Outcome::Unavailable;
@@ -242,6 +242,7 @@ pub fn frontmost_pid() -> Option<i32> {
 
 /// 取前台应用的 bundle id（AppleScript 分支用）
 pub fn frontmost_bundle_id() -> String {
+    let _pool = crate::macos_runtime::AutoreleasePool::new();
     unsafe {
         use cocoa::base::{id, nil};
         use objc::{class, msg_send, sel, sel_impl};

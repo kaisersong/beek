@@ -53,6 +53,7 @@ fn pasteboard() -> id {
 
 /// 读剪贴板里的字符串（没有字符串时返回 None）
 pub fn read_string() -> Option<String> {
+    let _pool = crate::macos_runtime::AutoreleasePool::new();
     unsafe {
         let pb = pasteboard();
         let v: id = msg_send![pb, stringForType: nsstr("public.utf8-plain-text")];
@@ -73,6 +74,7 @@ pub fn read_string() -> Option<String> {
 
 /// 写回字符串（还原剪贴板用）
 pub fn write_string(s: &str) {
+    let _pool = crate::macos_runtime::AutoreleasePool::new();
     unsafe {
         let pb = pasteboard();
         let _: () = msg_send![pb, clearContents];
@@ -81,11 +83,15 @@ pub fn write_string(s: &str) {
 }
 
 fn nsstr(s: &str) -> id {
-    unsafe { NSString::alloc(nil).init_str(s) }
+    unsafe {
+        let value = NSString::alloc(nil).init_str(s);
+        msg_send![value, autorelease]
+    }
 }
 
 /// 当前前台应用的 pid（给 CGEventPostToPid 用）
 pub fn frontmost_pid() -> Option<i32> {
+    let _pool = crate::macos_runtime::AutoreleasePool::new();
     unsafe {
         let ws: id = msg_send![class!(NSWorkspace), sharedWorkspace];
         let app: id = msg_send![ws, frontmostApplication];
@@ -150,6 +156,7 @@ fn wait_change(before: i64, budget_ms: u64) -> bool {
 pub struct Snapshot(Vec<Vec<(String, Vec<u8>)>>);
 
 pub fn snapshot() -> Option<Snapshot> {
+    let _pool = crate::macos_runtime::AutoreleasePool::new();
     unsafe {
         let pb = pasteboard();
         let items: id = msg_send![pb, pasteboardItems];
@@ -185,6 +192,7 @@ pub fn snapshot() -> Option<Snapshot> {
 
 /// 把快照整体写回剪贴板
 pub fn restore(snap: &Snapshot) {
+    let _pool = crate::macos_runtime::AutoreleasePool::new();
     unsafe {
         let pb = pasteboard();
         let _: () = msg_send![pb, clearContents];
@@ -204,6 +212,7 @@ pub fn restore(snap: &Snapshot) {
                 let _: () = msg_send![item, setData: data forType: nsstr(t)];
             }
             let _: () = msg_send![arr, addObject: item];
+            let _: () = msg_send![item, release];
         }
         let _: () = msg_send![pb, writeObjects: arr];
     }
@@ -229,6 +238,7 @@ pub fn is_self_inflicted(count: i64) -> bool {
 
 /// 清空剪贴板（复制前它是空的，还原时就应该还是空的）
 pub fn clear() {
+    let _pool = crate::macos_runtime::AutoreleasePool::new();
     unsafe {
         let pb = pasteboard();
         let _: () = msg_send![pb, clearContents];
@@ -249,6 +259,7 @@ unsafe fn cstring(v: id) -> String {
 /// 不能靠比较字符串 —— 如果 ⌘C 复制的是文件/图片（非文本内容），字符串读出来是空的，
 /// 会被误判成「没变化」而跳过还原，剪贴板照样被覆盖（实测踩过：截图粘不出来）。
 pub fn change_count() -> i64 {
+    let _pool = crate::macos_runtime::AutoreleasePool::new();
     unsafe {
         let pb = pasteboard();
         msg_send![pb, changeCount]
