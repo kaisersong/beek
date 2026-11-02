@@ -388,6 +388,10 @@ extern "C" fn open_key_settings(_this: &Object, _sel: Sel, _sender: id) {
     send_event(crate::UiEvent::OpenKeySettings);
 }
 
+extern "C" fn open_cache_settings(_this: &Object, _sel: Sel, _sender: id) {
+    send_event(crate::UiEvent::OpenCacheSettings);
+}
+
 extern "C" fn open_readme_key(_this: &Object, _sel: Sel, _sender: id) {
     open_readme_key_url();
 }
@@ -736,6 +740,7 @@ unsafe fn build_menu(cfg: &Config, handler: id) -> (id, id) {
 
     // 设置 API Key：弹出的对话框由主循环用 AppKit 的 NSAlert 呈现
     add_item(menu, "设置 API Key…", sel!(openKeySettings:), "", handler);
+    add_item(menu, "翻译缓存设置…", sel!(openCacheSettings:), "", handler);
 
     // 「如何获取 API Key…」：带一个圆圈 i 图标，点开 README 对应章节
     let help = add_item(menu, "如何获取 API Key…", sel!(openReadmeKey:), "", handler);
@@ -779,6 +784,7 @@ pub fn setup_status_item(cfg: &Config) {
         decl.add_method(sel!(toggleAutoUpdate:), toggle_auto_update as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(toggleCopyToPopup:), toggle_copy_to_popup as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(openKeySettings:), open_key_settings as extern "C" fn(&Object, Sel, id));
+        decl.add_method(sel!(openCacheSettings:), open_cache_settings as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(openReadmeKey:), open_readme_key as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(checkUpdate:), check_update as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(openAbout:), open_about as extern "C" fn(&Object, Sel, id));

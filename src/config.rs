@@ -48,6 +48,9 @@ pub struct Config {
     /// 退出 BeeK 时静默装上，或下次启动时生效。对应菜单里的「自动检查更新」。
     #[serde(default = "default_true")]
     pub auto_update: bool,
+    /// Process-local result cache; bounded independently of user-edited JSON.
+    #[serde(default)]
+    pub translation_cache: beek::core::translation_cache::CacheSettings,
     /// 各翻译服务的配置，键是服务名（见 ARK）
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
@@ -76,13 +79,22 @@ pub fn load() -> Config {
 }
 
 pub fn save(cfg: &Config) {
+    let _ = try_save(cfg);
+}
+
+fn try_save(cfg: &Config) -> Result<(), String> {
     let p = config_path();
     if let Some(dir) = p.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    if let Ok(json) = serde_json::to_string_pretty(cfg) {
-        let _ = std::fs::write(&p, json);
-    }
+    let json = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
+    std::fs::write(&p, json).map_err(|e| e.to_string())
+}
+
+pub fn save_cache_settings(settings: beek::core::translation_cache::CacheSettings) -> Result<(), String> {
+    let mut cfg = load();
+    cfg.translation_cache = settings.normalized();
+    try_save(&cfg)
 }
 
 /// 读-改-写。必须用它做局部修改：直接 `save(&Config { show_in_dock })` 会把
@@ -91,4 +103,26 @@ pub fn update(f: impl FnOnce(&mut Config)) {
     let mut cfg = load();
     f(&mut cfg);
     save(&cfg);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use beek::core::translation_cache::CacheSettings;
+
+    #[test]
+    fn cache_defaults_and_invalid_cache_fields_preserve_existing_provider() {
+        for cache in ["null", r#"{"max_entries":"bad","ttl_minutes":1e100}"#, r#"{"max_entries":-4,"ttl_minutes":0}"#] {
+            let json = format!(r#"{{"providers":{{"ark":{{"api_key":"fictional-fixture","model":"fixture-model"}}}},"translation_cache":{cache}}}"#);
+            let mut cfg: Config = serde_json::from_str(&json).unwrap();
+            cfg.translation_cache = CacheSettings::from_input("64", "10").unwrap();
+            let saved = serde_json::to_string(&cfg).unwrap();
+            let loaded: Config = serde_json::from_str(&saved).unwrap();
+            assert_eq!(loaded.provider(ARK).api_key, "fictional-fixture");
+            assert_eq!(loaded.provider(ARK).model.as_deref(), Some("fixture-model"));
+            assert_eq!(loaded.translation_cache.max_entries, 64);
+        }
+        let old: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.translation_cache, CacheSettings::default());
+    }
 }

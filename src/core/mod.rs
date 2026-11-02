@@ -8,3 +8,4 @@ pub mod prompts;
 pub mod release;
 
 pub mod mac_selection;
+pub mod translation_cache;

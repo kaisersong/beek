@@ -14,7 +14,7 @@ mod translate;
 mod update;
 
 use ax::{is_url, SelBounds};
-use beek::core::mac_selection::{self, Anchor, SelectionGate};
+use beek::core::mac_selection::{self, Anchor, PresentationGate, SelectionGate};
 use gpui::*;
 use icons::IconKind;
 use std::sync::mpsc;
@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 // ---------- 事件 ----------
 enum UiEvent {
-    ShowIcon(SelBounds, String),
+    ShowIcon(SelBounds, String, u64),
     HideIcon,
     /// 点击图标：发起翻译。请求 id 由主循环分配，用于丢弃过期结果。
     StartTranslate(String, SelBounds),
@@ -35,9 +35,12 @@ enum UiEvent {
     /// 自检用：在主线程把弹窗挪到指定位置（AppKit 只能在主线程动窗口）
     DragTest(f64, f64),
     ClosePopup,
+    /// Bounded, synthetic popup/cache smoke test; assertions run on the main thread.
+    PopupCacheProbe { windows: usize, cached: bool, finish: bool },
     // ---- 菜单栏动作（菜单在主线程，但开户/发请求的活儿交给主循环）----
     /// 「设置 API Key…」
     OpenKeySettings,
+    OpenCacheSettings,
     /// 「关于 BeeK」
     OpenAbout,
     /// 「检查更新…」
@@ -1388,7 +1391,7 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
                                     source, anchor, b.x, b.y, b.w, b.h
                                 );
                                 icon_rect = Some(icon_rect_for(&b));
-                                let _ = tx.send(UiEvent::ShowIcon(b, last.clone()));
+                                let _ = tx.send(UiEvent::ShowIcon(b, last.clone(), press_seq));
                                 icon_shown = true;
                                 stable_since = None;
                             }
@@ -1520,7 +1523,7 @@ fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
         let b = SelBounds { x: 600.0, y: 400.0, w: 220.0, h: 20.0 };
         std::thread::sleep(Duration::from_secs(2));
         eprintln!("[自检] 注入模拟选区（屏幕坐标 600,400 220x20）→ 显示蜜蜂图标");
-        let _ = tx.send(UiEvent::ShowIcon(b, SAMPLE.to_string()));
+        let _ = tx.send(UiEvent::ShowIcon(b, SAMPLE.to_string(), 0));
 
         std::thread::sleep(Duration::from_secs(2));
         eprintln!("[自检] 模拟点击蜜蜂图标 → 发起翻译（弹窗应立即出现，内容流式填充）");
@@ -1619,7 +1622,7 @@ fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
         // 真实窗口：注入一个贴近屏幕底部的选区，看弹窗是否转到选区上方
         let bot = SelBounds { x: 600.0, y: 900.0, w: 220.0, h: 20.0 };
         eprintln!("[自检] 几何回归：注入贴近屏幕底部的选区（屏幕坐标 600,900 220x20）");
-        let _ = tx.send(UiEvent::ShowIcon(bot, SAMPLE.to_string()));
+        let _ = tx.send(UiEvent::ShowIcon(bot, SAMPLE.to_string(), mouse_track().lock().unwrap().press_seq + 1));
         std::thread::sleep(Duration::from_millis(400));
         let _ = tx.send(UiEvent::StartTranslate(SAMPLE.to_string(), bot));
         std::thread::sleep(Duration::from_secs(1));
@@ -1629,7 +1632,7 @@ fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
 
         // ---- 高度随内容增长 + 复制 ----
         // 用长文本：流式过程中应看到弹窗高度一段段变大，最后触发复制供外部校验
-        let _ = tx.send(UiEvent::ShowIcon(b, LONG_SAMPLE.to_string()));
+        let _ = tx.send(UiEvent::ShowIcon(b, LONG_SAMPLE.to_string(), mouse_track().lock().unwrap().press_seq + 1));
         std::thread::sleep(Duration::from_millis(300));
         let _ = tx.send(UiEvent::StartTranslate(LONG_SAMPLE.to_string(), b));
         std::thread::sleep(Duration::from_secs(4));
@@ -1740,6 +1743,45 @@ fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
     });
 }
 
+const POPUP_CACHE_SAMPLE: &str = "The quick brown fox jumps over the lazy dog.";
+
+/// No config or clipboard writes. One synthetic translation, then a cached replay.
+/// The smoke process exits after completion or a 65-second request deadline.
+fn spawn_popup_cache_selftest(tx: mpsc::Sender<UiEvent>) {
+    std::thread::spawn(move || {
+        let b = SelBounds { x: 600., y: 400., w: 220., h: 20. };
+        let press = mouse_track().lock().unwrap().press_seq;
+        let _ = tx.send(UiEvent::StartTranslate(POPUP_CACHE_SAMPLE.into(), b));
+        std::thread::sleep(Duration::from_millis(200));
+        let _ = tx.send(UiEvent::ShowIcon(b, POPUP_CACHE_SAMPLE.into(), press));
+        std::thread::sleep(Duration::from_secs(1));
+        let _ = tx.send(UiEvent::PopupCacheProbe { windows: 1, cached: false, finish: false });
+        let deadline = Instant::now() + Duration::from_secs(65);
+        while Instant::now() < deadline {
+            if translate::TranslationRequest::prepare(POPUP_CACHE_SAMPLE, false)
+                .ok().and_then(|r| r.cached()).is_some() {
+                // Allow the completion event to reach the UI before replaying.
+                std::thread::sleep(Duration::from_millis(100));
+                // AX may report different text after the original selection settles.
+                // Discovery alone must not dismiss the completed translation.
+                let _ = tx.send(UiEvent::ShowIcon(b, "Another public selection.".into(), press));
+                std::thread::sleep(Duration::from_secs(2));
+                let _ = tx.send(UiEvent::PopupCacheProbe { windows: 1, cached: true, finish: false });
+                let _ = tx.send(UiEvent::StartTranslate(POPUP_CACHE_SAMPLE.into(), b));
+                std::thread::sleep(Duration::from_millis(300));
+                let _ = tx.send(UiEvent::PopupCacheProbe { windows: 1, cached: true, finish: false });
+                let _ = tx.send(UiEvent::ClosePopup);
+                std::thread::sleep(Duration::from_millis(200));
+                let _ = tx.send(UiEvent::PopupCacheProbe { windows: 0, cached: true, finish: true });
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // Fails the cache assertion on the UI thread; does not leave a test process.
+        let _ = tx.send(UiEvent::PopupCacheProbe { windows: 1, cached: true, finish: true });
+    });
+}
+
 // ---------- 应用级菜单（主菜单 / Dock 右键菜单）----------
 //
 // 为什么用 gpui 的菜单 API 而不是自己建 NSMenu：macOS 上 Dock 右键菜单是靠
@@ -1757,6 +1799,7 @@ actions!(
         MenuOpenAbout,
         MenuCheckUpdate,
         MenuKeySettings,
+        MenuCacheSettings,
         MenuReadmeKey,
         MenuAccessibility,
         MenuRestart,
@@ -1780,6 +1823,10 @@ fn setup_app_menus(cx: &mut App, tx: mpsc::Sender<UiEvent>) {
     cx.on_action(move |_: &MenuKeySettings, _cx| {
         let _ = t3.send(UiEvent::OpenKeySettings);
     });
+    let cache_tx = tx.clone();
+    cx.on_action(move |_: &MenuCacheSettings, _cx| {
+        let _ = cache_tx.send(UiEvent::OpenCacheSettings);
+    });
     cx.on_action(|_: &MenuReadmeKey, _cx| menubar::open_readme_key_url());
     cx.on_action(|_: &MenuAccessibility, _cx| menubar::open_accessibility_panel());
     cx.on_action(|_: &MenuRestart, _cx| menubar::restart_now());
@@ -1792,6 +1839,7 @@ fn setup_app_menus(cx: &mut App, tx: mpsc::Sender<UiEvent>) {
             MenuItem::action("关于 BeeK", MenuOpenAbout),
             MenuItem::action("检查更新…", MenuCheckUpdate),
             MenuItem::action("设置 API Key…", MenuKeySettings),
+            MenuItem::action("翻译缓存设置…", MenuCacheSettings),
             MenuItem::action("如何获取 API Key…", MenuReadmeKey),
             MenuItem::separator(),
             MenuItem::action("重新启动 BeeK", MenuRestart),
@@ -1802,6 +1850,7 @@ fn setup_app_menus(cx: &mut App, tx: mpsc::Sender<UiEvent>) {
     // Dock 右键菜单：走 gpui 的 set_dock_menu，AppKit 会经 delegate 拿到它
     cx.set_dock_menu(vec![
         MenuItem::action("设置 API Key…", MenuKeySettings),
+        MenuItem::action("翻译缓存设置…", MenuCacheSettings),
         MenuItem::action("如何获取 API Key…", MenuReadmeKey),
         MenuItem::separator(),
         MenuItem::action("开启取词权限（辅助功能）…", MenuAccessibility),
@@ -1966,6 +2015,9 @@ fn main() {
         menubar::set_ui_sender(tx.clone());
         menubar::setup_status_item(&cfg);
         setup_app_menus(cx, tx.clone());
+        if std::env::var("BEEK_CACHE_SETTINGS_ON_START").is_ok() {
+            let _ = tx.send(UiEvent::OpenCacheSettings);
+        }
         // 编辑菜单要等 gpui 把主菜单建好之后再补上去
         menubar::install_edit_menu();
         // 上次退出时可能已经下载好更新（比如进程被强杀），这里补装一次：
@@ -2010,6 +2062,9 @@ fn main() {
         if selftest_mode {
             spawn_selftest(tx.clone(), cfg.show_in_dock);
         }
+        if std::env::var("BEEK_POPUP_CACHE_SELFTEST").is_ok() {
+            spawn_popup_cache_selftest(tx.clone());
+        }
         spawn_mouse_tracker();
         spawn_auto_update(tx.clone());
         spawn_ax_monitor(tx.clone());
@@ -2020,8 +2075,8 @@ fn main() {
             let mut popup_win: Option<WindowHandle<PopupView>> = None;
             // 请求 id 记账：只认「当前在飞行中 / 当前展示」的那一次翻译。
             // 迟到的结果一律丢弃，否则关闭弹窗后它会被再弹回来。
+            let mut presentation_gate = PresentationGate::default();
             let mut req_seq: u64 = 0;
-            let mut in_flight: Option<u64> = None;
             let mut shown: Option<u64> = None;
             // 已经写进弹窗的增量段数（自检取证用）
             let mut chunks_applied: u64 = 0;
@@ -2033,12 +2088,20 @@ fn main() {
             loop {
                 while let Ok(ev) = rx.try_recv() {
                     match ev {
-                        UiEvent::ShowIcon(b, text) => {
-                            // 新选区：旧弹窗关闭，作废旧翻译
-                            shown = None;
-                            in_flight = None;
-                            close_window(cx, &mut popup_win);
-                            popup_geom = None;
+                        UiEvent::PopupCacheProbe { windows, cached, finish } => {
+                            assert_eq!(menubar::popup_window_count(), windows, "popup visibility regression");
+                            if cached {
+                                assert!(translate::TranslationRequest::prepare(POPUP_CACHE_SAMPLE, false)
+                                    .ok().and_then(|r| r.cached()).is_some(), "completed translation was not cached");
+                            }
+                            eprintln!("[beek-smoke] PASS windows={} cache_checked={} finish={}", windows, cached, finish);
+                            if finish { let _ = cx.update(|cx| cx.quit()); }
+                        }
+                        UiEvent::ShowIcon(b, text, press) => {
+                            if !presentation_gate.accepts(press, &text) { continue; }
+                            // 发现候选选区只更新按钮。AX 的恢复/变化不能关掉当前译文；
+                            // 点击新按钮才会切换请求与结果窗口。
+                            close_window(cx, &mut icon_win);
                             if icon_win.is_none() {
                                 icon_win = open_icon_window(cx, b, text, tx.clone());
                                 // 记下窗口真实的 frame：算出来的位置和系统实际摆放的位置
@@ -2068,13 +2131,11 @@ fn main() {
                             // 用户点了我们自己的图标：那一下的坐标就在我們窗口上，
                             // AX 轮询拿着它会问到我们自己（死锁），先置宽限
                             ax::pulse_self_ui();
-                            if let Some(id) = in_flight {
-                                eprintln!("[beek] +{}ms 忽略重复点击（id={} 仍在翻译中）", ms(t0), id);
-                                continue;
-                            }
+                            presentation_gate.consume(mouse_track().lock().unwrap().press_seq, &text);
+                            // IconView 的 loading 标记已在 mouse-down 当刻抑制重复点击。
+                            // 另一个新按钮的明确点击可以切换仍在输出中的翻译。
                             req_seq += 1;
                             let id = req_seq;
-                            in_flight = Some(id);
                             shown = Some(id);
                             chunks_applied = 0;
                             close_window(cx, &mut icon_win);
@@ -2089,17 +2150,28 @@ fn main() {
                             if word.is_some() {
                                 eprintln!("[beek] +{}ms 判定为单个词，走词典详解：{:?}", ms(t0), text);
                             }
-                            // 关键：先开弹窗再等网络，用户点完立刻就有东西出来
-                            let opened =
-                                open_popup_window(cx, PopupContent::Loading, b, word.clone());
+                            let request = translate::TranslationRequest::prepare(&text, word.is_some());
+                            let cached = request.as_ref().ok().and_then(|r| r.cached());
+                            let content = match (&request, &cached) {
+                                (_, Some(result)) => PopupContent::Result(result.clone()),
+                                (Err(error), _) => PopupContent::Error(error.clone()),
+                                _ => PopupContent::Loading,
+                            };
+                            // 缓存命中时第一帧就是完整正文，无需创建网络线程。
+                            let opened = open_popup_window(cx, content, b, word.clone());
                             if let Some((w, geom)) = opened {
-                                // 立刻按内容量一次高度（此时正文是「翻译中…」）
+                                // 立刻按当前内容量高度（缓存结果或「翻译中…」）
                                 popup_geom = Some(sync_popup_geometry(cx, &w, geom));
                                 popup_win = Some(w);
                             }
                             // 忽略「开弹窗那一刻还按着的鼠标」，否则点图标的那一下会立刻把它关掉
                             prev_buttons = None;
                             eprintln!("[beek] +{}ms 点击图标 → 弹窗立即显示（id={}）", ms(t0), id);
+                            if cached.is_some() || request.is_err() {
+                                eprintln!("[beek] 翻译直接展示：cache_hit={}", cached.is_some());
+                                continue;
+                            }
+                            let request = request.unwrap();
                             let tx2 = tx.clone();
                             std::thread::spawn(move || {
                                 let started = Instant::now();
@@ -2110,11 +2182,7 @@ fn main() {
                                     }
                                     let _ = tx2.send(UiEvent::TranslateChunk(id, chunk.to_string()));
                                 };
-                                let result = if word.is_some() {
-                                    translate::explain_stream(&text, &mut on_chunk)
-                                } else {
-                                    translate::translate_stream(&text, &mut on_chunk)
-                                };
+                                let result = request.stream(&mut on_chunk);
                                 let _ = tx2.send(UiEvent::TranslateDone(id, result));
                                 eprintln!(
                                     "[beek] +{}ms 翻译线程结束（id={}，首字 {}ms，总 {}ms）",
@@ -2152,9 +2220,6 @@ fn main() {
                             }
                         }
                         UiEvent::TranslateDone(id, result) => {
-                            if in_flight == Some(id) {
-                                in_flight = None;
-                            }
                             if Some(id) != shown {
                                 eprintln!("[beek] +{}ms 丢弃过期翻译结果（id={}）", ms(t0), id);
                                 continue;
@@ -2220,6 +2285,15 @@ fn main() {
                                 ok
                             );
                             menubar::dump_windows("自检：真实拖动之后（期望 x=520、frame 上沿=700）");
+                        }
+                        UiEvent::OpenCacheSettings => {
+                            let current = config::load().translation_cache;
+                            if let Some(settings) = dialogs::cache_settings_dialog(current) {
+                                match config::save_cache_settings(settings) {
+                                    Ok(()) => translate::configure_cache(settings),
+                                    Err(error) => { dialogs::alert("缓存设置未保存", &error, &["好"]); }
+                                }
+                            }
                         }
                         UiEvent::OpenKeySettings => {
                             // AppKit 对话框只能在主线程弹，这里就是主线程
@@ -2458,7 +2532,6 @@ fn main() {
                         UiEvent::ClosePopup => {
                             let was = shown.take();
                             // 作废在飞行中的翻译：关闭之后不再被迟到的结果弹回来
-                            in_flight = None;
                             close_window(cx, &mut popup_win);
                             popup_geom = None;
                             eprintln!(

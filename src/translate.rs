@@ -12,6 +12,96 @@ use beek::core::prompts::{translate_prompt,explain_prompt};
 //   translate_*  选中一段话 → 只出译文
 //   explain_*    选中单个词 → 词典式详解（首行是读音，其余是词性/释义/例句/搭配）
 use serde::{Deserialize, Serialize};
+use beek::core::translation_cache::{CacheSettings, TranslationCache};
+use sha2::{Digest, Sha256};
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
+
+static CACHE: OnceLock<Mutex<TranslationCache>> = OnceLock::new();
+fn cache() -> &'static Mutex<TranslationCache> {
+    CACHE.get_or_init(|| Mutex::new(TranslationCache::default()))
+}
+
+pub fn configure_cache(settings: CacheSettings) {
+    cache().lock().unwrap_or_else(|e| e.into_inner()).apply_settings(settings, Instant::now());
+}
+
+/// Immutable request identity: the cache and HTTP request use the same settings.
+/// Never log this object; it contains the credential for the request.
+pub struct TranslationRequest {
+    prompt: String,
+    endpoint: String,
+    model: String,
+    key: String,
+    cache_key: [u8; 32],
+    cache_settings: fn() -> CacheSettings,
+}
+
+impl TranslationRequest {
+    fn new(prompt: String, endpoint: String, model: String, key: String) -> Self {
+        let mut digest = Sha256::new();
+        for field in [&prompt, &endpoint, &model, &key] {
+            digest.update((field.len() as u64).to_le_bytes());
+            digest.update(field.as_bytes());
+        }
+        Self { prompt, endpoint, model, key, cache_key: digest.finalize().into(), cache_settings: || crate::config::load().translation_cache }
+    }
+
+    pub fn prepare(text: &str, explain: bool) -> Result<Self, String> {
+        let cfg = crate::config::load().provider(PROVIDER);
+        let key = if cfg.api_key.trim().is_empty() {
+            std::env::var("BEEK_ARK_KEY").unwrap_or_default().trim().to_owned()
+        } else { cfg.api_key.trim().to_owned() };
+        if key.is_empty() {
+            return Err("未配置 API Key：点菜单栏 BeeK →「设置 API Key…」，或设置环境变量 BEEK_ARK_KEY".into());
+        }
+        Ok(Self::new(
+            if explain { explain_prompt(text) } else { translate_prompt(text) },
+            cfg.base_url.filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_owned()).unwrap_or_else(|| ARK_URL.into()),
+            cfg.model.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| DEFAULT_MODEL.into()),
+            key,
+        ))
+    }
+
+    pub fn cached(&self) -> Option<String> {
+        let mut cache = cache().lock().unwrap_or_else(|e| e.into_inner());
+        let settings = (self.cache_settings)();
+        let now = Instant::now();
+        cache.apply_settings(settings, now);
+        cache.get(&self.cache_key, now)
+    }
+
+    fn start(&self, stream: bool) -> Result<reqwest::blocking::Response, String> {
+        let resp = client()?.post(&self.endpoint)
+            .bearer_auth(&self.key)
+            .json(&Req {
+                model: self.model.clone(),
+                messages: vec![Msg { role: "user".into(), content: self.prompt.clone() }],
+                stream,
+                thinking: Thinking { kind: "disabled" },
+            }).send().map_err(|e| format!("请求失败：{}", e))?;
+        if !resp.status().is_success() {
+            let code = resp.status();
+            let body: String = resp.text().unwrap_or_default().chars().take(200).collect();
+            return Err(format!("HTTP {} {}", code, body));
+        }
+        Ok(resp)
+    }
+
+    pub fn stream(&self, mut on_chunk: impl FnMut(&str)) -> Result<String, String> {
+        if let Some(result) = self.cached() {
+            on_chunk(&result);
+            return Ok(result);
+        }
+        let result = stream(self, on_chunk)?;
+        let mut cache = cache().lock().unwrap_or_else(|e| e.into_inner());
+        let settings = (self.cache_settings)();
+        let now = Instant::now();
+        cache.apply_settings(settings, now);
+        cache.insert(self.cache_key, result.clone(), now);
+        Ok(result)
+    }
+}
 
 const ARK_URL: &str = "https://ark.cn-beijing.volces.com/api/v3/chat/completions";
 /// 默认模型（可在「设置 API Key…」里改 providers.ark.model 覆盖）
@@ -38,7 +128,7 @@ struct Req {
 #[derive(Deserialize)]
 struct Delta { content: Option<String> }
 #[derive(Deserialize)]
-struct StreamChoice { delta: Delta }
+struct StreamChoice { delta: Delta, finish_reason: Option<String> }
 #[derive(Deserialize)]
 struct StreamChunk { choices: Vec<StreamChoice> }
 
@@ -50,16 +140,6 @@ struct Resp { choices: Vec<BlockChoice> }
 
 /// 选中的是不是「单个词」：没有空白、不太长、至少含一个字母（拉丁字母或汉字）。
 /// 选中单个词时给词典式详解（含读音），而不是只给一句译文。
-fn build_body(prompt: String, stream: bool) -> Req {
-    Req {
-        model: model(),
-        messages: vec![Msg { role: "user".into(), content: prompt }],
-        stream,
-        // 关掉思维链：这个模型默认会先“想”几秒，用户等的是译文而不是推理过程
-        thinking: Thinking { kind: "disabled" },
-    }
-}
-
 fn client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
@@ -67,64 +147,13 @@ fn client() -> Result<reqwest::blocking::Client, String> {
         .map_err(|e| e.to_string())
 }
 
-/// 生效的模型：配置里填了就用配置的，否则用内置默认
-fn model() -> String {
-    crate::config::load()
-        .provider(PROVIDER)
-        .model
-        .filter(|m| !m.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string())
-}
-
-/// 生效的 API Key：配置文件优先，环境变量兜底。
-///
-/// 两种情况都给：图形界面配的（菜单栏「设置 API Key…」→ config.json）
-/// 和命令行/LaunchAgent 配的（BEEK_ARK_KEY），谁方便用谁。
-fn api_key() -> Result<String, String> {
-    let from_config = crate::config::load().provider(PROVIDER).api_key;
-    if !from_config.trim().is_empty() {
-        return Ok(from_config.trim().to_string());
-    }
-    std::env::var("BEEK_ARK_KEY")
-        .map(|k| k.trim().to_string())
-        .ok()
-        .filter(|k| !k.is_empty())
-        .ok_or_else(|| {
-            "未配置 API Key：点菜单栏 BeeK →「设置 API Key…」，或设置环境变量 BEEK_ARK_KEY".to_string()
-        })
-}
-
-/// 生效的端点：配置里填了 base_url 就用它（可接任意 OpenAI 兼容服务），否则用方舟默认地址
-fn endpoint() -> String {
-    crate::config::load()
-        .provider(PROVIDER)
-        .base_url
-        .map(|u| u.trim().to_string())
-        .filter(|u| !u.is_empty())
-        .unwrap_or_else(|| ARK_URL.to_string())
-}
-
-fn start(prompt: String, stream: bool) -> Result<reqwest::blocking::Response, String> {
-    let key = api_key()?;
-    let resp = client()?
-        .post(endpoint())
-        .header("Authorization", format!("Bearer {}", key))
-        .json(&build_body(prompt, stream))
-        .send()
-        .map_err(|e| format!("请求失败：{}", e))?;
-    if !resp.status().is_success() {
-        let code = resp.status();
-        let body: String = resp.text().unwrap_or_default().chars().take(200).collect();
-        return Err(format!("HTTP {} {}", code, body));
-    }
-    Ok(resp)
-}
-
 /// 流式请求：每收到一段正文增量就回调一次 `on_chunk`，返回完整正文。
-fn stream(prompt: String, mut on_chunk: impl FnMut(&str)) -> Result<String, String> {
+fn stream(request: &TranslationRequest, mut on_chunk: impl FnMut(&str)) -> Result<String, String> {
     let debug = std::env::var("BEEK_DEBUG").is_ok();
     let t0 = std::time::Instant::now();
-    let resp = start(prompt, true)?;
+    let resp = request.start(true)?;
+    let mut done = false;
+    let mut finish_reason = None;
     if debug {
         eprintln!(
             "[beek] 流式响应：status={} http={:?} encoding={:?} len={:?}",
@@ -135,7 +164,6 @@ fn stream(prompt: String, mut on_chunk: impl FnMut(&str)) -> Result<String, Stri
         );
     }
     let mut full = String::new();
-    let mut first_line = String::new();
     let mut parsed_any = false;
     let mut raw_lines = 0usize;
     let mut bytes = 0usize;
@@ -163,12 +191,17 @@ fn stream(prompt: String, mut on_chunk: impl FnMut(&str)) -> Result<String, Stri
             continue;
         }
         if data == "[DONE]" {
+            done = true;
             break;
         }
         match serde_json::from_str::<StreamChunk>(data) {
             Ok(chunk) => {
                 parsed_any = true;
-                if let Some(t) = chunk.choices.into_iter().next().and_then(|c| c.delta.content) {
+                let choice = chunk.choices.into_iter().next();
+                if let Some(reason) = choice.as_ref().and_then(|c| c.finish_reason.as_ref()) {
+                    finish_reason = Some(reason.clone());
+                }
+                if let Some(t) = choice.and_then(|c| c.delta.content) {
                     if !t.is_empty() {
                         if first_content.is_none() {
                             first_content = Some(t0.elapsed().as_millis());
@@ -181,11 +214,7 @@ fn stream(prompt: String, mut on_chunk: impl FnMut(&str)) -> Result<String, Stri
                     }
                 }
             }
-            Err(e) => {
-                if !parsed_any {
-                    first_line = format!("{}（原始片段：{}）", e, data.chars().take(200).collect::<String>());
-                }
-            }
+            Err(_) => return Err("翻译流包含无效或错误事件，请重试".into()),
         }
     }
     if debug {
@@ -198,24 +227,30 @@ fn stream(prompt: String, mut on_chunk: impl FnMut(&str)) -> Result<String, Stri
             t0.elapsed().as_millis()
         );
     }
+    if finish_reason.as_deref().is_some_and(|r| r != "stop") {
+        return Err("翻译未完整结束，请重试".into());
+    }
+    if !done && finish_reason.as_deref() != Some("stop") {
+        return Err("翻译连接提前结束，请重试".into());
+    }
     if !full.trim().is_empty() {
         return Ok(full.trim().to_string());
     }
     if parsed_any {
         Err("空响应".to_string())
     } else {
-        Err(format!("解析流式响应失败：{}", first_line))
+        Err("解析流式响应失败".into())
     }
 }
 
 /// 流式翻译（整句/整段）：只出译文。
 pub fn translate_stream(text: &str, on_chunk: impl FnMut(&str)) -> Result<String, String> {
-    stream(translate_prompt(text), on_chunk)
+    TranslationRequest::prepare(text, false)?.stream(on_chunk)
 }
 
 /// 流式详解（单个词）：首行是「读音：…」，其余是词性/释义/例句/搭配。
 pub fn explain_stream(text: &str, on_chunk: impl FnMut(&str)) -> Result<String, String> {
-    stream(explain_prompt(text), on_chunk)
+    TranslationRequest::prepare(text, true)?.stream(on_chunk)
 }
 
 /// 从详解正文里拆出读音行：返回 (读音, 去掉读音行后的正文)。
@@ -224,7 +259,7 @@ pub fn explain_stream(text: &str, on_chunk: impl FnMut(&str)) -> Result<String, 
 /// 所以只有确认第一行后面已经换行时才算数，否则原样显示，避免半截内容闪一下。
 /// 非流式翻译：保留给自检对比，UI 不再使用。
 pub fn translate(text: &str) -> Result<String, String> {
-    let resp = start(translate_prompt(text), false)?;
+    let resp = TranslationRequest::prepare(text, false)?.start(false)?;
     let parsed: Resp = resp.json().map_err(|e| format!("解析响应失败：{}", e))?;
     parsed
         .choices
@@ -237,7 +272,7 @@ pub fn translate(text: &str) -> Result<String, String> {
 
 /// 非流式详解：保留给自检对比，UI 不再使用。
 pub fn explain(text: &str) -> Result<String, String> {
-    let resp = start(explain_prompt(text), false)?;
+    let resp = TranslationRequest::prepare(text, true)?.start(false)?;
     let parsed: Resp = resp.json().map_err(|e| format!("解析响应失败：{}", e))?;
     parsed
         .choices
@@ -246,4 +281,126 @@ pub fn explain(text: &str) -> Result<String, String> {
         .map(|c| c.message.content.trim().to_string())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| "空响应".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // These integration tests deliberately change the process-wide cache policy.
+    // Run them serially so the disable scenario cannot clear another test's result.
+    static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn fixture_request(prompt: String, endpoint: String, model: String, key: String) -> TranslationRequest {
+        let mut request = TranslationRequest::new(prompt, endpoint, model, key);
+        request.cache_settings = CacheSettings::default;
+        request
+    }
+
+    fn with_server(bodies: Vec<(&'static str, &'static str)>, test: impl FnOnce(String)) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let expected = bodies.len();
+        let worker = std::thread::spawn(move || {
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            let mut count = 0;
+            for (status, body) in bodies {
+                let mut socket = loop {
+                    match listener.accept() {
+                        Ok((socket, _)) => break socket,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "missing HTTP request");
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                        Err(e) => panic!("{e}"),
+                    }
+                };
+                // macOS accepted sockets inherit O_NONBLOCK from the listener.
+                socket.set_nonblocking(false).unwrap();
+                socket.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+                let mut data = Vec::new();
+                let mut buf = [0; 4096];
+                loop {
+                    let n = socket.read(&mut buf).unwrap();
+                    assert_ne!(n, 0);
+                    data.extend_from_slice(&buf[..n]);
+                    if let Some(end) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&data[..end]).to_lowercase();
+                        let length: usize = headers.lines().find_map(|l| l.strip_prefix("content-length: ")).unwrap().parse().unwrap();
+                        if data.len() >= end + 4 + length { break; }
+                    }
+                }
+                count += 1;
+                write!(socket, "HTTP/1.1 {status}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+            count
+        });
+        test(url);
+        assert_eq!(worker.join().unwrap(), expected);
+    }
+
+    const COMPLETE: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"测试译文\"}}]}\n\ndata: [DONE]\n\n";
+    const PARTIAL: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"半截\"}}]}\n\n";
+    const LIMITED: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"半截\"},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n";
+    const ERROR_AFTER_CONTENT: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"半截\"}}]}\n\ndata: {\"error\":\"fixture failure\"}\n\ndata: [DONE]\n\n";
+
+    #[test]
+    fn repeat_translation_reuses_completed_result_without_another_http_request() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        with_server(vec![("200 OK", COMPLETE)], |url| {
+            let request = fixture_request(translate_prompt("Public fixture."), url, "fixture-model".into(), "fixture-key".into());
+            let mut chunks = String::new();
+            assert_eq!(request.stream(|c| chunks.push_str(c)).unwrap(), "测试译文");
+            assert_eq!(chunks, "测试译文");
+            assert_eq!(request.cached().as_deref(), Some("测试译文"));
+            // The server has consumed its sole request; a second HTTP call would fail.
+            assert_eq!(request.stream(|_| {}).unwrap(), "测试译文");
+        });
+    }
+
+    #[test]
+    fn disabling_cache_during_a_request_prevents_late_result_insertion() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static DISABLED: AtomicBool = AtomicBool::new(false);
+        fn settings() -> CacheSettings {
+            if DISABLED.load(Ordering::SeqCst) {
+                CacheSettings::from_input("0", "30").unwrap()
+            } else { CacheSettings::default() }
+        }
+        with_server(vec![("200 OK", COMPLETE)], |url| {
+            let mut request = fixture_request(translate_prompt("Public late result."), url, "fixture-model".into(), "fixture-key".into());
+            request.cache_settings = settings;
+            assert_eq!(request.stream(|_| DISABLED.store(true, Ordering::SeqCst)).unwrap(), "测试译文");
+            assert!(request.cached().is_none());
+        });
+    }
+
+    #[test]
+    fn truncated_failed_and_limited_streams_are_not_cached_and_can_retry() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for failure in [("200 OK", PARTIAL), ("200 OK", LIMITED), ("200 OK", ERROR_AFTER_CONTENT), ("200 OK", "data: {\"error\":\"fixture failure\"}\n\ndata: [DONE]\n\n"), ("200 OK", "data: [DONE]\n\n"), ("500 Error", "fixture failure")] {
+            with_server(vec![failure, ("200 OK", COMPLETE)], |url| {
+                let request = fixture_request(translate_prompt("Public retry."), url, "fixture-model".into(), "fixture-key".into());
+                assert!(request.stream(|_| {}).is_err());
+                assert!(request.cached().is_none());
+                assert_eq!(request.stream(|_| {}).unwrap(), "测试译文");
+            });
+        }
+    }
+
+    #[test]
+    fn cache_identity_separates_prompt_mode_endpoint_model_and_account() {
+        let base = fixture_request(translate_prompt("word"), "url".into(), "model".into(), "key".into());
+        for other in [
+            fixture_request(explain_prompt("word"), "url".into(), "model".into(), "key".into()),
+            fixture_request(translate_prompt("Word"), "url".into(), "model".into(), "key".into()),
+            fixture_request(translate_prompt("word"), "other".into(), "model".into(), "key".into()),
+            fixture_request(translate_prompt("word"), "url".into(), "other".into(), "key".into()),
+            fixture_request(translate_prompt("word"), "url".into(), "model".into(), "other".into()),
+        ] { assert_ne!(base.cache_key, other.cache_key); }
+    }
 }

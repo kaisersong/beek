@@ -5,6 +5,8 @@
 pub struct SelectionGate {
     context: Option<((i32, u64), u64)>,
     blocked_text: Option<String>,
+    last_text: Option<String>,
+    awaiting_baseline: bool,
     invalid_gesture_press: Option<u64>,
 }
 
@@ -28,14 +30,32 @@ impl SelectionGate {
         }
         let gesture = gesture && self.invalid_gesture_press != Some(press);
         if self.context != Some((owner, press)) {
+            let same_owner = self.context.is_some_and(|(previous, _)| previous == owner);
+            self.blocked_text = text.map(str::to_owned).or_else(|| {
+                if same_owner {
+                    self.last_text.clone()
+                } else {
+                    None
+                }
+            });
+            self.last_text = self.blocked_text.clone();
+            self.awaiting_baseline = self.blocked_text.is_none();
             self.context = Some((owner, press));
-            self.blocked_text = text.map(str::to_owned);
             if !gesture {
+                return false;
+            }
+        }
+        if let Some(text) = text {
+            self.last_text = Some(text.to_owned());
+            if self.awaiting_baseline && !gesture {
+                self.blocked_text = Some(text.to_owned());
+                self.awaiting_baseline = false;
                 return false;
             }
         }
         if gesture {
             self.blocked_text = None;
+            self.awaiting_baseline = false;
             return text.is_some();
         }
         match text {
@@ -44,6 +64,24 @@ impl SelectionGate {
             None => false,
             Some(text) => self.blocked_text.as_deref() != Some(text),
         }
+    }
+}
+
+/// Fence delayed monitor events against the interaction consumed by translation.
+#[derive(Default)]
+pub struct PresentationGate {
+    consumed: Option<(u64, String)>,
+}
+
+impl PresentationGate {
+    pub fn consume(&mut self, press: u64, text: &str) {
+        self.consumed = Some((press, text.to_owned()));
+    }
+
+    pub fn accepts(&self, press: u64, text: &str) -> bool {
+        self.consumed.as_ref().is_none_or(|(consumed, previous)| {
+            press > *consumed || (press == *consumed && text != previous)
+        })
     }
 }
 
@@ -87,6 +125,38 @@ pub fn double_click(elapsed_ms: u128, previous: (f64, f64), current: (f64, f64))
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delayed_icons_cannot_replace_translation_but_new_selections_can() {
+        let mut gate = PresentationGate::default();
+        gate.consume(5, "selected");
+        assert!(!gate.accepts(4, "other old selection"));
+        assert!(!gate.accepts(5, "selected"));
+        assert!(gate.accepts(5, "keyboard change"));
+        assert!(gate.accepts(6, "selected"));
+    }
+
+    #[test]
+    fn clicking_bee_during_ax_grace_does_not_revive_the_selection() {
+        let mut gate = SelectionGate::default();
+        assert!(gate.allows((10, 1), 1, true, Some("selected")));
+        assert!(!gate.allows((10, 1), 2, false, None));
+        for _ in 0..20 {
+            assert!(!gate.allows((10, 1), 2, false, Some("selected")));
+        }
+        assert!(gate.allows((10, 1), 2, false, Some("keyboard change")));
+        assert!(gate.allows((10, 1), 3, true, Some("selected")));
+    }
+
+    #[test]
+    fn an_unknown_window_waits_for_its_first_text_baseline() {
+        let mut gate = SelectionGate::default();
+        assert!(!gate.allows((10, 1), 1, false, None));
+        assert!(!gate.allows((10, 1), 1, false, Some("retained")));
+        assert!(gate.allows((10, 1), 1, false, Some("keyboard change")));
+        assert!(!gate.allows((20, 1), 2, false, None));
+        assert!(!gate.allows((20, 1), 2, false, Some("other retained")));
+    }
 
     #[test]
     fn ordinary_dock_click_and_app_switch_do_not_reuse_old_selection() {

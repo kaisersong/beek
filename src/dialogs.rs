@@ -12,7 +12,11 @@ use objc::runtime::{NO, YES};
 use objc::{class, msg_send, sel, sel_impl};
 
 fn nsstr(s: &str) -> id {
-    unsafe { NSString::alloc(nil).init_str(s) }
+    unsafe {
+        let value = NSString::alloc(nil).init_str(s);
+        let _: id = msg_send![value, autorelease];
+        value
+    }
 }
 
 /// 自检模式：不真的弹窗、不阻塞，直接返回「第一个按钮」。
@@ -118,6 +122,59 @@ pub fn alert(title: &str, body: &str, buttons: &[&str]) -> usize {
 pub struct KeyInput {
     pub api_key: String,
     pub model: String,
+}
+
+pub fn cache_settings_dialog(settings: beek::core::translation_cache::CacheSettings)
+    -> Option<beek::core::translation_cache::CacheSettings> {
+    use beek::core::translation_cache::{CacheSettings, MAX_ENTRIES, MAX_TTL_MINUTES};
+    let mut entries = settings.max_entries.to_string();
+    let mut minutes = settings.ttl_minutes.to_string();
+    let mut error = String::new();
+    loop {
+        let _pool = crate::macos_runtime::AutoreleasePool::new();
+        let (response, next_entries, next_minutes) = unsafe {
+            let prev = enter_dialog_context();
+            let view: id = msg_send![class!(NSView), alloc];
+            let view: id = msg_send![view, initWithFrame: NSRect::new(NSPoint::new(0., 0.), NSSize::new(420., 96.))];
+            let entries_label = label(&format!("缓存条数（0–{}，0 表示关闭）", MAX_ENTRIES), NSRect::new(NSPoint::new(0., 72.), NSSize::new(420., 16.)));
+            let entries_field = field(&entries, "128", NSRect::new(NSPoint::new(0., 46.), NSSize::new(420., 24.)));
+            let minutes_label = label(&format!("有效时间（分钟，0–{}，0 表示关闭）", MAX_TTL_MINUTES), NSRect::new(NSPoint::new(0., 26.), NSSize::new(420., 16.)));
+            let minutes_field = field(&minutes, "30", NSRect::new(NSPoint::new(0., 0.), NSSize::new(420., 24.)));
+            let _: () = msg_send![entries_field, setIdentifier: nsstr("beek-cache-max-entries")];
+            let _: () = msg_send![minutes_field, setIdentifier: nsstr("beek-cache-ttl-minutes")];
+            for child in [entries_label, entries_field, minutes_label, minutes_field] {
+                let _: () = msg_send![view, addSubview: child];
+            }
+            let alert: id = msg_send![class!(NSAlert), new];
+            let _: () = msg_send![alert, setMessageText: nsstr("翻译缓存设置")];
+            let body = if error.is_empty() {
+                "相同内容优先复用已完成的翻译，不再调用模型。\n缓存仅保留在内存，最多 2MiB，退出后清空。\n保存后立即生效。".to_owned()
+            } else { error.clone() };
+            let _: () = msg_send![alert, setInformativeText: nsstr(&body)];
+            let _: () = msg_send![alert, setAccessoryView: view];
+            let _: id = msg_send![alert, addButtonWithTitle: nsstr("保存")];
+            let _: id = msg_send![alert, addButtonWithTitle: nsstr("取消")];
+            let window: id = msg_send![alert, window];
+            let _: () = msg_send![window, makeFirstResponder: entries_field];
+            let response: NSInteger = msg_send![alert, runModal];
+            let next_entries = nsstring_value(msg_send![entries_field, stringValue]);
+            let next_minutes = nsstring_value(msg_send![minutes_field, stringValue]);
+            let _: () = msg_send![alert, release];
+            let _: () = msg_send![view, release];
+            for child in [entries_label, entries_field, minutes_label, minutes_field] {
+                let _: () = msg_send![child, release];
+            }
+            leave_dialog_context(prev);
+            (response, next_entries, next_minutes)
+        };
+        if response != 1000 { return None; }
+        entries = next_entries;
+        minutes = next_minutes;
+        match CacheSettings::from_input(&entries, &minutes) {
+            Ok(settings) => return Some(settings),
+            Err(message) => error = message,
+        }
+    }
 }
 
 fn label(text: &str, frame: NSRect) -> id {
