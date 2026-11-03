@@ -79,7 +79,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: macOS selection regression tests
-        run: cargo test --locked --all-targets
+        run: |
+          python3 -m unittest discover -s tests/macos -v
+          cargo test --locked --all-targets
 
       - name: 检查 secrets（缺了就明确失败，别默默出一个 ad-hoc 包）
         env:
