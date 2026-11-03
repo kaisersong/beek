@@ -2,7 +2,7 @@
 
 A lightweight selection translator for macOS and Windows.
 
-The **1.1.0 macOS candidate** introduces a new guided setup, Chinese/English app language, and selectable translation targets. This documents the current local/source candidate; it is not a claim that 1.1.0 has been publicly released.
+**BeeK 1.1.0 for macOS** introduces a new guided setup, Chinese/English app language, and selectable translation targets. Windows receives selection reliability fixes in this version; its settings and translation flow remain separate.
 
 Select text in another app, click the floating bee, and read its translation. BeeK can stream results with Doubao and show dictionary explanations for individual words.
 
