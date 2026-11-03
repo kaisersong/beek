@@ -1,60 +1,42 @@
 # <img src="resources/icons/BeeK-app-256.png" width="40" height="40" alt="BeeK 图标"> BeeK
 
-轻量 AI 划词翻译工具，支持 macOS 和 Windows 11 x64。
+世界很大，理解很轻。
+
+在其他应用里选中文字，点一下小蜜蜂，译文就在身边。支持 macOS 和 Windows 11 x64。
 
 [English](README.en.md)
 
-1.1.0 在 macOS 增加四步首次使用引导、中英文界面和独立的目标语言选择。在菜单栏「翻译为」或引导最后一页选择简体中文、英文、日文、韩文、繁体中文、法文、德文、西班牙文；所有已接入引擎按所选语言构建请求，缓存按目标语言隔离。LibreTranslate 仍需安装对应模型，MyMemory 仍需明确源语言。Windows 本次包含选区稳定性修复，新引导、多语言和多引擎设置目前仅在 macOS 提供。
-
-Windows 用户请先阅读[安装与使用说明](packaging/windows/README-WINDOWS.txt)；源码构建、实施状态和完整测试方案见下方开发文档入口。Windows 使用 UIA、独立 helper、Windows Credential Manager 和用户级安装；下文 AX、LaunchAgent、配置路径与安装说明针对 macOS。Windows 当前提供未签名公开预览版，尚未完成完整的多屏/混合 DPI 验收。
-
 [![最新版本](https://img.shields.io/github/v/release/kaisersong/beek?label=%E6%9C%80%E6%96%B0%E7%89%88)](https://github.com/kaisersong/beek/releases/latest)
-[![下载 DMG](https://img.shields.io/badge/%E2%AC%87%EF%B8%8F_%E4%B8%8B%E8%BD%BD_macOS_%E7%89%88-DMG-0B6E6E?style=flat-square)](https://github.com/kaisersong/beek/releases/latest/download/BeeK.dmg)
 
-**➡️ [下载最新版 BeeK.dmg](https://github.com/kaisersong/beek/releases/latest/download/BeeK.dmg)** —— 双击挂载，把 BeeK 拖进「应用程序」即可。
-**➡️ [下载 Windows 安装包](https://github.com/kaisersong/beek/releases/latest/download/BeeK-windows-x64-setup.exe)** · [Windows 便携版 ZIP](https://github.com/kaisersong/beek/releases/latest/download/BeeK-windows-x64.zip)
+**[下载 macOS 版](https://github.com/kaisersong/beek/releases/latest/download/BeeK.dmg)** · **[下载 Windows 安装包](https://github.com/kaisersong/beek/releases/latest/download/BeeK-windows-x64-setup.exe)** · [Windows 便携版](https://github.com/kaisersong/beek/releases/latest/download/BeeK-windows-x64.zip) · [所有版本](https://github.com/kaisersong/beek/releases)
 
-以上链接始终指向最新版。Windows 需要 Windows 11 x64，当前为未签名预览版，系统可能提示未知发布者；可用 Release 中的 SHA256 文件核验。运行安装包后从开始菜单打开 BeeK；便携版请解压整个目录后运行 `beek.exe`，保留同目录的 `beek-selection-host.exe`。
+<p align="center">
+  <img src="resources/screenshots/onboarding-welcome-zh.png" width="960" alt="BeeK macOS 欢迎页：世界很大，理解很轻。右侧展示划词翻译卡片，左下方为开始体验按钮。">
+</p>
 
-选中文本 → 出现小蜜蜂图标 → 点击后翻译 → 弹窗显示结果。菜单栏常驻，由 LaunchAgent 托管。
+**1.1.1 已发布**：全新四步引导、中英文界面、8种翻译目标语言、多服务切换与统一结果缓存；修复更新菜单、语言子菜单及 Dock 显示状态问题。[查看更新说明](https://github.com/kaisersong/beek/releases/tag/v1.1.1)
 
-## 开发文档
+| 功能 | macOS | Windows 11 x64 |
+| --- | --- | --- |
+| 选中文字 → 点击蜜蜂 → 翻译 | 支持 | 支持 |
+| 豆包翻译、单词详解 | 支持 | 支持 |
+| 新引导、中英文界面、目标语言切换 | 支持 | 尚未提供 |
+| 多翻译服务、近期结果缓存及设置 | 支持 | 尚未提供 |
+| 分发 | Developer ID 签名并公证 | 未签名公开预览 |
 
-`docs` 按 xiaok 的方式链接到同级文档仓库的 `mydocs/beek/`。设计、评审与故障记录在 mydocs 维护；单独检出代码仍可构建和打包，阅读内部文档需要同时检出 mydocs。
+Windows 安装后从开始菜单打开 BeeK；便携版请完整解压，保留 `beek.exe` 同目录的 `beek-selection-host.exe`。系统可能显示未知发布者提示，可核对 Release 的 SHA256 文件。完整多屏 / 混合 DPI 验收仍待完成。[Windows 安装与使用说明](packaging/windows/README-WINDOWS.txt)
 
-- [文档索引](docs/README.md)
-- [系统设计与平台边界](docs/design/system-design.md)
-- [原生资源与后台任务规则](docs/reliability/native-resource-lifecycle.md)
-- [2026-10-29 内存泄漏复盘](docs/reliability/2026-10-29-macos-native-memory-leak.md)
-- Windows：[构建与测试](docs/windows/build-and-test.md)、[实施状态](docs/windows/implementation-status.md)、[完整测试方案](docs/windows/windows-test-plan.md)
-
-## 图标
-
-下面是 app 实际在用的图标（`resources/icons/` 里就是这些文件，不是另画的示意图）。
-菜单栏和菜单项的图标是 template 图（纯黑 + alpha，由系统按明暗自动反色），
-所以每种给两张：黑的那张跟着浅色主题，白的那张跟着深色主题。
-
-- **应用图标**（Dock / Finder / 关于窗口）：<img src="resources/icons/BeeK-app-256.png" width="56" alt="BeeK 应用图标"> — `BeeK.icns`
-- **菜单栏图标**：<picture><source media="(prefers-color-scheme: dark)" srcset="resources/icons/BeeKMenuBarTemplate-white@2x.png"><img src="resources/icons/BeeKMenuBarTemplate@2x.png" width="22" alt="菜单栏小蜜蜂"></picture> — `BeeKMenuBarTemplate@2x.png`
-- **划词后出现在选区旁的小蜜蜂**：<img src="resources/icons/beek-selection-default-32@2x.png" width="28" alt="划词小蜜蜂"> — `beek-selection-{default,hover,pressed,disabled}-32@2x.png`
-- **弹窗标题行的喇叭**（点它朗读单词）：<img src="resources/icons/beek-speak-outline@4x.png" width="18" alt="朗读图标"> — `beek-speak-outline@4x.png`
-- **菜单「如何获取 API Key…」左侧的圆圈 i**：<picture><source media="(prefers-color-scheme: dark)" srcset="resources/icons/beek-circle-i-white@4x.png"><img src="resources/icons/beek-circle-i@4x.png" width="16" alt="圆圈 i 图标"></picture> — `beek-circle-i@4x.png`
-
-其中三个是脚本生成的，改图标时改脚本而不是描点补图：
-`gen_circle_i.py`（圆圈 i）、`gen_speak_outline.py`（喇叭）、
-`gen_template_white.py`（由 template 图生成上面那两张白色版本，供 README 用）。
-
-## 特性
+## 特性（macOS）
 
 - **取词优先走 AX**：默认只通过 macOS 辅助功能接口读选中文本，多数应用（备忘录、Chrome、终端、访达、云之家等）选中即出图标，不用按键、不碰剪贴板。
 - **AX 取不到时有两种兜底**（都在菜单里，可自行开关）：「剪贴板兜底取词」= 划词手势后 BeeK 自动模拟一次 ⌘C 去读（读完立即整体还原剪贴板，**默认开**）；「复制即弹按钮」= 你自己按 ⌘C 时在鼠标旁弹图标（**默认关** —— 它会在每次复制时弹，常复制的人会被打扰，只有 Safari、Muse、Grok Bot 这类应用才值得打开）。
 - **点击才翻译**：出现图标时不请求；点击图标才发请求。
-- **单个词给词典式详解**：选中的是单个词时，输出读音、词性与释义、例句、常见搭配。标题行有喇叭图标，点击用系统语音朗读该词。
+- **豆包支持词典式详解**：使用豆包 / OpenAI 兼容引擎且选中单个词时，输出读音、词性与释义、例句、常见搭配。标题行有喇叭图标，点击用系统语音朗读该词。
 - **弹窗可拖动**：按住卡片顶部拖动条可以移动弹窗。
 - **点外部关闭**：在弹窗外面按一下鼠标就关闭弹窗。
-- **Key 可配置**：菜单里配置；配置文件按服务（provider）分组，便于以后接第二个服务。
+- **服务可切换**：百度公共服务免 Key，也可保存自己的服务配置；各引擎配置独立保留。
 
-## 安装
+## 安装（macOS）
 
 ### 方式 A：下载 Release
 
@@ -80,7 +62,7 @@ sh scripts/package_app.sh
 
 ## 获取 API Key
 
-BeeK 通过火山引擎方舟（豆包 Ark）的 Chat Completions 接口翻译。使用前需要一个方舟 API Key。
+推荐使用豆包：支持流式翻译和单词详解，需要你自己的火山方舟 API Key，调用使用该账号额度。macOS 新用户也可先使用默认的百度公共服务，无需 Key；Windows 当前使用豆包设置。
 
 1. 打开方舟控制台：<https://console.volcengine.com/ark>。
 2. 完成实名认证。新账号需要这一步。
@@ -93,13 +75,13 @@ BeeK 通过火山引擎方舟（豆包 Ark）的 Chat Completions 接口翻译�
 
 官方文档：[获取 API Key 并配置](https://www.volcengine.com/docs/82379/1541594)。
 
-拿到 Key 后，点菜单栏的蜜蜂图标 → 「设置 API Key…」。菜单项「如何获取 API Key…」会打开本节的 GitHub 页面（锚点 `#获取-api-key`）。
+拿到 Key 后，点菜单栏的蜜蜂图标 → 「豆包 API Key…」。菜单项「如何获取 API Key…」会打开本节的 GitHub 页面（锚点 `#获取-api-key`）。
 
-## 首次使用引导（macOS 本地候选）
+## 首次使用引导（macOS）
 
-首次启动会打开三步引导：了解划词用法 → 添加模型服务 → 开启辅助功能并试译。重点推荐豆包：在火山方舟创建 API Key、开通模型并复制 Model ID / 接入点 ID，然后从引导直接填写并启用。也可先用免 Key 的百度公共服务，已有服务选择与凭据会保留。
+首次启动会打开四步引导：欢迎 → 了解划词用法 → 添加模型服务 → 开启辅助功能并试译。重点推荐豆包：在火山方舟创建 API Key、开通模型并复制 Model ID / 接入点 ID，然后从引导直接填写并启用。也可先用免 Key 的百度公共服务，已有服务选择与凭据会保留。
 
-引导中的“试译一句”只在点击后发送公开例句；重复试译命中缓存时直接显示“缓存命中”。完成或“稍后设置”后不再自动弹出，菜单栏、应用菜单及 Dock 的“使用引导…”可随时重开。关闭窗口但未完成时，下次启动仍可继续了解。缓存只在当前 BeeK 进程内保存，退出后清空；翻译卡片命中时也会标注“缓存”。
+引导中的“点击试译”只在点击后发送公开例句；重复试译命中缓存时直接显示“缓存命中”。完成或“稍后设置”后不再自动弹出，菜单栏、应用菜单及 Dock 的“使用引导…”可随时重开。关闭窗口但未完成时，下次启动仍可继续了解。缓存只在当前 BeeK 进程内保存，退出后清空；翻译卡片命中时也会标注“缓存”。
 
 ## 可切换翻译服务（macOS）
 
@@ -112,18 +94,28 @@ BeeK 通过火山引擎方舟（豆包 Ark）的 Chat Completions 接口翻译�
 
 服务就绪后填写 `http://127.0.0.1:5000/translate`，默认不需要 Key。先用说明中的公开短句验证，再保存启用。BeeK 本身不会自动安装模型或启动服务。
 
-## 配置
+## 语言与缓存（macOS）
 
-Key 有两种配置方式，配置文件优先：
+- 菜单「翻译为：…」独立选择简体中文、英文、日文、韩文、繁体中文、法文、德文或西班牙文；默认简体中文。所有已接入引擎按所选目标发起请求。LibreTranslate 需安装对应语言模型，MyMemory 需明确源语言。
+- 菜单「界面语言：…」选择跟随系统、简体中文或 English，只改变 BeeK 界面；不会改变翻译目标。引导页也有语言选择。
+- 「翻译缓存设置…」默认128条、30分钟；条数或时效设为0可关闭，最多1000条、24小时、总计2MiB。只缓存完整成功结果，按引擎、账号、请求设置和目标语言隔离；命中直接展示，退出 BeeK 后清空。
 
-1. 菜单「设置 API Key…」，写入 `~/Library/Application Support/BeeK/config.json`。**优先使用。**
+## 配置（macOS）
+
+以下为豆包配置方式，配置文件优先；其他服务在「翻译服务：…」中分别保存：
+
+1. 菜单「豆包 API Key…」，写入 `~/Library/Application Support/BeeK/config.json`。**优先使用。**
 2. 环境变量 `BEEK_ARK_KEY`。作为兜底。
 
-`config.json` 完整示例：
+`config.json` 豆包示例（请替换占位符，不要把真实 Key 提交到 Git）：
 
 ```json
 {
   "show_in_dock": false,
+  "translation_engine": "ark",
+  "translation_target": "zh-CN",
+  "ui_language": "system",
+  "translation_cache": { "max_entries": 128, "ttl_minutes": 30 },
   "providers": {
     "ark": {
       "api_key": "your-ark-api-key",
@@ -136,9 +128,10 @@ Key 有两种配置方式，配置文件优先：
 - `show_in_dock`：是否在 Dock 显示图标。菜单「在 Dock 中显示」改这个字段。
 - `providers.ark.api_key`：方舟 API Key。
 - `providers.ark.model`：可选。不填就用默认模型 `doubao-seed-2-0-mini-260428`。
+- `translation_target` 与 `ui_language` 分别控制翻译目标和界面语言；`translation_cache` 控制缓存条数与时效。
 - `providers.ark.base_url`：可选。不填就用方舟默认地址；填了就请求这个 OpenAI 兼容端点（例如自建网关）。
 
-## 取词方式
+## 取词方式（macOS）
 
 BeeK 按下面的顺序取选中文本，前一条拿不到才走后面。这套顺序参考了开源实现
 [SelectedTextKit](https://github.com/tisfeng/SelectedTextKit)（Easydict 的取词组件），
@@ -183,7 +176,7 @@ python3 scripts/check_macos_memory.py
 python3 scripts/check_macos_memory.py --baseline-ref ae7713f
 ```
 
-## 权限
+## 权限（macOS）
 
 取词依赖辅助功能权限。
 
@@ -207,23 +200,29 @@ open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibil
 
 菜单「检查更新…」：
 
-- 有新版本时，显示版本说明，可以点「下载并更新」。BeeK 下载 `BeeK-v<版本>.zip`，替换 `/Applications/BeeK.app`，然后重启。
+- 点击后立即显示检查进度，结果窗口不锁住菜单，也不改变 Dock 显示设置；重复点击不会重复发起手动检查。
+- 有新版本时显示说明，点「下载并更新」准备 `BeeK-v<版本>.zip`；下载完成后另点「立即更新」才退出并切换应用，然后重启。
 - 已是最新时，只提示当前版本。
 
 手动更新有两种方式：下载 zip 后替换 `/Applications/BeeK.app`；或者拉最新代码后运行 `sh scripts/package_app.sh`。
 
 更新后如果取词失效，按上一节重新勾选辅助功能。
 
-## 菜单
+## 菜单（macOS）
 
 | 菜单项 | 作用 |
 | --- | --- |
-| BeeK 划词翻译 v1.0.5 | 显示版本，不可点击 |
+| BeeK 划词翻译 v<版本> | 显示版本，不可点击 |
 | 开启取词权限（辅助功能）… | 打开系统的辅助功能面板 |
 | 开启自动化授权（控制浏览器）… | 打开系统的「自动化」面板。浏览器取词那条 AppleScript 路径第一次会问一次，**当时点了「不允许」就不会再弹**，只能来这里勾上；不勾也能取词（会走菜单拷贝 + 剪贴板兜底） |
 | 在 Dock 中显示 | 切换 Dock 图标，勾选项 |
-| 设置 API Key… | 配置翻译服务的 Key 与模型 |
-| 如何获取 API Key… | 打开本仓库 README 的「获取 API Key」一节。这一项左边是圆圈 i 图标，见上文「图标」一节 |
+| 豆包 API Key… | 配置豆包 / OpenAI 兼容服务的 Key、模型与地址 |
+| 使用引导… | 重新打开四步引导 |
+| 翻译服务：… | 选择服务并保存该服务的配置 |
+| 翻译为：… | 选择译文目标语言 |
+| 界面语言：… | 跟随系统，或切换简体中文 / English |
+| 翻译缓存设置… | 配置缓存条数、时效或关闭缓存 |
+| 如何获取 API Key… | 打开本仓库 README 的「获取 API Key」一节。这一项左边是圆圈 i 图标，见「图标」一节 |
 | 复制即弹按钮（自己按 ⌘C） | 勾选项，**默认不勾**。勾上后你自己按 ⌘C 时在鼠标旁弹出小蜜蜂（AX 已有选区时不弹） |
 | 剪贴板兜底取词 | 勾选项。AX 取不到选区时，BeeK 自动模拟一次 ⌘C 去读选中文本 |
 | 自动检查更新 | 勾选项，**默认勾**。启动 10 秒后检查一次、之后每 6 小时一次；后台下载完**不打断你**，只把下面那项改成「更新到 vX（退出后生效）」，退出 BeeK 时静默装上，下次启动即新版本 |
@@ -234,21 +233,44 @@ open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibil
 
 Dock 图标（菜单「在 Dock 中显示」打开后才有）：
 
-- **右键**：弹出同一套动作（设置 API Key / 如何获取 API Key / 取词权限 / 检查更新 / 关于 / 重新启动 / 退出）。
+- **右键**：弹出同一套动作（豆包 API Key / 翻译服务 / 如何获取 API Key / 取词权限 / 检查更新 / 关于 / 重新启动 / 退出）。
   这份菜单走的是 gpui 的 `set_dock_menu` —— macOS 是通过 `applicationDockMenu:` 这个委托方法要 Dock 菜单的，
   手写挂在 `NSApp.dockMenu` 上会被 gpui 自己的 delegate 挡住。
-- **左键**：这个 app 没有窗口，所以 macOS 发的是「重新打开」（`applicationShouldHandleReopen`）。
+- **左键**：macOS 发出「重新打开」（`applicationShouldHandleReopen`）。
   BeeK 的处理是把菜单栏那份菜单弹出来（等于点菜单栏图标），不会出现「点了没反应」。
-- 顶部菜单栏（app 激活时）：app 菜单（关于 / 检查更新 / 设置 API Key / … / 退出）+ 编辑菜单。
+- 顶部菜单栏（app 激活时）：app 菜单（关于 / 检查更新 / 豆包 API Key / … / 退出）+ 编辑菜单。
   「编辑」这一项是手搓的，因为 gpui 的 delegate 自己实现了 `copy:`/`paste:`，用 gpui 的菜单项
   会让动作发给 delegate 而不是文本框，对话框里的 ⌘V 就废了。
 
-弹对话框（关于 / 设置 API Key / 各类提示）时会**临时**把 app 切成 Regular（借一个 Dock 图标和
-正常菜单栏），框关掉后恢复原策略：模态框需要 app 处于激活状态 —— 不激活时 AppKit 会「请求
-用户注意」（Dock 图标跳），而 Accessory（关掉 Dock 图标）按定义没有菜单栏、被激活后菜单栏是灰的。
-这只改激活策略，不动 `config.json` 里的设置。
+更新进度和结果使用非模态窗口，保持用户的 Dock 显示设置。部分设置及关于对话框仍会临时激活应用，关闭后恢复原策略；不改写 `config.json` 的 Dock 偏好。
 
 版本号来自 `Cargo.toml` 的 `version`。
+
+## 开发文档
+
+`docs` 按 xiaok 的方式链接到同级文档仓库的 `mydocs/beek/`。设计、评审与故障记录在 mydocs 维护；单独检出代码仍可构建和打包，阅读内部文档需要同时检出 mydocs。
+
+- [文档索引](https://github.com/kaisersong/mydocs/blob/master/beek/README.md)
+- [系统设计与平台边界](https://github.com/kaisersong/mydocs/blob/master/beek/design/system-design.md)
+- [原生资源与后台任务规则](https://github.com/kaisersong/mydocs/blob/master/beek/reliability/native-resource-lifecycle.md)
+- [2026-10-29 内存泄漏复盘](https://github.com/kaisersong/mydocs/blob/master/beek/reliability/2026-10-29-macos-native-memory-leak.md)
+- Windows：[构建与测试](https://github.com/kaisersong/mydocs/blob/master/beek/windows/build-and-test.md)、[实施状态](https://github.com/kaisersong/mydocs/blob/master/beek/windows/implementation-status.md)、[完整测试方案](https://github.com/kaisersong/mydocs/blob/master/beek/windows/windows-test-plan.md)
+
+## 图标
+
+下面是 app 实际在用的图标（`resources/icons/` 里就是这些文件，不是另画的示意图）。
+菜单栏和菜单项的图标是 template 图（纯黑 + alpha，由系统按明暗自动反色），
+所以每种给两张：黑的那张跟着浅色主题，白的那张跟着深色主题。
+
+- **应用图标**（Dock / Finder / 关于窗口）：<img src="resources/icons/BeeK-app-256.png" width="56" alt="BeeK 应用图标"> — `BeeK.icns`
+- **菜单栏图标**：<picture><source media="(prefers-color-scheme: dark)" srcset="resources/icons/BeeKMenuBarTemplate-white@2x.png"><img src="resources/icons/BeeKMenuBarTemplate@2x.png" width="22" alt="菜单栏小蜜蜂"></picture> — `BeeKMenuBarTemplate@2x.png`
+- **划词后出现在选区旁的小蜜蜂**：<img src="resources/icons/beek-selection-default-32@2x.png" width="28" alt="划词小蜜蜂"> — `beek-selection-{default,hover,pressed,disabled}-32@2x.png`
+- **弹窗标题行的喇叭**（点它朗读单词）：<img src="resources/icons/beek-speak-outline@4x.png" width="18" alt="朗读图标"> — `beek-speak-outline@4x.png`
+- **菜单「如何获取 API Key…」左侧的圆圈 i**：<picture><source media="(prefers-color-scheme: dark)" srcset="resources/icons/beek-circle-i-white@4x.png"><img src="resources/icons/beek-circle-i@4x.png" width="16" alt="圆圈 i 图标"></picture> — `beek-circle-i@4x.png`
+
+其中三个是脚本生成的，改图标时改脚本而不是描点补图：
+`gen_circle_i.py`（圆圈 i）、`gen_speak_outline.py`（喇叭）、
+`gen_template_white.py`（由 template 图生成上面那两张白色版本，供 README 用）。
 
 ## 发布
 
@@ -266,7 +288,7 @@ Dock 图标（菜单「在 Dock 中显示」打开后才有）：
 CI 触发方式：
 
 - 手动：Actions → Release → Run workflow（`publish=false` 只构建 + 签名 + 公证，产物在 artifact 里，先验证再发）
-- 打 tag：`git tag v1.0.8 && git push origin v1.0.8` → 自动发布到 Release（先建草稿、传完资产再转正式）
+- 推送与 `Cargo.toml` 版本一致的 `v<版本>` 标签 → 自动发布到 Release（先建草稿、传完资产再转正式）
 
 CI 需要的 repo secrets（**值只能由仓库所有者添加**）：
 
@@ -293,15 +315,20 @@ CI 需要的 repo secrets（**值只能由仓库所有者添加**）：
 
 ## 架构
 
-- `src/main.rs` — GPUI 主入口：图标窗口、弹窗窗口、主循环
+- `src/main.rs` — 平台入口分发
+- `src/macos_main.rs` — macOS 图标窗口、翻译卡片与主循环
 - `src/ax.rs` — AX 取词：多层回退读取选中文本与选区矩形
 - `src/appcopy.rs` — 让目标应用自己交选区：浏览器 AppleScript、按下它自己的「拷贝」菜单项
-- `src/translate.rs` — 豆包 Ark 流式翻译；单词模式走词典式详解
+- `src/translate.rs` — 豆包流式翻译、多服务调度与统一缓存；单词详解由豆包 / OpenAI 兼容引擎提供
 - `src/menubar.rs` — 菜单栏状态项与菜单
 - `src/config.rs` — 配置持久化
 - `src/clipboard.rs` — 模拟 ⌘C、剪贴板整体备份/还原、剪贴板监听
 - `src/eventtap.rs` — CGEventTap 全局事件监听（划词时机、鼠标按键）
-- `src/dialogs.rs` — NSAlert 对话框（API Key、关于、各类提示）
+- `src/dialogs.rs` — 服务配置、缓存设置与关于对话框
+- `src/onboarding.rs` — 四步原生引导与公开例句试译
+- `src/update_ui.rs` — 非模态更新进度与结果
+- `src/core/translation_engine.rs` — 翻译服务协议
+- `src/core/localization.rs` — 中英文消息目录
 - `src/icons.rs` — 编译期内嵌图标素材
 - `src/update.rs` — 检查更新、下载与替换 App
 - `src/mouse.rs` — 全局鼠标状态，供拖动弹窗与「点外部关闭」使用
