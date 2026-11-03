@@ -1,0 +1,52 @@
+Local translation: LibreTranslate + Argos
+
+LibreTranslate provides the HTTP API and Argos provides local models. No chat agent is required. A self-hosted instance normally needs no API key. Initial installation downloads software/models; translation then runs locally. Speed depends on your machine and text length.
+
+Quick setup: copy the AI setup prompt into a terminal-capable assistant. Copying a prompt does not execute commands.
+
+With an existing working Docker installation:
+Check docker info first. Inspect and reuse an existing dedicated container rather than overwriting it.
+
+docker run -d --name beek-libretranslate \
+  -p 127.0.0.1:5000:5000 \
+  -e LT_LOAD_ONLY=en,zh \
+  -v beek-libretranslate-models:/home/libretranslate/.local \
+  libretranslate/libretranslate:v1.9.6
+
+docker logs --tail 80 -f beek-libretranslate
+
+Wait for model downloads and server readiness. Ctrl+C stops following logs, not the container.
+To start/stop later:
+docker start beek-libretranslate
+docker stop beek-libretranslate
+
+Without Docker (macOS / Linux):
+Use a separate Python 3.11 environment. Do not use sudo pip or overwrite system Python.
+
+python3.11 -m venv "$HOME/.local/share/beek-libretranslate/venv"
+"$HOME/.local/share/beek-libretranslate/venv/bin/python" -m pip install "libretranslate==1.9.6"
+"$HOME/.local/share/beek-libretranslate/venv/bin/libretranslate" --host 127.0.0.1 --port 5000 --load-only en,zh
+
+The server runs in the foreground; Ctrl+C stops it. Re-run the last command to start again. Configure a user-level service only if you want autostart.
+
+Verify from another terminal:
+curl --fail --max-time 10 http://127.0.0.1:5000/languages
+curl --fail --max-time 20 http://127.0.0.1:5000/translate \
+  -H 'Content-Type: application/json' \
+  -d '{"q":"Hello, world!","source":"auto","target":"zh","format":"text"}'
+
+Require a nonempty translatedText before enabling this service in BeeK.
+Endpoint: http://127.0.0.1:5000/translate
+API key: blank unless your own server requires one.
+Choose Translate to in BeeK to set the target language. For additional languages, load their models and verify the desired pair in /languages; not every installation contains every model. Traditional Chinese uses zt for LibreTranslate.
+
+Troubleshooting:
+- Connection refused: check the running server and port. If 5000 is occupied, update both the server/container mapping and BeeK URL.
+- Missing language: wait for model download and verify actual source/target support in /languages.
+- Timeout: finish initial loading, shorten the selection and check resources. BeeK's ordinary request timeout is 20 seconds.
+- Keep the server bound to 127.0.0.1. Models use disk space; stop the service when unused.
+
+Guide reviewed: 2026-11-03. These are instructions; BeeK does not install or execute them automatically.
+Official setup: https://docs.libretranslate.com/guides/installation/
+Official API: https://docs.libretranslate.com/guides/api_usage/
+Official images: https://hub.docker.com/r/libretranslate/libretranslate/tags

@@ -1,0 +1,55 @@
+本地翻译：LibreTranslate + Argos
+
+LibreTranslate 提供 HTTP 接口，Argos 提供本地翻译模型；不需要再安装聊天 Agent。自建实例默认无需 API Key。首次安装要联网下载软件和语言模型，准备完成后翻译在本机执行。速度取决于电脑和文本长度，首次请求可能较慢。
+
+快速方式：点击下方“复制 AI 安装提示词”，粘贴到能操作终端的 AI 助手（如小K），让它检查环境、安装并验证。复制本身不会执行命令。
+
+方式一：已有 Docker 时
+先启动 Docker Desktop，执行 docker info 确认可用。下面是一个专用容器；同名容器已存在时先检查，复用它，不要覆盖。
+
+docker run -d --name beek-libretranslate \
+  -p 127.0.0.1:5000:5000 \
+  -e LT_LOAD_ONLY=en,zh \
+  -v beek-libretranslate-models:/home/libretranslate/.local \
+  libretranslate/libretranslate:v1.9.6
+
+查看下载/启动进度：
+docker logs --tail 80 -f beek-libretranslate
+
+首次可能需要下载模型，先等日志显示服务就绪。关闭日志跟随用 Ctrl+C，不会停止容器。后续启动/停止：
+docker start beek-libretranslate
+docker stop beek-libretranslate
+
+方式二：独立 Python 环境（macOS / Linux）
+先准备可用的 Python 3.11。依赖因系统架构而异；若安装失败，将错误交给 AI 助手处理，不要用 sudo pip 或覆盖系统 Python。
+
+python3.11 -m venv "$HOME/.local/share/beek-libretranslate/venv"
+"$HOME/.local/share/beek-libretranslate/venv/bin/python" -m pip install "libretranslate==1.9.6"
+"$HOME/.local/share/beek-libretranslate/venv/bin/libretranslate" --host 127.0.0.1 --port 5000 --load-only en,zh
+
+这条启动命令在前台运行，保留终端；Ctrl+C 停止。后续只需再次执行最后一条命令。长期常驻可让 AI 助手配置用户级服务；官方建议长期运行使用 Docker 或 Gunicorn。
+
+验证（另开一个终端）
+先确认语言列表含 en 与 zh，再测试自动检测到中文的完整链路：
+
+curl --fail --max-time 10 http://127.0.0.1:5000/languages
+curl --fail --max-time 20 http://127.0.0.1:5000/translate \
+  -H 'Content-Type: application/json' \
+  -d '{"q":"Hello, world!","source":"auto","target":"zh","format":"text"}'
+
+收到非空 translatedText 后，在 BeeK → 翻译服务 → LibreTranslate / Argos 中填写：
+地址：http://127.0.0.1:5000/translate
+API Key：留空（自行启用了 Key 时填写自己的 Key）
+点击“保存并启用”，选一条公开短句检查译文。
+
+排错
+• 连接被拒绝：检查服务是否启动、端口是否一致。5000 被占用时用 5001，服务端口/容器映射和 BeeK 地址同时调整。
+• 找不到中文或翻译失败：检查 en→zh 语言模型是否下载完整；查看启动日志，不要只凭进程存在判断成功。
+• 其他语言：在 BeeK「翻译为」中选择目标语言；启动服务时把对应模型加入 load-only，并用 /languages 确认实际源语言的 targets 包含目标语言。繁体中文在 LibreTranslate 中使用 zt；没有对应模型时不能仅靠切换 BeeK 选项完成翻译。
+• 请求超时：等待初次加载完成、缩短选区，再观察本机资源。BeeK 普通服务请求超时为 20 秒。
+• 仅绑定 127.0.0.1，无需开放公网。模型缓存会占磁盘；不需要使用时停止服务即可。
+
+版本与说明核对：2026-11-02；以上命令是安装指南，BeeK 不会自动执行或安装模型。
+官方安装：https://docs.libretranslate.com/guides/installation/
+官方接口：https://docs.libretranslate.com/guides/api_usage/
+官方镜像：https://hub.docker.com/r/libretranslate/libretranslate/tags

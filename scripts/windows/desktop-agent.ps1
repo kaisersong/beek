@@ -31,6 +31,8 @@ public static class BeeKDesktop {
  [DllImport("user32.dll",EntryPoint="GetWindowLongPtrW")] static extern IntPtr GetWindowLongPtr(IntPtr h,int n);
  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+ [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+ [DllImport("user32.dll")] static extern bool AttachThreadInput(uint first,uint second,bool attach);
  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h,int n);
  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h,int n);
  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h,IntPtr after,int x,int y,int w,int height,uint flags);
@@ -42,15 +44,15 @@ public static class BeeKDesktop {
  [DllImport("user32.dll")] public static extern IntPtr GetKeyboardLayout(uint thread);
  [DllImport("user32.dll")] public static extern IntPtr LoadKeyboardLayout(string id,uint flags);
  [DllImport("user32.dll")] static extern IntPtr OpenInputDesktop(uint flags,bool inherit,uint access);
- [DllImport("user32.dll")] static extern bool SwitchDesktop(IntPtr desktop);
+ [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern bool GetUserObjectInformation(IntPtr desktop,int index,out int value,uint size,out uint needed);
  [DllImport("user32.dll")] static extern bool CloseDesktop(IntPtr desktop);
- public static bool Unlocked() { IntPtr d=OpenInputDesktop(0,false,0x101); if(d==IntPtr.Zero)return false; bool ok=SwitchDesktop(d); CloseDesktop(d); return ok; }
+ public static bool Unlocked() { IntPtr d=OpenInputDesktop(0,false,1); if(d==IntPtr.Zero)return false; try { int receiving;uint needed;return GetUserObjectInformation(d,6,out receiving,4,out needed)&&receiving!=0; } finally { CloseDesktop(d); } }
  public static WindowInfo[] Windows() {
   var all=new List<WindowInfo>();
   EnumWindows(delegate(IntPtr h,IntPtr p){ if(!IsWindowVisible(h))return true; uint pid;GetWindowThreadProcessId(h,out pid);var t=new StringBuilder(1024);var c=new StringBuilder(256);GetWindowText(h,t,t.Capacity);GetClassName(h,c,c.Capacity);Rect r;GetWindowRect(h,out r);all.Add(new WindowInfo{Hwnd=h.ToInt64(),Pid=pid,Title=t.ToString(),Class=c.ToString(),Bounds=r,Dpi=GetDpiForWindow(h),ExStyle=GetWindowLongPtr(h,-20).ToInt64()});return true; },IntPtr.Zero);
   return all.ToArray();
  }
- public static bool Activate(IntPtr h){ShowWindowAsync(h,9);return SetForegroundWindow(h);}
+ public static bool Activate(IntPtr h){ShowWindowAsync(h,9);if(SetForegroundWindow(h))return true;uint pid;uint target=GetWindowThreadProcessId(h,out pid);uint own=GetCurrentThreadId();bool attached=target!=0&&target!=own&&AttachThreadInput(own,target,true);try{return SetForegroundWindow(h);}finally{if(attached)AttachThreadInput(own,target,false);}}
  public static Gui Focus() { uint pid;uint thread=GetWindowThreadProcessId(GetForegroundWindow(),out pid);Gui g=new Gui();g.Size=(uint)Marshal.SizeOf(typeof(Gui));GetGUIThreadInfo(thread,ref g);return g; }
  static void Emit(Input i) { if(SendInput(1,new Input[]{i},Marshal.SizeOf(typeof(Input)))!=1)throw new InvalidOperationException("SendInput rejected"); }
  static void VKey(ushort vk,bool up){Input i=new Input();i.Type=1;i.U.K.Vk=vk;i.U.K.Flags=up?2u:0u;Emit(i);}
@@ -91,6 +93,9 @@ function Window-For([long]$Hwnd){
  return $w
 }
 function Require-Foreground([long]$Hwnd){$null=Window-For $Hwnd;if([BeeKDesktop]::GetForegroundWindow().ToInt64() -ne $Hwnd){throw 'target is not foreground'}}
+function Read-DesktopState {
+ return @{session_id=(Get-Process -Id $PID).SessionId;unlocked=[BeeKDesktop]::Unlocked();foreground=[BeeKDesktop]::GetForegroundWindow().ToInt64();focus=[BeeKDesktop]::Focus();windows=@([BeeKDesktop]::Windows()|Where-Object {($ownedPids.Contains([int]$_.Pid) -and $_.Class -ne 'Chrome_WidgetWin_1') -or $_.Title -match 'beek-g0-public-fixture|BeeK public selection fixture'})}
+}
 function Remember-Clipboard {if(-not $script:clipboardTouched){$script:savedClipboard=[Windows.Forms.Clipboard]::GetDataObject();$script:clipboardTouched=$true}}
 function Find-TrayIcon {
  $probe=New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty,'BeeK G0 probe')
@@ -118,7 +123,7 @@ try {
     if($request.id -notmatch '^[a-zA-Z0-9-]{1,80}$'){throw 'invalid request ID'}
     $value=$null
     switch($request.action){
-     'state' {$value=@{session_id=(Get-Process -Id $PID).SessionId;unlocked=[BeeKDesktop]::Unlocked();foreground=[BeeKDesktop]::GetForegroundWindow().ToInt64();focus=[BeeKDesktop]::Focus();windows=@([BeeKDesktop]::Windows()|Where-Object {($ownedPids.Contains([int]$_.Pid) -and $_.Class -ne 'Chrome_WidgetWin_1') -or $_.Title -match 'beek-g0-public-fixture|BeeK public selection fixture'})}}
+     'state' {$value=Read-DesktopState}
      'package-install' {
       $path=[IO.Path]::GetFullPath([string]$request.path);$target=[IO.Path]::GetFullPath([string]$request.directory)
       if(-not $path.StartsWith($Workspace+'\',[StringComparison]::OrdinalIgnoreCase) -or $path -notmatch 'BeeK-v[0-9.]+-windows-x64-setup\.exe$' -or -not $target.StartsWith($Workspace+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'installer must stay in this test workspace'}
@@ -160,7 +165,18 @@ try {
      }
      'activate' {$w=Window-For $request.hwnd;$value=[BeeKDesktop]::Activate([IntPtr]$w.Hwnd)}
      'move' {$w=Window-For $request.hwnd;$value=[BeeKDesktop]::SetWindowPos([IntPtr]$w.Hwnd,[IntPtr]::Zero,[int]$request.x,[int]$request.y,[int]$request.width,[int]$request.height,0x14)}
-     'click' {$w=Window-For $request.hwnd;$x=$w.Bounds.Left+[int]$request.x;$y=$w.Bounds.Top+[int]$request.y;if($x -lt $w.Bounds.Left -or $x -ge $w.Bounds.Right -or $y -lt $w.Bounds.Top -or $y -ge $w.Bounds.Bottom){throw 'click outside target'};$hold=if($request.PSObject.Properties.Name -contains 'hold_ms'){[int]$request.hold_ms}else{0};[BeeKDesktop]::ClickHeld($x,$y,$hold);$value=$true}
+     'click' {
+      $w=Window-For $request.hwnd;$x=$w.Bounds.Left+[int]$request.x;$y=$w.Bounds.Top+[int]$request.y;if($x -lt $w.Bounds.Left -or $x -ge $w.Bounds.Right -or $y -lt $w.Bounds.Top -or $y -ge $w.Bounds.Bottom){throw 'click outside target'}
+      $hold=if($request.PSObject.Properties.Name -contains 'hold_ms'){[int]$request.hold_ms}else{0}
+      $delays=@();if($request.PSObject.Properties.Name -contains 'observe_ms'){
+       $delays=@($request.observe_ms|ForEach-Object {[int]$_});if($delays.Count -lt 1 -or $delays.Count -gt 8){throw 'one to eight observation times required'}
+       $previous=-1;foreach($delay in $delays){if($delay -le $previous -or $delay -lt 0 -or $delay -gt 10000){throw 'observation times must increase within 0 to 10000ms'};$previous=$delay}
+      }
+      [BeeKDesktop]::ClickHeld($x,$y,$hold);$value=$true
+      if($delays.Count){
+       $clock=[Diagnostics.Stopwatch]::StartNew();$samples=@(foreach($delay in $delays){$remaining=$delay-$clock.ElapsedMilliseconds;if($remaining -gt 0){Start-Sleep -Milliseconds $remaining};$state=Read-DesktopState;@{requested_ms=$delay;elapsed_ms=$clock.ElapsedMilliseconds;state=$state}});$clock.Stop();$value=@{hold_ms=$hold;samples=$samples}
+      }
+     }
      'selection-gesture' {
       Require-Foreground $request.hwnd;$w=Window-For $request.hwnd
       if($w.Title -notmatch 'beek-g0-public-fixture|BeeK public selection fixture'){throw 'selection gesture requires a public fixture'}

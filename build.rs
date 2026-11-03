@@ -14,6 +14,7 @@ fn sources(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 fn main() {
+    println!("cargo:rerun-if-env-changed=BEEK_PUBLIC_TRANSLATE_URL");
     let mut files = vec![
         PathBuf::from("Cargo.toml"),
         PathBuf::from("Cargo.lock"),

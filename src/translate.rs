@@ -1,4 +1,6 @@
 pub use beek::core::prompts::{is_single_word,split_pron};
+use beek::core::prompts::{translate_prompt_for,explain_prompt_for};
+#[cfg(test)]
 use beek::core::prompts::{translate_prompt,explain_prompt};
 // 翻译模块 — 豆包 Ark API（流式 + 关闭思维链）
 //
@@ -13,6 +15,7 @@ use beek::core::prompts::{translate_prompt,explain_prompt};
 //   explain_*    选中单个词 → 词典式详解（首行是读音，其余是词性/释义/例句/搭配）
 use serde::{Deserialize, Serialize};
 use beek::core::translation_cache::{CacheSettings, TranslationCache};
+use beek::core::translation_engine::{self as engines, Engine, EngineConfig};
 use sha2::{Digest, Sha256};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -35,6 +38,10 @@ pub struct TranslationRequest {
     key: String,
     cache_key: [u8; 32],
     cache_settings: fn() -> CacheSettings,
+    engine: Engine,
+    engine_config: EngineConfig,
+    text: String,
+    dictionary: bool,
 }
 
 impl TranslationRequest {
@@ -44,24 +51,45 @@ impl TranslationRequest {
             digest.update((field.len() as u64).to_le_bytes());
             digest.update(field.as_bytes());
         }
-        Self { prompt, endpoint, model, key, cache_key: digest.finalize().into(), cache_settings: || crate::config::load().translation_cache }
+        Self { prompt, endpoint, model, key, cache_key: digest.finalize().into(), cache_settings: || crate::config::load().translation_cache, engine: Engine::Ark, engine_config: EngineConfig::default(), text: String::new(), dictionary: false }
     }
 
     pub fn prepare(text: &str, explain: bool) -> Result<Self, String> {
-        let cfg = crate::config::load().provider(PROVIDER);
-        let key = if cfg.api_key.trim().is_empty() {
-            std::env::var("BEEK_ARK_KEY").unwrap_or_default().trim().to_owned()
-        } else { cfg.api_key.trim().to_owned() };
-        if key.is_empty() {
-            return Err("未配置 API Key：点菜单栏 BeeK →「设置 API Key…」，或设置环境变量 BEEK_ARK_KEY".into());
-        }
-        Ok(Self::new(
-            if explain { explain_prompt(text) } else { translate_prompt(text) },
-            cfg.base_url.filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_owned()).unwrap_or_else(|| ARK_URL.into()),
-            cfg.model.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| DEFAULT_MODEL.into()),
-            key,
-        ))
+        Self::from_config(&crate::config::load(), text, explain)
     }
+
+    pub(crate) fn from_config(config: &crate::config::Config, text: &str, explain: bool) -> Result<Self, String> {
+        let engine = config.translation_engine;
+        let mut cfg = config.provider(engine.key());
+        cfg.target_language = config.translation_target;
+        if engine == Engine::Ark && cfg.api_key.trim().is_empty() {
+            cfg.api_key = std::env::var("BEEK_ARK_KEY").unwrap_or_default().trim().to_owned();
+        }
+        engines::validate(engine, &cfg)?;
+        let dictionary = engine == Engine::Ark && explain;
+        let prompt = if engine == Engine::Ark {
+            if dictionary { explain_prompt_for(text,config.translation_target) } else { translate_prompt_for(text,config.translation_target) }
+        } else { text.to_owned() };
+        let model = if engine == Engine::Ark {
+            cfg.model.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| DEFAULT_MODEL.into())
+        } else { engine.key().into() };
+        let mut request = Self::new(prompt, engines::endpoint(engine, &cfg), model, cfg.api_key.trim().to_owned());
+        let mut digest = Sha256::new();
+        digest.update(request.cache_key);
+        for value in [engine.key(), cfg.target_language.key(), &cfg.app_id, &cfg.region, &cfg.source_language, &cfg.email] {
+            digest.update((value.len() as u64).to_le_bytes()); digest.update(value.as_bytes());
+        }
+        request.cache_key = digest.finalize().into();
+        request.engine = engine;
+        request.engine_config = cfg;
+        request.text = text.to_owned();
+        request.dictionary = dictionary;
+        Ok(request)
+    }
+
+    pub fn engine_label(&self) -> &'static str { self.engine.label() }
+
+    pub fn is_dictionary(&self) -> bool { self.dictionary }
 
     pub fn cached(&self) -> Option<String> {
         let mut cache = cache().lock().unwrap_or_else(|e| e.into_inner());
@@ -79,7 +107,7 @@ impl TranslationRequest {
                 messages: vec![Msg { role: "user".into(), content: self.prompt.clone() }],
                 stream,
                 thinking: Thinking { kind: "disabled" },
-            }).send().map_err(|e| format!("请求失败：{}", e))?;
+            }).send().map_err(|e| format!("{}{}",beek::core::localization::tr("请求失败："),e))?;
         if !resp.status().is_success() {
             let code = resp.status();
             let body: String = resp.text().unwrap_or_default().chars().take(200).collect();
@@ -93,7 +121,11 @@ impl TranslationRequest {
             on_chunk(&result);
             return Ok(result);
         }
-        let result = stream(self, on_chunk)?;
+        let result = if self.engine == Engine::Ark { stream(self, on_chunk)? } else {
+            let result = engines::execute(self.engine, &self.engine_config, &self.text, &self.endpoint)?;
+            on_chunk(&result);
+            result
+        };
         let mut cache = cache().lock().unwrap_or_else(|e| e.into_inner());
         let settings = (self.cache_settings)();
         let now = Instant::now();
@@ -170,7 +202,7 @@ fn stream(request: &TranslationRequest, mut on_chunk: impl FnMut(&str)) -> Resul
     let mut first_raw: Option<u128> = None;
     let mut first_content: Option<u128> = None;
     for line in std::io::BufRead::lines(std::io::BufReader::new(resp)) {
-        let line = line.map_err(|e| format!("读取流失败：{}", e))?;
+        let line = line.map_err(|e| format!("{}{}",beek::core::localization::tr("读取流失败："),e))?;
         raw_lines += 1;
         bytes += line.len();
         if first_raw.is_none() {
@@ -259,8 +291,10 @@ pub fn explain_stream(text: &str, on_chunk: impl FnMut(&str)) -> Result<String, 
 /// 所以只有确认第一行后面已经换行时才算数，否则原样显示，避免半截内容闪一下。
 /// 非流式翻译：保留给自检对比，UI 不再使用。
 pub fn translate(text: &str) -> Result<String, String> {
-    let resp = TranslationRequest::prepare(text, false)?.start(false)?;
-    let parsed: Resp = resp.json().map_err(|e| format!("解析响应失败：{}", e))?;
+    let request = TranslationRequest::prepare(text, false)?;
+    if request.engine != Engine::Ark { return request.stream(|_| {}); }
+    let resp = request.start(false)?;
+    let parsed: Resp = resp.json().map_err(|e| format!("{}{}",beek::core::localization::tr("解析响应失败："),e))?;
     parsed
         .choices
         .into_iter()
@@ -272,8 +306,10 @@ pub fn translate(text: &str) -> Result<String, String> {
 
 /// 非流式详解：保留给自检对比，UI 不再使用。
 pub fn explain(text: &str) -> Result<String, String> {
-    let resp = TranslationRequest::prepare(text, true)?.start(false)?;
-    let parsed: Resp = resp.json().map_err(|e| format!("解析响应失败：{}", e))?;
+    let request = TranslationRequest::prepare(text, true)?;
+    if request.engine != Engine::Ark { return request.stream(|_| {}); }
+    let resp = request.start(false)?;
+    let parsed: Resp = resp.json().map_err(|e| format!("{}{}",beek::core::localization::tr("解析响应失败："),e))?;
     parsed
         .choices
         .into_iter()
@@ -329,7 +365,7 @@ mod tests {
                     data.extend_from_slice(&buf[..n]);
                     if let Some(end) = data.windows(4).position(|w| w == b"\r\n\r\n") {
                         let headers = String::from_utf8_lossy(&data[..end]).to_lowercase();
-                        let length: usize = headers.lines().find_map(|l| l.strip_prefix("content-length: ")).unwrap().parse().unwrap();
+                        let length: usize = headers.lines().find_map(|l| l.strip_prefix("content-length: ")).unwrap_or("0").parse().unwrap();
                         if data.len() >= end + 4 + length { break; }
                     }
                 }
@@ -359,6 +395,97 @@ mod tests {
             // The server has consumed its sole request; a second HTTP call would fail.
             assert_eq!(request.stream(|_| {}).unwrap(), "测试译文");
         });
+    }
+
+    #[test]
+    fn switching_engines_isolates_cache_and_preserves_the_in_flight_snapshot() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        with_server(vec![("200 OK", "{\"translatedText\":\"本地译文\"}")], |url| {
+            let mut cfg=crate::config::Config::default();
+            cfg.translation_engine=Engine::LibreTranslate;
+            cfg.set_provider("libretranslate",EngineConfig { base_url:Some(url),..Default::default() });
+            let mut local=TranslationRequest::from_config(&cfg,"Public selection.",true).unwrap();
+            local.cache_settings=CacheSettings::default;
+            assert!(!local.is_dictionary());
+            assert_eq!(local.prompt,"Public selection.");
+            assert_eq!(local.stream(|_|{}).unwrap(),"本地译文");
+            cfg.translation_engine=Engine::Azure;
+            cfg.set_provider("azure",EngineConfig { api_key:"azure-fixture".into(),region:"eastasia".into(),..Default::default() });
+            let mut azure=TranslationRequest::from_config(&cfg,"Public selection.",true).unwrap();
+            azure.cache_settings=CacheSettings::default;
+            assert_ne!(local.cache_key,azure.cache_key);
+            assert!(azure.cached().is_none());
+            assert_eq!(local.engine,Engine::LibreTranslate);
+            assert_eq!(local.stream(|_|{}).unwrap(),"本地译文"); // no second HTTP request
+            cfg.translation_engine=Engine::Unsupported;
+            assert!(TranslationRequest::from_config(&cfg,"Public selection.",false).is_err());
+        });
+    }
+
+    #[test]
+    fn non_ai_business_errors_are_not_cached() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        with_server(vec![("200 OK","{\"error\":\"fixture-secret\"}"),("200 OK","{\"translatedText\":\"重试成功\"}")],|url|{
+            let mut cfg=crate::config::Config::default();cfg.translation_engine=Engine::LibreTranslate;
+            cfg.set_provider("libretranslate",EngineConfig { base_url:Some(url),..Default::default() });
+            let mut request=TranslationRequest::from_config(&cfg,"Public retry selection.",false).unwrap();request.cache_settings=CacheSettings::default;
+            assert!(request.stream(|_|{}).is_err());assert!(request.cached().is_none());
+            assert_eq!(request.stream(|_|{}).unwrap(),"重试成功");
+        });
+    }
+
+    #[test]
+    fn every_provider_reuses_a_completed_result_without_second_http_request() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for (engine,response) in [
+            (Engine::Ark,COMPLETE),
+            (Engine::Azure,r#"[{"translations":[{"text":"测试译文"}]}]"#),
+            (Engine::Baidu,r#"{"trans_result":[{"dst":"测试译文"}]}"#),
+            (Engine::PublicBaidu,r#"{"translatedText":"测试译文"}"#),
+            (Engine::Google,r#"{"data":{"translations":[{"translatedText":"测试译文"}]}}"#),
+            (Engine::MyMemory,r#"{"responseStatus":200,"responseData":{"translatedText":"测试译文"}}"#),
+            (Engine::LibreTranslate,r#"{"translatedText":"测试译文"}"#),
+        ] {
+            with_server(vec![("200 OK",response)],|url| {
+                let mut cfg=crate::config::Config::default();cfg.translation_engine=engine;
+                cfg.set_provider(engine.key(),EngineConfig {api_key:"fixture-key".into(),app_id:"fixture-app".into(),base_url:Some(url.clone()),..Default::default()});
+                let mut first=TranslationRequest::from_config(&cfg,"Public cached sample.",false).unwrap();
+                first.endpoint=url.clone();first.cache_settings=CacheSettings::default;
+                assert!(first.cached().is_none());
+                assert_eq!(first.stream(|_|{}).unwrap(),"测试译文","{engine:?}");
+                // A separate production snapshot must resolve the same cache identity.
+                let mut repeated=TranslationRequest::from_config(&cfg,"Public cached sample.",false).unwrap();
+                repeated.endpoint=url;repeated.cache_settings=CacheSettings::default;
+                assert_eq!(repeated.cached().as_deref(),Some("测试译文"),"{engine:?}");
+                assert_eq!(repeated.stream(|_|{}).unwrap(),"测试译文","{engine:?}");
+            });
+        }
+    }
+
+    #[test]
+    fn all_engines_isolate_target_languages_and_reuse_results_after_switching_back() {
+        use crate::config::TargetLanguage;
+        let _guard=CACHE_TEST_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+        for (engine,response) in [
+            (Engine::Ark,COMPLETE),(Engine::Azure,r#"[{"translations":[{"text":"测试译文"}]}]"#),
+            (Engine::Baidu,r#"{"trans_result":[{"dst":"测试译文"}]}"#),(Engine::PublicBaidu,r#"{"translatedText":"测试译文"}"#),
+            (Engine::Google,r#"{"data":{"translations":[{"translatedText":"测试译文"}]}}"#),
+            (Engine::MyMemory,r#"{"responseStatus":200,"responseData":{"translatedText":"测试译文"}}"#),
+            (Engine::LibreTranslate,r#"{"translatedText":"测试译文"}"#),
+        ] {
+            with_server(vec![("200 OK",response),("200 OK",response)],|url|{
+                let mut cfg=crate::config::Config::default();cfg.translation_engine=engine;
+                cfg.translation_target=TargetLanguage::Japanese;
+                cfg.set_provider(engine.key(),EngineConfig{api_key:"fixture-key".into(),app_id:"fixture-app".into(),base_url:Some(url.clone()),..Default::default()});
+                let make=|cfg:&crate::config::Config|{let mut r=TranslationRequest::from_config(cfg,"Target isolation public fixture.",false).unwrap();r.endpoint=url.clone();r.cache_settings=CacheSettings::default;r};
+                let ja=make(&cfg);assert!(ja.cached().is_none());ja.stream(|_|{}).unwrap();
+                cfg.translation_target=TargetLanguage::English;
+                let en=make(&cfg);assert_ne!(ja.cache_key,en.cache_key);assert!(en.cached().is_none());en.stream(|_|{}).unwrap();
+                assert_eq!(ja.engine_config.target_language,TargetLanguage::Japanese);
+                cfg.translation_target=TargetLanguage::Japanese;let back=make(&cfg);assert_eq!(ja.cache_key,back.cache_key);
+                assert!(back.cached().is_some());back.stream(|_|{}).unwrap(); // A third HTTP request would fail.
+            });
+        }
     }
 
     #[test]

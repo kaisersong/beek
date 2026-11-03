@@ -1,0 +1,13 @@
+Help me install and verify a local LibreTranslate / Argos HTTP translation service for BeeK. I do not need a chat agent.
+
+First check my OS, CPU architecture, available RAM/disk, Docker availability, Python version, port 5000, existing containers, environments, services and models. Reuse dedicated BeeK resources when safe; preserve unrelated work.
+
+Check the current official docs at https://docs.libretranslate.com/guides/installation/ and https://docs.libretranslate.com/guides/api_usage/ . This guide uses LibreTranslate 1.9.6. Verify platform compatibility and record the actual package/image version and architecture. Do not blindly choose the newest Python or force x86 emulation.
+
+Prefer an existing working Docker installation: use the official libretranslate/libretranslate:v1.9.6 image, a dedicated beek-libretranslate container, a model volume, and only 127.0.0.1:5000:5000 port binding. Otherwise create ~/.local/share/beek-libretranslate/venv, checking Python 3.11 first. Do not use sudo pip or replace system Python. Explain any new system dependency or admin step before asking me to handle it.
+
+Start with en and zh models (--load-only en,zh or LT_LOAD_ONLY=en,zh). Ask which other source/target languages I need, and verify their actual model codes and /languages targets before adding them. Bind loopback only. Leave the API key blank by default; do not expose the server publicly or use paid/cloud translation APIs. Explain first-time model downloads and disk needs. On network failure, report the error; do not retry forever, switch to unofficial mirrors, or disable certificate checks.
+
+Wait at most 10 minutes for readiness. If that deadline expires, stop waiting and report whether the service remains running. Verify GET /languages includes the required source and target pair. Test the public sentence Hello, world! using POST /translate with {"q":"Hello, world!","source":"auto","target":"zh","format":"text"}. Require HTTP success and nonempty translatedText. Measure one warm-up and at least three short translations. BeeK times out ordinary service requests after 20 seconds; report honestly if this machine cannot meet that.
+
+Give me the BeeK endpoint http://127.0.0.1:5000/translate (adjust if the port is occupied), blank key, startup/stop/log/uninstall steps and actual test results. Let me choose the target language and save the service in BeeK. Do not edit BeeK config.json or overwrite existing cloud keys. Create autostart only if I request it. Record exact PIDs/container names; clean up only resources created for this task. Confirm before deleting models or volumes.

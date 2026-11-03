@@ -39,6 +39,52 @@ pub fn explain_prompt(text: &str) -> String {
     )
 }
 
+pub fn translate_prompt_for(
+    text: &str,
+    target: super::translation_language::TargetLanguage,
+) -> String {
+    if target == super::translation_language::TargetLanguage::Chinese {
+        return translate_prompt(text);
+    }
+    format!("将以下文本翻译成{}。要求：简洁准确，只输出目标语言译文，不要解释。即使原文是中文也必须翻译成指定目标语言。\n\n{}",target.label(),text)
+}
+pub fn explain_prompt_for(
+    text: &str,
+    target: super::translation_language::TargetLanguage,
+) -> String {
+    if target == super::translation_language::TargetLanguage::Chinese {
+        return explain_prompt(text);
+    }
+    format!("你是一本词典。请针对「{}」给出读音和详解。解释、释义、例句翻译和用法均使用{}，不要使用其他讲解语言。严格遵守格式：第一行固定为「{}<原词读音>」，之后每行以「- 」开头，给出词性与释义、例句（原文及目标语言译文）、搭配与用法。不要前言或总结。",text,target.label(),PRON_PREFIX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::translation_language::TargetLanguage;
+    #[test]
+    fn prompts_follow_target_for_translation_and_dictionary_without_changing_legacy_chinese() {
+        assert_eq!(
+            translate_prompt_for("Agent", TargetLanguage::Chinese),
+            translate_prompt("Agent")
+        );
+        assert_eq!(
+            explain_prompt_for("Agent", TargetLanguage::Chinese),
+            explain_prompt("Agent")
+        );
+        for target in TargetLanguage::ALL
+            .into_iter()
+            .filter(|t| *t != TargetLanguage::Chinese)
+        {
+            assert!(translate_prompt_for("Public fixture.", target).contains(target.label()));
+            let dictionary = explain_prompt_for("你好", target);
+            assert!(dictionary.contains(target.label()));
+            assert!(dictionary.contains(PRON_PREFIX));
+            assert!(!dictionary.contains("用中文讲解"));
+        }
+    }
+}
+
 pub fn split_pron(raw: &str) -> (Option<String>, String) {
     let Some((first, rest)) = raw.split_once('\n') else {
         return (None, raw.to_string());

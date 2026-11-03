@@ -13,6 +13,12 @@ const POLICY_REGULAR: i64 = 0;
 const POLICY_ACCESSORY: i64 = 1;
 
 /// 「在 Dock 中显示」菜单项地址，供自检时模拟点击（0 表示尚未创建）
+static ENGINE_SETTINGS_ITEM: AtomicUsize = AtomicUsize::new(0);
+static TARGET_ITEM: AtomicUsize = AtomicUsize::new(0);
+static UI_LANGUAGE_ITEM: AtomicUsize = AtomicUsize::new(0);
+use beek::core::localization::{self,UiLanguage};
+use crate::config::TargetLanguage;
+
 static TOGGLE_ITEM: AtomicUsize = AtomicUsize::new(0);
 
 /// 主循环的事件发送端：菜单里那些「要开窗口 / 要发网络请求」的动作
@@ -221,7 +227,58 @@ pub fn set_dock_visible(visible: bool) {
 }
 
 unsafe fn nsstr(s: &str) -> id {
-    NSString::alloc(nil).init_str(s)
+    let value=NSString::alloc(nil).init_str(localization::tr(s));
+    let _:id=msg_send![value,autorelease];
+    value
+}
+
+pub fn configure_ui_language(language:UiLanguage) {
+    let _pool=crate::macos_runtime::AutoreleasePool::new();
+    unsafe {
+        let list:id=msg_send![class!(NSLocale),preferredLanguages];
+        let count:usize=msg_send![list,count];
+        let system=if count>0 {let s:id=msg_send![list,objectAtIndex:0usize];let p:*const std::os::raw::c_char=msg_send![s,UTF8String];if p.is_null(){"en".into()}else{std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()}}else{"en".into()};
+        localization::configure(language,&system);
+    }
+}
+extern "C" fn choose_target(_this:&Object,_sel:Sel,sender:id) {
+    let index:usize=unsafe{msg_send![sender,tag]};
+    if let Some(language)=TargetLanguage::ALL.get(index){send_event(crate::UiEvent::SetTranslationTarget(*language));}
+}
+extern "C" fn choose_ui_language(_this:&Object,_sel:Sel,sender:id) {
+    let index:usize=unsafe{msg_send![sender,tag]};
+    if let Some(language)=UiLanguage::ALL.get(index){send_event(crate::UiEvent::SetUiLanguage(*language));}
+}
+pub fn refresh_language_menus(cfg:&Config) {
+    if !is_main_thread(){return;}
+    let _pool=crate::macos_runtime::AutoreleasePool::new();
+    unsafe {
+        for (address,title,selected) in [
+            (TARGET_ITEM.load(Ordering::SeqCst),format!("{}{}",localization::tr("翻译为："),localization::tr(cfg.translation_target.label())),TargetLanguage::ALL.iter().position(|v|*v==cfg.translation_target).unwrap_or(0)),
+            (UI_LANGUAGE_ITEM.load(Ordering::SeqCst),format!("{}{}",localization::tr("界面语言："),localization::tr(cfg.ui_language.label())),UiLanguage::ALL.iter().position(|v|*v==cfg.ui_language).unwrap_or(0))] {
+            let item=address as id;if item==nil{continue;}
+            let _:()=msg_send![item,setTitle:nsstr(&title)];
+            let sub:id=msg_send![item,submenu];let count:usize=msg_send![sub,numberOfItems];
+            for i in 0..count {let row:id=msg_send![sub,itemAtIndex:i];let _:()=msg_send![row,setState:if i==selected{1i64}else{0i64}];}
+        }
+    }
+}
+/// Relabel the existing status menu in place, retaining its bounded ownership tree.
+pub fn refresh_ui_language(cfg:&Config) {
+    unsafe fn walk(menu:id) {
+        let count:usize=msg_send![menu,numberOfItems];
+        for i in 0..count {
+            let row:id=msg_send![menu,itemAtIndex:i];
+            let old=item_title(row);
+            let original=localization::canonical(&old);
+            let _:()=msg_send![row,setTitle:nsstr(localization::tr(original))];
+            let sub:id=msg_send![row,submenu];if sub!=nil{walk(sub);}
+        }
+    }
+    let _pool=crate::macos_runtime::AutoreleasePool::new();
+    unsafe {let menu=STATUS_MENU.load(Ordering::SeqCst) as id;if menu!=nil{walk(menu);let title:id=msg_send![menu,itemAtIndex:0usize];let _:()=msg_send![title,setTitle:nsstr(&format!("{} v{}",localization::tr("BeeK 划词翻译"),crate::update::CURRENT_VERSION))];}}
+    set_translation_engine(cfg.translation_engine);
+    refresh_language_menus(cfg);
 }
 
 // ---------- 动作实现：菜单项（objc target）与 gpui action 共用同一份逻辑 ----------
@@ -388,6 +445,22 @@ extern "C" fn open_key_settings(_this: &Object, _sel: Sel, _sender: id) {
     send_event(crate::UiEvent::OpenKeySettings);
 }
 
+extern "C" fn open_onboarding(_this:&Object,_sel:Sel,_sender:id) { send_event(crate::UiEvent::OpenOnboarding); }
+
+extern "C" fn open_translation_settings(_this: &Object, _sel: Sel, _sender: id) {
+    send_event(crate::UiEvent::OpenTranslationSettings);
+}
+
+pub fn set_translation_engine(engine: crate::config::Engine) {
+    if !is_main_thread() { return; }
+    unsafe {
+        let item = ENGINE_SETTINGS_ITEM.load(Ordering::SeqCst) as id;
+        if item == nil { return; }
+        let title = nsstr(&format!("{}{}…",localization::tr("翻译服务："),localization::tr(engine.label())));
+        let _: () = msg_send![item, setTitle: title];
+    }
+}
+
 extern "C" fn open_cache_settings(_this: &Object, _sel: Sel, _sender: id) {
     send_event(crate::UiEvent::OpenCacheSettings);
 }
@@ -523,6 +596,103 @@ pub fn set_update_hint(text: &str) {
     }
 }
 
+/// End tracking before presenting an asynchronous result window. A result can
+/// arrive after the user has reopened the status menu during a network request.
+pub fn close_status_menu() {
+    unsafe {
+        let menu = STATUS_MENU.load(Ordering::SeqCst) as id;
+        if menu != nil { let _: () = msg_send![menu, cancelTracking]; }
+    }
+}
+
+pub fn update_menu_state() -> (usize, usize) {
+    unsafe fn count(menu: id, depth: usize) -> (usize, usize) {
+        if menu == nil || depth > 4 { return (0, 0); }
+        let _: () = msg_send![menu, update];
+        let n: usize = msg_send![menu, numberOfItems];
+        let (mut enabled, mut disabled) = (0, 0);
+        for index in 0..n.min(128) {
+            let item: id = msg_send![menu, itemAtIndex:index];
+            let target: id = msg_send![item, target];
+            let submenu: id = msg_send![item, submenu];
+            if target != nil || submenu != nil {
+                let active: i8 = msg_send![item, isEnabled];
+                if active != 0 { enabled += 1; } else { disabled += 1; }
+            }
+            let nested = count(submenu, depth + 1);
+            enabled += nested.0; disabled += nested.1;
+        }
+        (enabled, disabled)
+    }
+    unsafe { count(STATUS_MENU.load(Ordering::SeqCst) as id, 0) }
+}
+
+/// Read the real AppKit-validated parents and leaves, including containers
+/// without action targets. No settings are written by this diagnostic.
+pub fn language_menu_state() -> serde_json::Value {
+    let _pool = crate::macos_runtime::AutoreleasePool::new();
+    unsafe fn read(address: usize) -> serde_json::Value {
+        let item = address as id;
+        assert!(item != nil);
+        let enabled: i8 = msg_send![item, isEnabled];
+        let menu: id = msg_send![item, submenu];
+        let _: () = msg_send![menu, update];
+        let n: usize = msg_send![menu, numberOfItems];
+        let mut selected = vec![];
+        let mut selectable = 0;
+        for i in 0..n {
+            let row: id = msg_send![menu, itemAtIndex:i];
+            let active: i8 = msg_send![row, isEnabled];
+            let target: id = msg_send![row, target];
+            let action: Sel = msg_send![row, action];
+            let responds: i8 = msg_send![target, respondsToSelector:action];
+            let tag: usize = msg_send![row, tag];
+            let state: i64 = msg_send![row, state];
+            if active != 0 && responds != 0 && tag == i { selectable += 1; }
+            if state == 1 { selected.push(i); }
+        }
+        serde_json::json!({"enabled":enabled != 0,"choices":n,"selectable":selectable,"selected":selected,"title":item_title(item)})
+    }
+    let _ = update_menu_state();
+    unsafe { serde_json::json!({"target":read(TARGET_ITEM.load(Ordering::SeqCst)),"ui":read(UI_LANGUAGE_ITEM.load(Ordering::SeqCst))}) }
+}
+
+pub fn diagnostic_language_menu_roundtrip() -> Vec<serde_json::Value> {
+    let mut original = crate::config::load();
+    if std::env::var("BEEK_UPDATE_UI_LANGUAGE").as_deref() == Ok("en") {
+        original.ui_language = UiLanguage::English;
+    }
+    let mut cfg = original.clone();
+    let mut records = vec![];
+    for (ui_index, language) in UiLanguage::ALL.iter().enumerate() {
+        cfg.ui_language = *language;
+        configure_ui_language(*language);
+        for (target_index, target) in TargetLanguage::ALL.iter().enumerate() {
+            cfg.translation_target = *target;
+            refresh_ui_language(&cfg);
+            let state = language_menu_state();
+            for (key, choices, selected) in [("target", TargetLanguage::ALL.len(), target_index), ("ui", UiLanguage::ALL.len(), ui_index)] {
+                assert_eq!(state[key]["enabled"], true, "{key} submenu disabled");
+                assert_eq!(state[key]["choices"], choices);
+                assert_eq!(state[key]["selectable"], choices);
+                assert_eq!(state[key]["selected"], serde_json::json!([selected]));
+            }
+            assert_eq!(state["target"]["title"], format!("{}{}", localization::tr("翻译为："), localization::tr(target.label())));
+            assert_eq!(state["ui"]["title"], format!("{}{}", localization::tr("界面语言："), localization::tr(language.label())));
+            unsafe {
+                let menu = STATUS_MENU.load(Ordering::SeqCst) as id;
+                let header: id = msg_send![menu, itemAtIndex:0usize];
+                let enabled: i8 = msg_send![header, isEnabled];
+                assert_eq!(enabled, 0, "version header must remain disabled");
+            }
+            records.push(state);
+        }
+    }
+    configure_ui_language(original.ui_language);
+    refresh_ui_language(&original);
+    records
+}
+
 /// 弹出状态项菜单（等价于用鼠标点菜单栏图标）。
 ///
 /// 用途：这个 app 没有任何窗口，所以点 Dock 图标时 macOS 发的是「重新打开」
@@ -556,6 +726,7 @@ pub fn popup_status_menu() -> bool {
 /// 这里手搓的项 target 为空，动作沿响应链走，第一响应者（field editor）才收得到，
 /// ⌘X / ⌘C / ⌘V / ⌘A 才是正常的。
 pub fn install_edit_menu() {
+    let _pool=crate::macos_runtime::AutoreleasePool::new();
     unsafe {
         let app: id = msg_send![class!(NSApplication), sharedApplication];
         let main: id = msg_send![app, mainMenu];
@@ -566,7 +737,7 @@ pub fn install_edit_menu() {
         let count: usize = msg_send![main, numberOfItems];
         for i in 0..count {
             let it: id = msg_send![main, itemAtIndex: i];
-            if item_title(it) == "编辑" {
+            if item_title(it) == localization::tr("编辑") {
                 return; // 已经装过（gpui 重建主菜单后我们会再调一次）
             }
         }
@@ -578,12 +749,12 @@ pub fn install_edit_menu() {
         // 标题两边都要写：父项没有标题时，菜单栏会把它显示成类名（NSMenuItem）
         let _: () = msg_send![sub, setTitle: nsstr("编辑")];
         let _: () = msg_send![item, setTitle: nsstr("编辑")];
-        add_item(sub, "剪切", sel!(cut:), "x", nil);
-        add_item(sub, "复制", sel!(copy:), "c", nil);
-        add_item(sub, "粘贴", sel!(paste:), "v", nil);
-        add_item(sub, "全选", sel!(selectAll:), "a", nil);
+        for (title,action,key) in [("剪切",sel!(cut:),"x"),("复制",sel!(copy:),"c"),("粘贴",sel!(paste:),"v"),("全选",sel!(selectAll:),"a")] {
+            let row=add_item(sub,title,action,key,nil);let _:()=msg_send![row,release];
+        }
         let _: () = msg_send![item, setSubmenu: sub];
         let _: () = msg_send![main, addItem: item];
+        let _:()=msg_send![sub,release];let _:()=msg_send![item,release];
         eprintln!("[beek] 编辑菜单已挂上（target 为空 → 走响应链，对话框输入框的 ⌘X/⌘C/⌘V/⌘A 可用）");
     }
 }
@@ -705,7 +876,7 @@ unsafe fn build_menu(cfg: &Config, handler: id) -> (id, id) {
     // 第一项只显示版本，不可点
     let title = add_item(
         menu,
-        &format!("BeeK 划词翻译 v{}", crate::update::CURRENT_VERSION),
+        &format!("{} v{}",localization::tr("BeeK 划词翻译"), crate::update::CURRENT_VERSION),
         sel!(noop:),
         "",
         nil,
@@ -739,7 +910,29 @@ unsafe fn build_menu(cfg: &Config, handler: id) -> (id, id) {
     add_separator(menu);
 
     // 设置 API Key：弹出的对话框由主循环用 AppKit 的 NSAlert 呈现
-    add_item(menu, "设置 API Key…", sel!(openKeySettings:), "", handler);
+    add_item(menu, "豆包 API Key…", sel!(openKeySettings:), "", handler);
+    add_item(menu,"使用引导…",sel!(openOnboarding:),"",handler);
+    let engine_item = add_item(menu, &format!("{}{}…",localization::tr("翻译服务："),localization::tr(cfg.translation_engine.label())), sel!(openTranslationSettings:), "", handler);
+    ENGINE_SETTINGS_ITEM.store(engine_item as usize, Ordering::SeqCst);
+    let _: () = msg_send![engine_item, release]; // NSMenu retains it; the global is borrowed.
+    // Submenu containers have no action. An unresolved noop: causes AppKit's
+    // automatic validation to disable the parent and all of its children.
+    let target=add_item(menu,"翻译为：",Sel::from_ptr(std::ptr::null()),"",nil);
+    let submenu:id=msg_send![class!(NSMenu),new];
+    for (i,language) in TargetLanguage::ALL.iter().enumerate(){
+        let row=add_item(submenu,language.label(),sel!(chooseTarget:),"",handler);
+        let _:()=msg_send![row,setTag:i];let _:()=msg_send![row,release];
+    }
+    let _:()=msg_send![target,setSubmenu:submenu];let _:()=msg_send![submenu,release];
+    TARGET_ITEM.store(target as usize,Ordering::SeqCst);let _:()=msg_send![target,release];
+    let ui=add_item(menu,"界面语言：",Sel::from_ptr(std::ptr::null()),"",nil);
+    let submenu:id=msg_send![class!(NSMenu),new];
+    for (i,language) in UiLanguage::ALL.iter().enumerate(){
+        let row=add_item(submenu,language.label(),sel!(chooseUiLanguage:),"",handler);
+        let _:()=msg_send![row,setTag:i];let _:()=msg_send![row,release];
+    }
+    let _:()=msg_send![ui,setSubmenu:submenu];let _:()=msg_send![submenu,release];
+    UI_LANGUAGE_ITEM.store(ui as usize,Ordering::SeqCst);let _:()=msg_send![ui,release];
     add_item(menu, "翻译缓存设置…", sel!(openCacheSettings:), "", handler);
 
     // 「如何获取 API Key…」：带一个圆圈 i 图标，点开 README 对应章节
@@ -784,7 +977,11 @@ pub fn setup_status_item(cfg: &Config) {
         decl.add_method(sel!(toggleAutoUpdate:), toggle_auto_update as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(toggleCopyToPopup:), toggle_copy_to_popup as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(openKeySettings:), open_key_settings as extern "C" fn(&Object, Sel, id));
+        decl.add_method(sel!(openOnboarding:),open_onboarding as extern "C" fn(&Object,Sel,id));
+        decl.add_method(sel!(openTranslationSettings:), open_translation_settings as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(openCacheSettings:), open_cache_settings as extern "C" fn(&Object, Sel, id));
+        decl.add_method(sel!(chooseTarget:),choose_target as extern "C" fn(&Object,Sel,id));
+        decl.add_method(sel!(chooseUiLanguage:),choose_ui_language as extern "C" fn(&Object,Sel,id));
         decl.add_method(sel!(openReadmeKey:), open_readme_key as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(checkUpdate:), check_update as extern "C" fn(&Object, Sel, id));
         decl.add_method(sel!(openAbout:), open_about as extern "C" fn(&Object, Sel, id));
@@ -833,6 +1030,7 @@ pub fn setup_status_item(cfg: &Config) {
         HANDLER.store(handler as usize, Ordering::SeqCst);
         STATUS_ITEM.store(item as usize, Ordering::SeqCst);
         STATUS_MENU.store(menu as usize, Ordering::SeqCst);
+        refresh_language_menus(cfg);
 
         // 应用级菜单（主菜单 / Dock 右键菜单）不在这里建：macOS 要 Dock 菜单是走
         // applicationDockMenu: 这个**委托方法**，而 delegate 是 gpui 自己实现的，

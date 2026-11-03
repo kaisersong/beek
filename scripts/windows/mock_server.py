@@ -37,6 +37,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
 
@@ -58,6 +60,24 @@ class Handler(BaseHTTPRequestHandler):
             length = -1
         if length < 0 or length > MAX_BODY:
             self.close_connection = True
+            if length > MAX_BODY:
+                # Closing with unread input can reset the socket on Windows,
+                # hiding the 413. Drain small overflows within fixed bounds.
+                remaining = min(length, 2 * MAX_BODY)
+                deadline = time.monotonic() + 1
+                try:
+                    while remaining:
+                        budget = deadline - time.monotonic()
+                        if budget <= 0:
+                            break
+                        self.connection.settimeout(budget)
+                        chunk = self.rfile.read1(min(8192, remaining))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                except OSError:
+                    pass
+                self.connection.settimeout(5)
             self.send_json(413, {"error": "bounded fixture request required"})
             return
         self.connection.settimeout(5)

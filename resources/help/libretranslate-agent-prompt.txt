@@ -1,0 +1,13 @@
+请帮我为 BeeK 安装并验证本地 LibreTranslate / Argos 翻译服务，目标是本机 HTTP API，不需要聊天 Agent。
+
+先检查操作系统、CPU 架构、可用内存/磁盘、Docker 是否已安装且可用、Python 版本及 5000 端口占用。检查现有同名容器、虚拟环境、用户级服务和模型，能复用就复用，不覆盖无关内容。
+
+参考官方实时文档：https://docs.libretranslate.com/guides/installation/ 和 https://docs.libretranslate.com/guides/api_usage/ 。BeeK 指南采用 LibreTranslate 1.9.6；确认当前平台兼容性后选定并记录实际版本与镜像架构，不盲用最新 Python 或强制 x86 仿真。
+
+优先复用可用 Docker，创建专用容器 beek-libretranslate，使用官方 libretranslate/libretranslate 镜像，只映射 127.0.0.1:5000:5000，并用专用 volume 持久保存模型。没有可用 Docker 时采用独立 Python 虚拟环境（优先检查 Python 3.11），路径为 ~/.local/share/beek-libretranslate/venv；不使用 sudo pip，不覆盖系统 Python。安装新的 Docker/系统依赖或需要管理员操作时，先解释并让我处理。
+
+先询问我需要的源语言与目标语言。默认准备 en、zh 语言与实际 en→zh 模型，使用 --load-only en,zh（Docker 对应 LT_LOAD_ONLY=en,zh）；需要其他语言时追加模型，并验证实际语言对。只监听本机回环地址；默认不设 API Key，不开放公网，不调用收费或云端翻译服务。首次模型下载可以联网，先告知预计下载内容和磁盘需求；网络失败时给出明确错误，不无限重试，不擅自切第三方镜像或关闭证书校验。
+
+启动后等待服务与模型就绪，最多等待 10 分钟；到时失败应保留错误并停止本次等待，说明服务是否仍在运行。检查 GET /languages 的 en 与 zh，以及 en 的 targets 包含 zh。用公开句子 Hello, world!，按 BeeK 真实请求格式 POST /translate：{"q":"Hello, world!","source":"auto","target":"zh","format":"text"}。必须确认 HTTP 成功且 translatedText 非空，再记录一次暖机和至少三次短句耗时；不能只看进程存在就说安装成功。BeeK 请求超时 20 秒，若本机无法满足请如实报告。
+
+最后给我 BeeK 的填写值（LibreTranslate / Argos，完整 URL http://127.0.0.1:5000/translate，Key 留空），以及启动、停止、查看日志、卸载说明和实际验证结果。若 5000 被占用，换未占用端口并同步 URL。不要直接覆盖 BeeK 的 config.json 或改已有云端 Key，让我在“翻译服务”设置里保存切换。常驻时给出用户级服务选项；只有我要求常驻才创建自启动。所有后台进程记下确切 PID/容器名，失败或卸载只清理本任务资源；删除模型/volume 前确认，不批量杀进程。

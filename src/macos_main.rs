@@ -6,12 +6,16 @@ mod clipboard;
 mod config;
 mod eventtap;
 mod dialogs;
+mod onboarding;
+use beek::core::localization;
 mod icons;
 mod menubar;
 mod mouse;
 mod macos_runtime;
+mod macos_display;
 mod translate;
 mod update;
+mod update_ui;
 
 use ax::{is_url, SelBounds};
 use beek::core::mac_selection::{self, Anchor, PresentationGate, SelectionGate};
@@ -40,7 +44,13 @@ enum UiEvent {
     // ---- 菜单栏动作（菜单在主线程，但开户/发请求的活儿交给主循环）----
     /// 「设置 API Key…」
     OpenKeySettings,
+    OpenOnboarding,
+    SetTranslationTarget(config::TargetLanguage),
+    SetUiLanguage(config::UiLanguage),
+    OnboardingAction(onboarding::Action),
+    OnboardingTrialDone(u64,Result<String,String>),
     OpenCacheSettings,
+    OpenTranslationSettings,
     /// 「关于 BeeK」
     OpenAbout,
     /// 「检查更新…」
@@ -192,6 +202,8 @@ enum PopupContent {
 
 struct PopupView {
     content: PopupContent,
+    engine_label: &'static str,
+    cache_hit: bool,
     /// Some(词) = 单词模式（词典式详解）：卡片顶部显示「词 + 读音 + 发音图标」
     word: Option<String>,
     /// true = 卡片贴窗口底部。弹窗放在选区上方时用，这样内容变长是向上长，不会压住选区
@@ -208,13 +220,13 @@ impl PopupView {
         match &self.content {
             PopupContent::Loading => {
                 if self.word.is_some() {
-                    "查询中…".to_string()
+                    localization::tr("查询中…").to_string()
                 } else {
-                    "翻译中…".to_string()
+                    localization::tr("翻译中…").to_string()
                 }
             }
             PopupContent::Result(t) => t.clone(),
-            PopupContent::Error(e) => format!("翻译失败：{}", e),
+            PopupContent::Error(e) => format!("{}{}",localization::tr("翻译失败："),localization::tr(e)),
         }
     }
 
@@ -296,7 +308,7 @@ impl Render for PopupView {
                 .child(div().text_lg().font_weight(FontWeight::BOLD).child(w))
                 .child(match pron.clone() {
                     Some(p) => div().text_sm().text_color(rgb(0x666666)).child(p),
-                    None => div().text_sm().text_color(rgb(0xcccccc)).child("读音…"),
+                    None => div().text_sm().text_color(rgb(0xcccccc)).child(localization::tr("读音…")),
                 })
                 .child(
                     div()
@@ -367,7 +379,7 @@ impl Render for PopupView {
                         div()
                             .text_xs()
                             .text_color(rgb(0xbbbbbb))
-                            .child("点击弹窗外任意处关闭"),
+                            .child(format!("{} · {}{}", localization::tr(self.engine_label), if self.cache_hit {localization::tr("缓存 · ")}else{""},localization::tr("点外部关闭"))),
                     )
                     .child(
                         // 复制按钮：两个叠起来的圆角方框 = 复制图标
@@ -464,16 +476,8 @@ const POPUP_DRAG_H: f32 = beek::core::appearance::POPUP_DRAG_H;
 /// 只要下方还有这么多空间就优先放下方（不够才转上方）
 const POPUP_MIN_USABLE: f32 = 80.;
 
-fn display_size(cx: &mut AsyncApp) -> (f32, f32) {
-    cx.update(|app| {
-        app.primary_display()
-            .map(|d| {
-                let b = d.bounds();
-                (f32::from(b.size.width), f32::from(b.size.height))
-            })
-            .unwrap_or((1920., 1080.))
-    })
-    .unwrap_or((1920., 1080.))
+fn global_rect(b: SelBounds) -> beek::core::display_geometry::Rect {
+    beek::core::display_geometry::Rect { x:b.x, y:b.y, w:b.w, h:b.h }
 }
 
 /// AX 返回的就是「显示器左上角为原点、y 轴向下」的屏幕坐标，和 GPUI 的窗口坐标系一致，
@@ -494,34 +498,30 @@ fn close_window<V: Render>(cx: &mut AsyncApp, slot: &mut Option<WindowHandle<V>>
     }
 }
 
+// The UI owns the actual global frame, including AppKit's Dock/menu constraints.
+static VISIBLE_ICON_RECT: std::sync::Mutex<Option<SelBounds>> = std::sync::Mutex::new(None);
+fn visible_icon_rect() -> Option<SelBounds> { *VISIBLE_ICON_RECT.lock().unwrap_or_else(|e|e.into_inner()) }
+fn close_icon_window(cx:&mut AsyncApp,slot:&mut Option<WindowHandle<IconView>>) {
+    *VISIBLE_ICON_RECT.lock().unwrap_or_else(|e|e.into_inner())=None;
+    close_window(cx,slot);
+}
+
 fn open_icon_window(
     cx: &mut AsyncApp,
     b: SelBounds,
     text: String,
     tx: mpsc::Sender<UiEvent>,
 ) -> Option<WindowHandle<IconView>> {
-    let (dw, dh) = display_size(cx);
-    let (sx, sy, sw, sh) = gpui_rect(b, dh);
-    // 右边缘与选区右边缘对齐
-    let x = (sx + sw - ICON_SIZE).clamp(SCREEN_MARGIN, (dw - ICON_SIZE - SCREEN_MARGIN).max(SCREEN_MARGIN));
-    // 优先放在选区正上方；贴到屏幕上边缘时退到选区下方
-    let above = sy - ICON_SIZE - ICON_GAP;
-    let (y, side) = if above >= SCREEN_MARGIN {
-        (above, "上方")
-    } else {
-        (
-            (sy + sh + ICON_GAP).clamp(SCREEN_MARGIN, (dh - ICON_SIZE - SCREEN_MARGIN).max(SCREEN_MARGIN)),
-            "下方",
-        )
-    };
-    eprintln!(
-        "[beek] 图标窗口位置：({:.0}, {:.0}) 选区{}，右边缘对齐（选区=({:.0}, {:.0}, {:.0}x{:.0})，显示区 {:.0}x{:.0}）",
-        x, y, side, sx, sy, sw, sh, dw, dh
-    );
-    cx.open_window(
+    let screen = macos_display::screen_at(global_rect(b));
+    let display_id = cx.update(|app| app.displays().into_iter().find(|d|u32::from(d.id())==screen.id).map(|d|d.id())).ok().flatten();
+    let r = icon_rect_for(&b);
+    let (x,y) = (r.x as f32,r.y as f32);
+    eprintln!("[beek] 图标窗口位置：({x:.0}, {y:.0})，显示器 {}",screen.id);
+    let opened = cx.open_window(
         WindowOptions {
+            display_id,
             window_bounds: Some(WindowBounds::Windowed(Bounds {
-                origin: point(px(x), px(y)),
+                origin: point(px(x-screen.bounds.x as f32), px(y-screen.bounds.y as f32)),
                 size: size(px(ICON_SIZE), px(ICON_SIZE)),
             })),
             titlebar: None,
@@ -532,7 +532,8 @@ fn open_icon_window(
             window_background: WindowBackgroundAppearance::Transparent,
             ..Default::default()
         },
-        |_window, cx| {
+        |window, cx| {
+            macos_display::position_window(window,x as f64,y as f64);
             cx.new(|_cx| IconView {
                 text,
                 bounds: b,
@@ -544,7 +545,12 @@ fn open_icon_window(
             })
         },
     )
-    .ok()
+    .ok();
+    if let Some(win)=opened.as_ref() {
+        let actual=win.update(cx,|_,w,_|macos_display::window_rect(w)).ok().flatten();
+        *VISIBLE_ICON_RECT.lock().unwrap_or_else(|e|e.into_inner())=actual.map(|r|SelBounds{x:r.x,y:r.y,w:r.w,h:r.h});
+    }
+    opened
 }
 
 /// 弹窗矩形与选区矩形是否相交（同一坐标系，左上原点、y 向下）
@@ -774,12 +780,17 @@ fn open_popup_window(
     content: PopupContent,
     b: SelBounds,
     word: Option<String>,
+    engine_label: &'static str,
+    cache_hit: bool,
 ) -> Option<(WindowHandle<PopupView>, PopupGeom)> {
-    let (dw, dh) = display_size(cx);
-    let (sx, sy, sw, sh) = gpui_rect(b, dh);
-    // 起始高度只用来定位置；真实高度在拿到窗口后按内容量（同一轮事件内完成，不会闪）
-    let (x, y, side, max_h, anchor_bottom) =
-        popup_placement(dw, dh, sx, sy, sh, POPUP_MIN_USABLE);
+    let screen = macos_display::screen_at(global_rect(b));
+    let display_id = cx.update(|app| app.displays().into_iter().find(|d|u32::from(d.id())==screen.id).map(|d|d.id())).ok().flatten();
+    let (dw,screen_h) = (screen.bounds.w as f32,screen.bounds.h as f32);
+    let dh = macos_display::primary_height() as f32;
+    let (sx,sy,sw,sh) = gpui_rect(b,dh);
+    let (local_x,local_y,side,max_h,anchor_bottom) = popup_placement(dw,screen_h,
+        sx-screen.bounds.x as f32,sy-screen.bounds.y as f32,sh,POPUP_MIN_USABLE);
+    let (x,y) = (local_x+screen.bounds.x as f32,local_y+screen.bounds.y as f32);
     let win_h = if anchor_bottom { max_h } else { POPUP_MIN_H };
     let hit = overlaps(sx, sy, sw, sh, x, y, POPUP_W, win_h);
     eprintln!(
@@ -797,8 +808,9 @@ fn open_popup_window(
     };
     cx.open_window(
         WindowOptions {
+            display_id,
             window_bounds: Some(WindowBounds::Windowed(Bounds {
-                origin: point(px(x), px(y)),
+                origin: point(px(local_x), px(local_y)),
                 size: size(px(POPUP_W), px(win_h)),
             })),
             titlebar: None,
@@ -809,9 +821,12 @@ fn open_popup_window(
             window_background: WindowBackgroundAppearance::Transparent,
             ..Default::default()
         },
-        move |_window, cx| {
+        move |window, cx| {
+            macos_display::position_window(window,x as f64,y as f64);
             cx.new(|_cx| PopupView {
                 content,
+                engine_label,
+                cache_hit,
                 word,
                 anchor_bottom,
                 win_h,
@@ -842,6 +857,8 @@ fn sync_popup_geometry(
                 cur_h, win_h, g.card_h, g.max_h, g.side
             );
         }
+        macos_display::position_window(window,g.x as f64,g.y as f64);
+        if let Some(actual)=macos_display::window_rect(window) { g.x=actual.x as f32;g.y=actual.y as f32; }
         view.win_h = win_h;
         vcx.notify();
         g
@@ -867,13 +884,10 @@ fn sync_popup_geometry(
 /// 用来判断「这次按下是不是点在图标上」——点在图标上不能把兜底选区清掉，
 /// 否则按下的一瞬间图标就被收走，点不动。
 fn icon_rect_for(anchor: &SelBounds) -> SelBounds {
-    let w = ICON_SIZE as f64;
-    SelBounds {
-        x: anchor.x + anchor.w - w,
-        y: anchor.y - w - POPUP_GAP as f64,
-        w,
-        h: w,
-    }
+    let a = global_rect(*anchor);
+    let screen = macos_display::screen_at(a);
+    let r = beek::core::display_geometry::icon_rect(screen.bounds,a,ICON_SIZE as f64,ICON_GAP as f64,SCREEN_MARGIN as f64);
+    SelBounds {x:r.x,y:r.y,w:r.w,h:r.h}
 }
 
 fn anchor_at(px: f64, py: f64) -> SelBounds {
@@ -1064,6 +1078,27 @@ fn gesture_recent(track: &MouseTrack) -> bool {
         .unwrap_or(false)
 }
 
+fn show_update_prompt(slot: &mut Option<update_ui::Prompt>, plan: update_ui::Plan) {
+    let prompt = update_ui::Prompt::new(plan);
+    prompt.show();
+    *slot = Some(prompt);
+}
+fn reset_update_hint() {
+    if let Some(staged) = update::staged() {
+        menubar::set_update_hint(&localization::message("更新到 v{}（退出后生效）", &[&staged.version]));
+    } else { menubar::set_update_hint(localization::tr("检查更新…")); }
+}
+fn prepare_manual_update(tx: mpsc::Sender<UiEvent>, release: update::Release) {
+    let failure_tx = tx.clone();
+    if let Err(error) = std::thread::Builder::new().name("beek-update-download".into()).spawn(move || {
+        let event = match update::prepare(&release) {
+            Ok(app) => UiEvent::UpdatePrepared(app, release.version),
+            Err(error) => UiEvent::UpdateFailed(error),
+        };
+        let _ = tx.send(event);
+    }) { let _ = failure_tx.send(UiEvent::UpdateFailed(error.to_string())); }
+}
+
 // ---------- 自动检查更新（对应 electron-updater 的 autoDownload）----------
 //
 // 策略照 xiaok desktop：后台自动下载，但**不打断你** ——
@@ -1089,10 +1124,7 @@ fn spawn_auto_update(tx: mpsc::Sender<UiEvent>) {
                                             "[beek] 自动更新：v{} 已下载完成 → 退出 BeeK 时安装",
                                             rel.version
                                         );
-                                        menubar::set_update_hint(&format!(
-                                            "更新到 v{}（退出后生效）",
-                                            rel.version
-                                        ));
+                                        menubar::set_update_hint(&localization::message("更新到 v{}（退出后生效）", &[&rel.version]));
                                         let _ = tx.send(UiEvent::UpdateStaged(rel.version.clone()));
                                     }
                                     Err(e) => eprintln!("[beek] 自动更新：暂存失败：{}", e),
@@ -1141,7 +1173,7 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
                 (t.press, !t.down && gesture_recent(&t), t.press_seq, t.down)
             };
             // Leave our button alive through mouse-up so its normal click handler can run.
-            if icon_shown && down && last_press.map(|(_, (x, y))| icon_rect.map(|r|
+            if icon_shown && down && last_press.map(|(_, (x, y))| visible_icon_rect().or(icon_rect).map(|r|
                 x >= r.x - 2. && x <= r.x + r.w + 2. && y >= r.y - 2. && y <= r.y + r.h + 2.
             ).unwrap_or(false)).unwrap_or(false) {
                 continue;
@@ -1797,9 +1829,11 @@ actions!(
     beek_menu,
     [
         MenuOpenAbout,
+        MenuOnboarding,
         MenuCheckUpdate,
         MenuKeySettings,
         MenuCacheSettings,
+        MenuTranslationSettings,
         MenuReadmeKey,
         MenuAccessibility,
         MenuRestart,
@@ -1811,6 +1845,8 @@ fn setup_app_menus(cx: &mut App, tx: mpsc::Sender<UiEvent>) {
     // ⌘Q：菜单项上的快捷键来自键位绑定（gpui 的菜单没有 keyEquivalent 字段）
     cx.bind_keys([KeyBinding::new("cmd-q", MenuQuit, None)]);
 
+    let intro_tx=tx.clone();
+    cx.on_action(move |_: &MenuOnboarding,_cx| {let _=intro_tx.send(UiEvent::OpenOnboarding);});
     let t1 = tx.clone();
     cx.on_action(move |_: &MenuOpenAbout, _cx| {
         let _ = t1.send(UiEvent::OpenAbout);
@@ -1827,44 +1863,90 @@ fn setup_app_menus(cx: &mut App, tx: mpsc::Sender<UiEvent>) {
     cx.on_action(move |_: &MenuCacheSettings, _cx| {
         let _ = cache_tx.send(UiEvent::OpenCacheSettings);
     });
+    let engine_tx = tx.clone();
+    cx.on_action(move |_: &MenuTranslationSettings, _cx| {
+        let _ = engine_tx.send(UiEvent::OpenTranslationSettings);
+    });
     cx.on_action(|_: &MenuReadmeKey, _cx| menubar::open_readme_key_url());
     cx.on_action(|_: &MenuAccessibility, _cx| menubar::open_accessibility_panel());
     cx.on_action(|_: &MenuRestart, _cx| menubar::restart_now());
     cx.on_action(|_: &MenuQuit, _cx| menubar::quit_async());
 
+    refresh_app_menus(cx);
+}
+
+fn refresh_app_menus(cx:&mut App) {
     // 主菜单：第一项就是 macOS 的「app 菜单」（标题用 app 名）
     cx.set_menus(vec![Menu {
         name: "BeeK".into(),
         items: vec![
-            MenuItem::action("关于 BeeK", MenuOpenAbout),
-            MenuItem::action("检查更新…", MenuCheckUpdate),
-            MenuItem::action("设置 API Key…", MenuKeySettings),
-            MenuItem::action("翻译缓存设置…", MenuCacheSettings),
-            MenuItem::action("如何获取 API Key…", MenuReadmeKey),
+            MenuItem::action(localization::tr("使用引导…"), MenuOnboarding),
+            MenuItem::action(localization::tr("关于 BeeK"), MenuOpenAbout),
+            MenuItem::action(localization::tr("检查更新…"), MenuCheckUpdate),
+            MenuItem::action(localization::tr("豆包 API Key…"), MenuKeySettings),
+            MenuItem::action(localization::tr("翻译服务设置…"), MenuTranslationSettings),
+            MenuItem::action(localization::tr("翻译缓存设置…"), MenuCacheSettings),
+            MenuItem::action(localization::tr("如何获取 API Key…"), MenuReadmeKey),
             MenuItem::separator(),
-            MenuItem::action("重新启动 BeeK", MenuRestart),
-            MenuItem::action("退出 BeeK", MenuQuit),
+            MenuItem::action(localization::tr("重新启动 BeeK"), MenuRestart),
+            MenuItem::action(localization::tr("退出 BeeK"), MenuQuit),
         ],
     }]);
 
     // Dock 右键菜单：走 gpui 的 set_dock_menu，AppKit 会经 delegate 拿到它
     cx.set_dock_menu(vec![
-        MenuItem::action("设置 API Key…", MenuKeySettings),
-        MenuItem::action("翻译缓存设置…", MenuCacheSettings),
-        MenuItem::action("如何获取 API Key…", MenuReadmeKey),
+        MenuItem::action(localization::tr("使用引导…"), MenuOnboarding),
+        MenuItem::action(localization::tr("豆包 API Key…"), MenuKeySettings),
+        MenuItem::action(localization::tr("翻译服务设置…"), MenuTranslationSettings),
+        MenuItem::action(localization::tr("翻译缓存设置…"), MenuCacheSettings),
+        MenuItem::action(localization::tr("如何获取 API Key…"), MenuReadmeKey),
         MenuItem::separator(),
-        MenuItem::action("开启取词权限（辅助功能）…", MenuAccessibility),
+        MenuItem::action(localization::tr("开启取词权限（辅助功能）…"), MenuAccessibility),
         MenuItem::separator(),
-        MenuItem::action("检查更新…", MenuCheckUpdate),
-        MenuItem::action("关于 BeeK", MenuOpenAbout),
+        MenuItem::action(localization::tr("检查更新…"), MenuCheckUpdate),
+        MenuItem::action(localization::tr("关于 BeeK"), MenuOpenAbout),
         MenuItem::separator(),
-        MenuItem::action("重新启动 BeeK", MenuRestart),
-        MenuItem::action("退出 BeeK", MenuQuit),
+        MenuItem::action(localization::tr("重新启动 BeeK"), MenuRestart),
+        MenuItem::action(localization::tr("退出 BeeK"), MenuQuit),
     ]);
+}
+
+/// Bounded native placement check, without AX, network or preference writes.
+fn display_selftest() {
+    Application::new().run(|app| {
+        app.spawn(async move |cx| {
+            let (tx,_rx)=mpsc::channel();
+            let screens=macos_display::screens();
+            assert!(!screens.is_empty());
+            for screen in &screens {
+                for (x,y) in [(screen.bounds.x+100.,screen.bounds.y+100.),
+                    (screen.bounds.x+screen.bounds.w-10.,screen.bounds.y+screen.bounds.h-30.)] {
+                    let anchor=SelBounds{x,y,w:20.,h:18.};
+                    let expected=icon_rect_for(&anchor);
+                    let mut icon=open_icon_window(cx,anchor,"Public fixture".into(),tx.clone());
+                    let actual=icon.as_ref().unwrap().update(cx,|_,w,_|macos_display::window_rect(w).unwrap()).unwrap();
+                    assert!((actual.x-expected.x).abs()<1. && actual.y<=expected.y+1.,"icon frame mismatch: {actual:?}");
+                    let protected=visible_icon_rect().unwrap();
+                    assert!((protected.x-actual.x).abs()<1. && (protected.y-actual.y).abs()<1.);
+                    close_icon_window(cx,&mut icon);
+                    let (popup,g)=open_popup_window(cx,PopupContent::Result("公开测试译文。".repeat(12)),anchor,None,"测试",false).unwrap();
+                    let g=sync_popup_geometry(cx,&popup,g);
+                    let actual=popup.update(cx,|_,w,_|macos_display::window_rect(w).unwrap()).unwrap();
+                    assert!((actual.x-g.x as f64).abs()<1. && (actual.y-g.y as f64).abs()<1.,"popup frame mismatch: {actual:?}");
+                    assert!(actual.x>=screen.bounds.x && actual.x+actual.w<=screen.bounds.x+screen.bounds.w+1.);
+                    assert!(actual.y>=screen.bounds.y && actual.y+actual.h<=screen.bounds.y+screen.bounds.h+1.);
+                    let mut slot=Some(popup);close_window(cx,&mut slot);
+                }
+            }
+            eprintln!("[beek-display-test] PASS screens={} anchors={} native_icon_and_popup=true",screens.len(),screens.len()*2);
+            let _=cx.update(|app|app.quit());
+        }).detach();
+    });
 }
 
 // ---------- 主入口 ----------
 fn main() {
+    if std::env::var("BEEK_DISPLAY_SELFTEST").is_ok() { display_selftest(); return; }
     if std::env::var("BEEK_TRANSLATE_SELFTEST").is_ok() {
         translate_selftest();
         return;
@@ -1993,7 +2075,12 @@ fn main() {
         menubar::popup_status_menu_async();
     });
     app.run(|cx: &mut App| {
-        let cfg = config::load();
+        let mut cfg = config::load();
+        let update_ui_probe = std::env::var_os("BEEK_UPDATE_UI_SELFTEST").is_some();
+        if update_ui_probe && std::env::var("BEEK_UPDATE_UI_LANGUAGE").as_deref() == Ok("en") { cfg.ui_language = config::UiLanguage::English; }
+        let diagnostic=["BEEK_SELFTEST","BEEK_POPUP_CACHE_SELFTEST","BEEK_TRANSLATION_SETTINGS_ON_START","BEEK_CACHE_SETTINGS_ON_START","BEEK_ABOUT_ON_START","BEEK_UPDATE_UI_SELFTEST"].iter().any(|k|std::env::var_os(k).is_some());
+        let show_onboarding=std::env::var_os("BEEK_ONBOARDING_ON_START").is_some() || onboarding::should_show(cfg.onboarding_revision,diagnostic);
+        menubar::configure_ui_language(cfg.ui_language);
         menubar::set_dock_visible(cfg.show_in_dock);
         // 两个版本号来源必须一致：菜单栏标题读的是编译期版本，关于窗口读的是 bundle 里的
         // Info.plist。不一致过一次（菜单栏 1.0.5、关于 1.0.4），所以这里开机就报出来。
@@ -2015,6 +2102,10 @@ fn main() {
         menubar::set_ui_sender(tx.clone());
         menubar::setup_status_item(&cfg);
         setup_app_menus(cx, tx.clone());
+        if show_onboarding {let _=tx.send(UiEvent::OpenOnboarding);}
+        if std::env::var("BEEK_TRANSLATION_SETTINGS_ON_START").is_ok() {
+            let _ = tx.send(UiEvent::OpenTranslationSettings);
+        }
         if std::env::var("BEEK_CACHE_SETTINGS_ON_START").is_ok() {
             let _ = tx.send(UiEvent::OpenCacheSettings);
         }
@@ -2022,6 +2113,7 @@ fn main() {
         menubar::install_edit_menu();
         // 上次退出时可能已经下载好更新（比如进程被强杀），这里补装一次：
         // 换掉磁盘上的 bundle 后本进程还是旧版本，退出后下一次启动才是新版本。
+        if !update_ui_probe {
         if let Some(staged) = update::staged() {
             eprintln!(
                 "[beek] 启动：发现已下载的更新 v{}，静默安装（本次仍以 v{} 运行）",
@@ -2036,6 +2128,7 @@ fn main() {
                 let _ = update::run_script(&script);
                 update::clear_staged();
             }
+        }
         }
         menubar::dump_app_menus();
         // 诊断：直接开一次「关于」对话框，不用手点菜单（观察
@@ -2053,7 +2146,7 @@ fn main() {
             "[beek] 辅助功能权限：{}",
             if trusted { "已授权，取词可用" } else { "未授权，取词不可用" }
         );
-        if !trusted {
+        if !trusted && !show_onboarding && !update_ui_probe {
             // 弹系统对话框，引导用户直接去勾选 BeeK
             unsafe { ax::prompt_accessibility() };
         }
@@ -2065,12 +2158,18 @@ fn main() {
         if std::env::var("BEEK_POPUP_CACHE_SELFTEST").is_ok() {
             spawn_popup_cache_selftest(tx.clone());
         }
-        spawn_mouse_tracker();
-        spawn_auto_update(tx.clone());
-        spawn_ax_monitor(tx.clone());
+        if !update_ui_probe {
+            spawn_mouse_tracker();
+            spawn_auto_update(tx.clone());
+            spawn_ax_monitor(tx.clone());
+        } else {
+            std::thread::spawn(|| { std::thread::sleep(Duration::from_secs(20)); eprintln!("[beek] 更新窗口自检超时"); std::process::exit(2); });
+        }
+        if std::env::var_os("BEEK_UPDATE_CHECK_ON_START").is_some() { let _ = tx.send(UiEvent::CheckUpdate); }
 
         cx.spawn(async move |cx| {
             let t0 = Instant::now();
+            let mut intro:Option<onboarding::OnboardingWindow>=None;
             let mut icon_win: Option<WindowHandle<IconView>> = None;
             let mut popup_win: Option<WindowHandle<PopupView>> = None;
             // 请求 id 记账：只认「当前在飞行中 / 当前展示」的那一次翻译。
@@ -2085,9 +2184,80 @@ fn main() {
             let mut prev_buttons: Option<i64> = None;
             // 正在拖动弹窗时记着「鼠标相对窗口左上角的偏移」（Cocoa 坐标）
             let mut drag: Option<(f64, f64)> = None;
+            let mut update_operation = update_ui::Operation::Idle;
+            let mut update_prompt: Option<update_ui::Prompt> = None;
+            let mut update_probe = update_ui_probe.then(update_ui::Probe::new);
             loop {
+                if let Some(choice) = update_prompt.as_mut().and_then(|prompt| prompt.take_choice()) {
+                    update_prompt = None;
+                    match choice {
+                        update_ui::Choice::Dismiss => {},
+                        update_ui::Choice::Open(url) => update::open_url(&url),
+                        update_ui::Choice::Prepare(release) => {
+                            if update_operation.begin(update_ui::Operation::Preparing) {
+                                show_update_prompt(&mut update_prompt, update_operation.progress());
+                                menubar::set_update_hint(localization::tr("正在下载更新…"));
+                                prepare_manual_update(tx.clone(), release);
+                            }
+                        },
+                        update_ui::Choice::Install(app, version) => {
+                            match update::install_script(&app, &version).and_then(|script| update::run_script(&script)) {
+                                Ok(()) => std::process::exit(0),
+                                Err(error) => show_update_prompt(&mut update_prompt, update_ui::failed(&error)),
+                            }
+                        },
+                    }
+                }
+                if let Some(window)=intro.as_mut() {window.refresh();}
                 while let Ok(ev) = rx.try_recv() {
                     match ev {
+                        UiEvent::OpenOnboarding=>{
+                            shown=None;close_icon_window(cx,&mut icon_win);close_window(cx,&mut popup_win);popup_geom=None;
+                            if let Some(window)=intro.as_ref() {window.show();} else {intro=Some(onboarding::OnboardingWindow::new(tx.clone()));}
+                        },
+                        UiEvent::SetTranslationTarget(target)=>{
+                            match config::save_translation_target(target) {
+                                Ok(())=>{shown=None;close_icon_window(cx,&mut icon_win);close_window(cx,&mut popup_win);popup_geom=None;menubar::refresh_language_menus(&config::load());if let Some(window)=intro.as_mut(){window.target_changed();}},
+                                Err(error)=>{dialogs::alert("语言设置未保存",&error,&["好"]);menubar::refresh_language_menus(&config::load());if let Some(window)=intro.as_mut(){window.presentation_changed();}}
+                            }
+                        },
+                        UiEvent::SetUiLanguage(language)=>{
+                            match config::save_ui_language(language) {
+                                Ok(())=>{menubar::configure_ui_language(language);menubar::refresh_ui_language(&config::load());let _=cx.update(refresh_app_menus);menubar::install_edit_menu();close_window(cx,&mut popup_win);popup_geom=None;if let Some(window)=intro.as_mut(){window.presentation_changed();}},
+                                Err(error)=>{dialogs::alert("语言设置未保存",&error,&["好"]);menubar::refresh_language_menus(&config::load());if let Some(window)=intro.as_mut(){window.presentation_changed();}}
+                            }
+                        },
+                        UiEvent::OnboardingTrialDone(id,result)=>{if let Some(window)=intro.as_mut(){window.finish_trial(id,result);}},
+                        UiEvent::OnboardingAction(action)=>{
+                            use onboarding::Action;
+                            match action {
+                                Action::Closed=>{intro.take();},
+                                Action::Welcome|Action::Usage|Action::Services|Action::Ready|Action::Next|Action::Back=>{if let Some(window)=intro.as_mut(){window.navigate(action);}},
+                                Action::Demo=>{if let Some(window)=intro.as_mut(){window.demo();}},
+                                Action::Console=>onboarding::OnboardingWindow::open_console(),
+                                Action::Guide=>onboarding::OnboardingWindow::open_guide(),
+                                Action::Permissions=>menubar::open_accessibility_panel(),
+                                Action::Trial=>{if let Some(window)=intro.as_mut(){window.trial();}},
+                                Action::Finish|Action::Skip=>{
+                                    match config::finish_onboarding() {Ok(())=>{intro.take();},Err(message)=>{if let Some(window)=intro.as_mut(){window.message(message);}}}
+                                },
+                                Action::Configure|Action::Other=>{
+                                    let cfg=config::load();
+                                    let picked=if matches!(action,Action::Configure) {dialogs::doubao_settings_dialog(&cfg)}else{dialogs::translation_settings_dialog(&cfg)};
+                                    if let Some((engine,provider))=picked {
+                                        match config::save_engine_settings(engine,provider) {
+                                            Ok(())=>{
+                                                shown=None;close_icon_window(cx,&mut icon_win);close_window(cx,&mut popup_win);popup_geom=None;
+                                                menubar::set_translation_engine(engine);
+                                                if let Some(window)=intro.as_mut(){window.settings_changed();}
+                                            },
+                                            Err(message)=>{if let Some(window)=intro.as_mut(){window.message(message);}},
+                                        }
+                                    }
+                                    if let Some(window)=intro.as_ref(){window.show();}
+                                },
+                            }
+                        },
                         UiEvent::PopupCacheProbe { windows, cached, finish } => {
                             assert_eq!(menubar::popup_window_count(), windows, "popup visibility regression");
                             if cached {
@@ -2101,7 +2271,7 @@ fn main() {
                             if !presentation_gate.accepts(press, &text) { continue; }
                             // 发现候选选区只更新按钮。AX 的恢复/变化不能关掉当前译文；
                             // 点击新按钮才会切换请求与结果窗口。
-                            close_window(cx, &mut icon_win);
+                            close_icon_window(cx, &mut icon_win);
                             if icon_win.is_none() {
                                 icon_win = open_icon_window(cx, b, text, tx.clone());
                                 // 记下窗口真实的 frame：算出来的位置和系统实际摆放的位置
@@ -2125,7 +2295,7 @@ fn main() {
                             }
                         }
                         UiEvent::HideIcon => {
-                            close_window(cx, &mut icon_win);
+                            close_icon_window(cx, &mut icon_win);
                         }
                         UiEvent::StartTranslate(text, b) => {
                             // 用户点了我们自己的图标：那一下的坐标就在我們窗口上，
@@ -2138,19 +2308,11 @@ fn main() {
                             let id = req_seq;
                             shown = Some(id);
                             chunks_applied = 0;
-                            close_window(cx, &mut icon_win);
+                            close_icon_window(cx, &mut icon_win);
                             close_window(cx, &mut popup_win);
                             popup_geom = None;
-                            // 单个词 → 词典式详解（带读音）；一段话 → 只出译文
-                            let word = if translate::is_single_word(&text) {
-                                Some(text.clone())
-                            } else {
-                                None
-                            };
-                            if word.is_some() {
-                                eprintln!("[beek] +{}ms 判定为单个词，走词典详解：{:?}", ms(t0), text);
-                            }
-                            let request = translate::TranslationRequest::prepare(&text, word.is_some());
+                            let request = translate::TranslationRequest::prepare(&text, translate::is_single_word(&text));
+                            let word = request.as_ref().ok().filter(|r| r.is_dictionary()).map(|_| text.clone());
                             let cached = request.as_ref().ok().and_then(|r| r.cached());
                             let content = match (&request, &cached) {
                                 (_, Some(result)) => PopupContent::Result(result.clone()),
@@ -2158,7 +2320,8 @@ fn main() {
                                 _ => PopupContent::Loading,
                             };
                             // 缓存命中时第一帧就是完整正文，无需创建网络线程。
-                            let opened = open_popup_window(cx, content, b, word.clone());
+                            let engine_label = request.as_ref().map(|r| r.engine_label()).unwrap_or("翻译");
+                            let opened = open_popup_window(cx, content, b, word.clone(), engine_label,cached.is_some());
                             if let Some((w, geom)) = opened {
                                 // 立刻按当前内容量高度（缓存结果或「翻译中…」）
                                 popup_geom = Some(sync_popup_geometry(cx, &w, geom));
@@ -2286,6 +2449,21 @@ fn main() {
                             );
                             menubar::dump_windows("自检：真实拖动之后（期望 x=520、frame 上沿=700）");
                         }
+                        UiEvent::OpenTranslationSettings => {
+                            if let Some((engine, provider)) = dialogs::translation_settings_dialog(&config::load()) {
+                                match config::save_engine_settings(engine, provider) {
+                                    Ok(()) => {
+                                        shown = None;
+                                        close_window(cx, &mut popup_win);
+                                        close_icon_window(cx, &mut icon_win);
+                                        popup_geom = None;
+                                        menubar::set_translation_engine(engine);
+                                        if let Some(window)=intro.as_mut(){window.settings_changed();}
+                                    },
+                                    Err(error) => { dialogs::alert("翻译服务未保存", &error, &["好"]); }
+                                }
+                            }
+                        }
                         UiEvent::OpenCacheSettings => {
                             let current = config::load().translation_cache;
                             if let Some(settings) = dialogs::cache_settings_dialog(current) {
@@ -2304,14 +2482,10 @@ fn main() {
                                     let key = input.api_key.clone();
                                     let model = input.model.clone();
                                     config::update(|c| {
-                                        c.set_provider(
-                                            config::ARK,
-                                            config::ProviderConfig {
-                                                api_key: key.clone(),
-                                                model: if model.is_empty() { None } else { Some(model.clone()) },
-                                                base_url: None,
-                                            },
-                                        );
+                                        let mut provider = c.provider(config::ARK);
+                                        provider.api_key = key.clone();
+                                        provider.model = if model.is_empty() { None } else { Some(model.clone()) };
+                                        c.set_provider(config::ARK, provider);
                                     });
                                     eprintln!(
                                         "[beek] +{}ms 已保存 API Key（长度 {}，模型 {}）到 {}",
@@ -2348,187 +2522,48 @@ fn main() {
                             }
                         }
                         UiEvent::CheckUpdate => {
-                            eprintln!(
-                                "[beek] +{}ms 检查更新（当前 v{}，仓库 {}）",
-                                ms(t0),
-                                update::CURRENT_VERSION,
-                                update::REPO
-                            );
-                            let tx2 = tx.clone();
-                            std::thread::spawn(move || {
-                                let r = update::check();
-                                match &r {
-                                    Ok(Some(rel)) => eprintln!(
-                                        "[beek] 检查更新：远端 {}（资产 {}）",
-                                        rel.tag,
-                                        rel.asset_url.as_deref().unwrap_or("无")
-                                    ),
-                                    Ok(None) => eprintln!("[beek] 检查更新：远端还没有任何 release"),
-                                    Err(e) => eprintln!("[beek] 检查更新失败：{}", e),
-                                }
-                                let _ = tx2.send(UiEvent::UpdateChecked(r));
-                            });
-                        }
-                        UiEvent::UpdateChecked(result) => match result {
-                            Err(e) => {
-                                if dialogs::alert(
-                                    "检查更新失败",
-                                    &format!("{}\n\n当前版本 v{}。", e, update::CURRENT_VERSION),
-                                    &["打开 Release 页面", "好"],
-                                ) == 0
-                                {
-                                    update::open_url(update::RELEASES_URL);
-                                }
+                            if !update_operation.begin(update_ui::Operation::Checking) {
+                                if update_prompt.is_none() { show_update_prompt(&mut update_prompt, update_operation.progress()); }
+                                continue;
                             }
-                            Ok(None) => {
-                                if dialogs::alert(
-                                    "暂时没有可用的新版本",
-                                    &format!(
-                                        "仓库 {} 还没有发布过 release。\n\n当前版本 v{}。\
-                                         发布页：{}",
-                                        update::REPO,
-                                        update::CURRENT_VERSION,
-                                        update::RELEASES_URL
-                                    ),
-                                    &["打开 Release 页面", "好"],
-                                ) == 0
-                                {
-                                    update::open_url(update::RELEASES_URL);
+                            show_update_prompt(&mut update_prompt, update_operation.progress());
+                            menubar::set_update_hint(localization::tr("正在检查更新…"));
+                            eprintln!("[beek] 检查更新：开始，当前 v{}", update::CURRENT_VERSION);
+                            let result_tx = tx.clone();
+                            let failure_tx = tx.clone();
+                            if let Err(error) = std::thread::Builder::new().name("beek-update-check".into()).spawn(move || {
+                                let result = update::check();
+                                match &result {
+                                    Ok(Some(release)) => eprintln!("[beek] 检查更新：远端 {}", release.tag),
+                                    Ok(None) => eprintln!("[beek] 检查更新：没有 release"),
+                                    Err(error) => eprintln!("[beek] 检查更新失败：{error}"),
                                 }
-                            }
-                            Ok(Some(rel)) => {
-                                if !update::is_newer(&rel.version, update::CURRENT_VERSION) {
-                                    dialogs::alert(
-                                        "已是最新版本",
-                                        &format!(
-                                            "当前 v{}，远端最新 {}。",
-                                            update::CURRENT_VERSION, rel.tag
-                                        ),
-                                        &["好"],
-                                    );
-                                } else {
-                                    let notes: String = rel
-                                        .notes
-                                        .lines()
-                                        .take(12)
-                                        .collect::<Vec<_>>()
-                                        .join("\n");
-                                    let can_auto = rel.asset_url.is_some();
-                                    let body = format!(
-                                        "当前 v{} → 新版本 {}\n\n{}{}",
-                                        update::CURRENT_VERSION,
-                                        rel.tag,
-                                        if notes.trim().is_empty() {
-                                            "（这条 release 没写说明）\n".to_string()
-                                        } else {
-                                            format!("{}\n", notes.trim())
-                                        },
-                                        if can_auto {
-                                            ""
-                                        } else {
-                                            "\n注意：这条 release 没有附带升级包，只能手动下载。"
-                                        }
-                                    );
-                                    let choice = if can_auto {
-                                        dialogs::alert(
-                                            &format!("发现新版本 {}", rel.tag),
-                                            &body,
-                                            &["下载并更新", "打开 Release 页面", "稍后"],
-                                        )
-                                    } else {
-                                        dialogs::alert(
-                                            &format!("发现新版本 {}", rel.tag),
-                                            &body,
-                                            &["打开 Release 页面", "稍后"],
-                                        ) + 1
-                                    };
-                                    match choice {
-                                        // 下载并更新 → 后台下载 + 解压，回来再确认一次
-                                        0 => {
-                                            eprintln!(
-                                                "[beek] +{}ms 开始下载升级包 {}",
-                                                ms(t0),
-                                                update::asset_name(&rel.version)
-                                            );
-                                            let tx2 = tx.clone();
-                                            let rel2 = rel.clone();
-                                            std::thread::spawn(move || {
-                                                match update::prepare(&rel2) {
-                                                    Ok(app) => {
-                                                        let _ = tx2.send(UiEvent::UpdatePrepared(
-                                                            app,
-                                                            rel2.version.clone(),
-                                                        ));
-                                                    }
-                                                    Err(e) => {
-                                                        let _ =
-                                                            tx2.send(UiEvent::UpdateFailed(e));
-                                                    }
-                                                }
-                                            });
-                                        }
-                                        1 => update::open_url(&rel.page_url),
-                                        _ => eprintln!("[beek] +{}ms 用户选择稍后更新", ms(t0)),
-                                    }
-                                }
+                                let _ = result_tx.send(UiEvent::UpdateChecked(result));
+                            }) { let _ = failure_tx.send(UiEvent::UpdateChecked(Err(error.to_string()))); }
+                        },
+                        UiEvent::UpdateChecked(result) => {
+                            update_operation = update_ui::Operation::Idle;
+                            reset_update_hint();
+                            show_update_prompt(&mut update_prompt, update_ui::checked(result));
+                            if let Ok(path) = std::env::var("BEEK_UPDATE_LIVE_REPORT") {
+                                if let Some(prompt) = update_prompt.as_ref() { let _ = std::fs::write(path, prompt.native_state().to_string()); }
                             }
                         },
-                        UiEvent::UpdatePrepared(new_app, version) => {
-                            eprintln!(
-                                "[beek] +{}ms 升级包已就绪：{} → v{}",
-                                ms(t0),
-                                new_app.display(),
-                                version
-                            );
-                            let script = update::install_script(&new_app, &version);
-                            match script {
-                                Err(e) => {
-                                    dialogs::alert("更新失败", &e, &["好"]);
-                                }
-                                Ok(path) => {
-                                    let go = dialogs::alert(
-                                        &format!("已下载 v{}，现在更新？", version),
-                                        "点「立即更新」后 BeeK 会退出，替换 /Applications/BeeK.app \
-                                         并在几秒后自动启动新版本。",
-                                        &["立即更新", "稍后"],
-                                    ) == 0;
-                                    if go {
-                                        eprintln!(
-                                            "[beek] +{}ms 执行替换脚本 {}，准备退出",
-                                            ms(t0),
-                                            path.display()
-                                        );
-                                        if let Err(e) = update::run_script(&path) {
-                                            dialogs::alert("更新失败", &e, &["好"]);
-                                        } else {
-                                            // 脚本会等这个进程退出后再替换 bundle
-                                            std::process::exit(0);
-                                        }
-                                    } else {
-                                        eprintln!(
-                                            "[beek] +{}ms 用户选择稍后替换（升级包留在 {}）",
-                                            ms(t0),
-                                            new_app.display()
-                                        );
-                                    }
-                                }
-                            }
-                        }
+                        UiEvent::UpdatePrepared(app, version) => {
+                            update_operation = update_ui::Operation::Idle;
+                            reset_update_hint();
+                            show_update_prompt(&mut update_prompt, update_ui::prepared(app, version));
+                        },
                         UiEvent::UpdateStaged(version) => {
-                            menubar::set_update_hint(&format!("更新到 v{}（退出后生效）", version));
-                            eprintln!("[beek] 自动更新：菜单提示已改为「更新到 v{}（退出后生效）」", version);
-                        }
-                        UiEvent::UpdateFailed(e) => {
-                            eprintln!("[beek] +{}ms 更新失败：{}", ms(t0), e);
-                            if dialogs::alert(
-                                "更新失败",
-                                &format!("{}\n\n可以从 Release 页面手动下载安装。", e),
-                                &["打开 Release 页面", "好"],
-                            ) == 0
-                            {
-                                update::open_url(update::RELEASES_URL);
+                            if update_operation == update_ui::Operation::Idle {
+                                menubar::set_update_hint(&localization::message("更新到 v{}（退出后生效）", &[&version]));
                             }
-                        }
+                        },
+                        UiEvent::UpdateFailed(error) => {
+                            update_operation = update_ui::Operation::Idle;
+                            reset_update_hint();
+                            show_update_prompt(&mut update_prompt, update_ui::failed(&error));
+                        },
                         UiEvent::ClosePopup => {
                             let was = shown.take();
                             // 作废在飞行中的翻译：关闭之后不再被迟到的结果弹回来
@@ -2541,6 +2576,12 @@ fn main() {
                                 chunks_applied
                             );
                         }
+                    }
+                }
+                if let Some(probe) = update_probe.as_mut() {
+                    if probe.tick(&update_prompt, update_operation, &tx) {
+                        let _ = cx.update(|app| app.quit());
+                        return;
                     }
                 }
                 // 「点击弹窗外部关闭」+「按住拖动条拖动弹窗」：弹窗是 focus:false 的

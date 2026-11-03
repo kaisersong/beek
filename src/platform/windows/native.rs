@@ -102,7 +102,7 @@ pub fn mouse_anchor(source: crate::core::protocol::Source) -> Option<MouseAnchor
     let at = MOUSE_AT.load(Ordering::Acquire);
     let now = CLOCK.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1;
     if !MOUSE_INPUT.load(Ordering::Acquire)
-        || now.saturating_sub(at) > 500
+        || now.saturating_sub(at) > crate::core::policy::MOUSE_ANCHOR_MS
         || MOUSE_ROOT.load(Ordering::Acquire) != source.hwnd
         || MOUSE_PID.load(Ordering::Acquire) != source.pid
     {
@@ -219,12 +219,39 @@ unsafe extern "system" fn changed(
 ) {
     // No UIA/COM calls, text, networking or synchronous IPC in callbacks.
     if event == EVENT_OBJECT_LOCATIONCHANGE
-        && (unsafe { GetAncestor(h, GA_ROOT) } != unsafe { GetForegroundWindow() }
-            || !matches!(object, 0 | -8))
+        && !crate::core::policy::location_affects_selection(
+            unsafe { GetAncestor(h, GA_ROOT) }.0 as u64,
+            unsafe { GetForegroundWindow() }.0 as u64,
+            h.0 as u64,
+            object,
+        )
     {
         return;
     }
-    invalidate(event == EVENT_OBJECT_TEXTSELECTIONCHANGED);
+    let retry_focus = if event == EVENT_OBJECT_FOCUS {
+        let foreground = unsafe { GetForegroundWindow() };
+        if unsafe { GetAncestor(h, GA_ROOT) } != foreground {
+            return;
+        }
+        let mut pid = 0;
+        unsafe { GetWindowThreadProcessId(foreground, Some(&mut pid)) };
+        let now = CLOCK.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1;
+        crate::core::policy::retry_selection_after_focus(
+            MOUSE_INPUT.load(Ordering::Acquire),
+            DRAG.load(Ordering::Acquire),
+            MOUSE_ROOT.load(Ordering::Acquire) == foreground.0 as u64
+                && MOUSE_PID.load(Ordering::Acquire) == pid,
+            now.saturating_sub(MOUSE_AT.load(Ordering::Acquire)),
+        )
+    } else {
+        false
+    };
+    #[cfg(feature = "test-fixtures")]
+    super::diagnostics::event(
+        "native_change",
+        serde_json::json!({"event":event,"hwnd":h.0 as usize,"object":object,"epoch":EPOCH.load(Ordering::Acquire),"retry_focus":retry_focus}),
+    );
+    invalidate(event == EVENT_OBJECT_TEXTSELECTIONCHANGED || retry_focus);
 }
 pub fn hwnd(window: &gpui::Window) -> Result<HWND> {
     match HasWindowHandle::window_handle(window)

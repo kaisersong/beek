@@ -2,7 +2,11 @@
 
 轻量 AI 划词翻译工具，支持 macOS 和 Windows 11 x64。
 
-Windows 用户和开发者请先阅读[构建与测试](docs/windows/build-and-test.md)、[实施状态](docs/windows/implementation-status.md)和[完整测试方案](docs/windows/windows-test-plan.md)。Windows 使用 UIA、独立 helper、Windows Credential Manager 和用户级安装；下文 AX、LaunchAgent、配置路径与安装说明针对 macOS。Windows 当前提供未签名公开预览版；尚未完成的多屏/混合 DPI 验收见实施状态。
+[English](README.en.md)
+
+1.1.0 macOS 本地候选增加四步首次使用引导、中英文界面和独立的目标语言选择。在菜单栏「翻译为」或引导最后一页选择简体中文、英文、日文、韩文、繁体中文、法文、德文、西班牙文；所有已接入引擎按所选语言构建请求，缓存按目标语言隔离。LibreTranslate 仍需安装对应模型，MyMemory 仍需明确源语言。此处描述本地候选，不代表 1.1.0 已公开发布。
+
+Windows 用户请先阅读[安装与使用说明](packaging/windows/README-WINDOWS.txt)；源码构建、实施状态和完整测试方案见下方开发文档入口。Windows 使用 UIA、独立 helper、Windows Credential Manager 和用户级安装；下文 AX、LaunchAgent、配置路径与安装说明针对 macOS。Windows 当前提供未签名公开预览版，尚未完成完整的多屏/混合 DPI 验收。
 
 [![最新版本](https://img.shields.io/github/v/release/kaisersong/beek?label=%E6%9C%80%E6%96%B0%E7%89%88)](https://github.com/kaisersong/beek/releases/latest)
 [![下载 DMG](https://img.shields.io/badge/%E2%AC%87%EF%B8%8F_%E4%B8%8B%E8%BD%BD_macOS_%E7%89%88-DMG-0B6E6E?style=flat-square)](https://github.com/kaisersong/beek/releases/latest/download/BeeK.dmg)
@@ -13,6 +17,16 @@ Windows 用户和开发者请先阅读[构建与测试](docs/windows/build-and-t
 以上链接始终指向最新版。Windows 需要 Windows 11 x64，当前为未签名预览版，系统可能提示未知发布者；可用 Release 中的 SHA256 文件核验。运行安装包后从开始菜单打开 BeeK；便携版请解压整个目录后运行 `beek.exe`，保留同目录的 `beek-selection-host.exe`。
 
 选中文本 → 出现小蜜蜂图标 → 点击后翻译 → 弹窗显示结果。菜单栏常驻，由 LaunchAgent 托管。
+
+## 开发文档
+
+`docs` 按 xiaok 的方式链接到同级文档仓库的 `mydocs/beek/`。设计、评审与故障记录在 mydocs 维护；单独检出代码仍可构建和打包，阅读内部文档需要同时检出 mydocs。
+
+- [文档索引](docs/README.md)
+- [系统设计与平台边界](docs/design/system-design.md)
+- [原生资源与后台任务规则](docs/reliability/native-resource-lifecycle.md)
+- [2026-10-29 内存泄漏复盘](docs/reliability/2026-10-29-macos-native-memory-leak.md)
+- Windows：[构建与测试](docs/windows/build-and-test.md)、[实施状态](docs/windows/implementation-status.md)、[完整测试方案](docs/windows/windows-test-plan.md)
 
 ## 图标
 
@@ -80,6 +94,23 @@ BeeK 通过火山引擎方舟（豆包 Ark）的 Chat Completions 接口翻译�
 官方文档：[获取 API Key 并配置](https://www.volcengine.com/docs/82379/1541594)。
 
 拿到 Key 后，点菜单栏的蜜蜂图标 → 「设置 API Key…」。菜单项「如何获取 API Key…」会打开本节的 GitHub 页面（锚点 `#获取-api-key`）。
+
+## 首次使用引导（macOS 本地候选）
+
+首次启动会打开三步引导：了解划词用法 → 添加模型服务 → 开启辅助功能并试译。重点推荐豆包：在火山方舟创建 API Key、开通模型并复制 Model ID / 接入点 ID，然后从引导直接填写并启用。也可先用免 Key 的百度公共服务，已有服务选择与凭据会保留。
+
+引导中的“试译一句”只在点击后发送公开例句；重复试译命中缓存时直接显示“缓存命中”。完成或“稍后设置”后不再自动弹出，菜单栏、应用菜单及 Dock 的“使用引导…”可随时重开。关闭窗口但未完成时，下次启动仍可继续了解。缓存只在当前 BeeK 进程内保存，退出后清空；翻译卡片命中时也会标注“缓存”。
+
+## 可切换翻译服务（macOS 本地候选）
+
+初次使用默认选择「百度翻译（免费公共服务）」，无需填写 Key；点击翻译后选区经 Cloudflare 转发给百度，共享额度有限（单次最多 1500 字节）。菜单栏 BeeK →「翻译服务：…」可切换「百度翻译（自己的 Key）」、豆包 / OpenAI 兼容、Azure、Google、MyMemory 或 LibreTranslate / Argos，再填写相关字段并保存启用。已有引擎选择与个人凭据会保留。每家的配置独立保留，所有引擎统一使用本机结果缓存，并按引擎、账号和请求设置隔离；单词详解由豆包 / OpenAI 兼容引擎提供，其余服务返回普通译文。此功能尚未发布，公开 Release 以该版本实际菜单为准。
+
+本地开源方案使用 LibreTranslate 提供 API、Argos 提供翻译模型，首次准备模型需联网。打开 LibreTranslate 配置中的「本地安装说明…」即可离线查看 Docker / Python 安装命令、启动停止与排错，并「复制 AI 安装提示词」交给能操作终端的助手。复制不会自动执行安装。
+
+- [本地服务安装说明](resources/help/libretranslate-install.txt)
+- [给 AI 助手的快速安装提示词](resources/help/libretranslate-agent-prompt.txt)
+
+服务就绪后填写 `http://127.0.0.1:5000/translate`，默认不需要 Key。先用说明中的公开短句验证，再保存启用。BeeK 本身不会自动安装模型或启动服务。
 
 ## 配置
 

@@ -4,6 +4,32 @@ use std::collections::{HashMap, VecDeque};
 pub const QUERY_MS: u64 = 1500;
 pub const PENDING_MS: u64 = 300;
 pub const TTL_MS: u64 = 8000;
+pub const MOUSE_ANCHOR_MS: u64 = 500;
+
+/// Internal browser surfaces can animate without moving the source window or
+/// its selection. Window-object notifications matter only for the source root;
+/// caret-object notifications can come from a child of that source.
+pub fn location_affects_selection(
+    event_root: u64,
+    foreground: u64,
+    event_window: u64,
+    object_id: i32,
+) -> bool {
+    foreground != 0
+        && event_root == foreground
+        && (object_id == -8 || (object_id == 0 && event_window == foreground))
+}
+
+/// A provider can announce focus while answering the first UIA query. Requery
+/// only within the original, completed mouse gesture's existing source budget.
+pub fn retry_selection_after_focus(
+    mouse_input: bool,
+    dragging: bool,
+    same_source: bool,
+    gesture_age_ms: u64,
+) -> bool {
+    mouse_input && !dragging && same_source && gesture_age_ms <= MOUSE_ANCHOR_MS
+}
 
 #[derive(Default)]
 struct Fault {
@@ -124,6 +150,56 @@ impl Health {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_child_window_animation_keeps_the_current_selection() {
+        assert!(!location_affects_selection(10, 10, 11, 0));
+        assert!(!location_affects_selection(10, 10, 12, 0));
+    }
+
+    #[test]
+    fn moving_the_actual_source_window_invalidates_selection_geometry() {
+        assert!(location_affects_selection(10, 10, 10, 0));
+    }
+
+    #[test]
+    fn caret_movement_inside_the_current_source_still_invalidates_selection() {
+        assert!(location_affects_selection(10, 10, 11, -8));
+    }
+
+    #[test]
+    fn background_and_unrelated_objects_cannot_invalidate_current_geometry() {
+        assert!(!location_affects_selection(20, 10, 20, 0));
+        assert!(!location_affects_selection(20, 10, 21, -8));
+        assert!(!location_affects_selection(10, 10, 11, -4));
+        assert!(!location_affects_selection(0, 0, 0, 0));
+    }
+
+    #[test]
+    fn first_provider_focus_retries_the_completed_mouse_selection() {
+        // The real Chrome failure delivered focus 353ms after mouse release.
+        assert!(retry_selection_after_focus(true, false, true, 353));
+        assert!(retry_selection_after_focus(
+            true,
+            false,
+            true,
+            MOUSE_ANCHOR_MS
+        ));
+    }
+
+    #[test]
+    fn provider_focus_cannot_reuse_other_sources_or_unfinished_input() {
+        assert!(!retry_selection_after_focus(true, true, true, 100));
+        assert!(!retry_selection_after_focus(true, false, false, 100));
+        assert!(!retry_selection_after_focus(false, false, true, 100));
+    }
+
+    #[test]
+    fn repeated_provider_focus_cannot_extend_the_original_gesture_budget() {
+        for age in [501, 1000, u64::MAX] {
+            assert!(!retry_selection_after_focus(true, false, true, age));
+        }
+    }
     fn src(pid: u32) -> Source {
         Source {
             hwnd: pid as u64,

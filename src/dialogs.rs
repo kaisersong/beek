@@ -7,9 +7,12 @@
 // 线程约束：全部只能在主线程调用（菜单动作和 GPUI 主循环都在主线程，
 // 后台线程只能把结果通过 UiEvent 送回主循环再弹）。
 use cocoa::base::{id, nil};
+use beek::core::localization;
 use cocoa::foundation::{NSInteger, NSPoint, NSRect, NSSize, NSString};
 use objc::runtime::{NO, YES};
 use objc::{class, msg_send, sel, sel_impl};
+
+fn uistr(s:&str)->id {nsstr(localization::tr(s))}
 
 fn nsstr(s: &str) -> id {
     unsafe {
@@ -98,13 +101,13 @@ pub fn alert(title: &str, body: &str, buttons: &[&str]) -> usize {
     }
     unsafe {
         let alert: id = msg_send![class!(NSAlert), new];
-        let _: () = msg_send![alert, setMessageText: nsstr(title)];
+        let _: () = msg_send![alert, setMessageText: uistr(title)];
         if !body.is_empty() {
-            let _: () = msg_send![alert, setInformativeText: nsstr(body)];
+            let _: () = msg_send![alert, setInformativeText: uistr(body)];
         }
         let _: () = msg_send![alert, setAlertStyle: 1i64]; // NSAlertStyleInformational
         for b in buttons {
-            let _: id = msg_send![alert, addButtonWithTitle: nsstr(b)];
+            let _: id = msg_send![alert, addButtonWithTitle: uistr(b)];
         }
         let prev = enter_dialog_context();
         // 诊断：BEEK_DIALOG_AUTOCLOSE=1 时 2 秒后自动「按好」，
@@ -113,6 +116,7 @@ pub fn alert(title: &str, body: &str, buttons: &[&str]) -> usize {
             crate::menubar::stop_modal_async(std::time::Duration::from_secs(2));
         }
         let resp: NSInteger = msg_send![alert, runModal];
+        let _: () = msg_send![alert,release];
         leave_dialog_context(prev);
         (resp - 1000).max(0) as usize
     }
@@ -136,9 +140,9 @@ pub fn cache_settings_dialog(settings: beek::core::translation_cache::CacheSetti
             let prev = enter_dialog_context();
             let view: id = msg_send![class!(NSView), alloc];
             let view: id = msg_send![view, initWithFrame: NSRect::new(NSPoint::new(0., 0.), NSSize::new(420., 96.))];
-            let entries_label = label(&format!("缓存条数（0–{}，0 表示关闭）", MAX_ENTRIES), NSRect::new(NSPoint::new(0., 72.), NSSize::new(420., 16.)));
+            let entries_label = label(&format!("{} (0–{}, {})",localization::tr("缓存条数"),MAX_ENTRIES,localization::tr("0 表示关闭")), NSRect::new(NSPoint::new(0., 72.), NSSize::new(420., 16.)));
             let entries_field = field(&entries, "128", NSRect::new(NSPoint::new(0., 46.), NSSize::new(420., 24.)));
-            let minutes_label = label(&format!("有效时间（分钟，0–{}，0 表示关闭）", MAX_TTL_MINUTES), NSRect::new(NSPoint::new(0., 26.), NSSize::new(420., 16.)));
+            let minutes_label = label(&format!("{} (0–{}, {})",localization::tr("有效时间（分钟）"),MAX_TTL_MINUTES,localization::tr("0 表示关闭")), NSRect::new(NSPoint::new(0., 26.), NSSize::new(420., 16.)));
             let minutes_field = field(&minutes, "30", NSRect::new(NSPoint::new(0., 0.), NSSize::new(420., 24.)));
             let _: () = msg_send![entries_field, setIdentifier: nsstr("beek-cache-max-entries")];
             let _: () = msg_send![minutes_field, setIdentifier: nsstr("beek-cache-ttl-minutes")];
@@ -146,14 +150,14 @@ pub fn cache_settings_dialog(settings: beek::core::translation_cache::CacheSetti
                 let _: () = msg_send![view, addSubview: child];
             }
             let alert: id = msg_send![class!(NSAlert), new];
-            let _: () = msg_send![alert, setMessageText: nsstr("翻译缓存设置")];
+            let _: () = msg_send![alert, setMessageText: uistr("翻译缓存设置")];
             let body = if error.is_empty() {
-                "相同内容优先复用已完成的翻译，不再调用模型。\n缓存仅保留在内存，最多 2MiB，退出后清空。\n保存后立即生效。".to_owned()
+                "相同内容优先复用已完成的翻译。\n所有翻译服务统一使用结果缓存（包括百度）。\n缓存仅保留在内存，最多 2MiB，退出后清空。\n保存后立即生效。".to_owned()
             } else { error.clone() };
-            let _: () = msg_send![alert, setInformativeText: nsstr(&body)];
+            let _: () = msg_send![alert, setInformativeText: uistr(&body)];
             let _: () = msg_send![alert, setAccessoryView: view];
-            let _: id = msg_send![alert, addButtonWithTitle: nsstr("保存")];
-            let _: id = msg_send![alert, addButtonWithTitle: nsstr("取消")];
+            let _: id = msg_send![alert, addButtonWithTitle: uistr("保存")];
+            let _: id = msg_send![alert, addButtonWithTitle: uistr("取消")];
             let window: id = msg_send![alert, window];
             let _: () = msg_send![window, makeFirstResponder: entries_field];
             let response: NSInteger = msg_send![alert, runModal];
@@ -172,7 +176,145 @@ pub fn cache_settings_dialog(settings: beek::core::translation_cache::CacheSetti
         minutes = next_minutes;
         match CacheSettings::from_input(&entries, &minutes) {
             Ok(settings) => return Some(settings),
-            Err(message) => error = message,
+            Err(message) => error = if localization::is_english(){format!("Enter whole numbers: entries 0–{MAX_ENTRIES}, lifetime 0–{MAX_TTL_MINUTES} minutes. Zero disables the cache.")}else{message},
+        }
+    }
+}
+
+/// Native picker then provider-specific fields. Nothing is persisted until Save.
+pub fn translation_settings_dialog(config: &crate::config::Config)
+    -> Option<(crate::config::Engine, crate::config::ProviderConfig)> {
+    translation_settings_starting_at(config,None)
+}
+
+pub fn doubao_settings_dialog(config: &crate::config::Config) -> Option<(crate::config::Engine,crate::config::ProviderConfig)> {
+    translation_settings_starting_at(config,Some(crate::config::Engine::Ark))
+}
+
+fn translation_settings_starting_at(config:&crate::config::Config,mut direct:Option<crate::config::Engine>) -> Option<(crate::config::Engine,crate::config::ProviderConfig)> {
+    use crate::config::Engine;
+    let mut selected = config.translation_engine;
+    let mut drafts = config.providers.clone();
+    loop {
+        let picked = if let Some(engine)=direct.take() { Some(engine) } else { unsafe {
+            let _pool = crate::macos_runtime::AutoreleasePool::new();
+            let prev = enter_dialog_context();
+            let view: id = msg_send![class!(NSView), alloc];
+            let view: id = msg_send![view, initWithFrame: NSRect::new(NSPoint::new(0.,0.),NSSize::new(460.,44.))];
+            let picker: id = msg_send![class!(NSPopUpButton), alloc];
+            let picker: id = msg_send![picker, initWithFrame: NSRect::new(NSPoint::new(0.,8.),NSSize::new(460.,28.)) pullsDown: NO];
+            for engine in Engine::ALL { let _: () = msg_send![picker, addItemWithTitle: uistr(engine.label())]; }
+            let index = Engine::ALL.iter().position(|e|*e==selected).unwrap_or(Engine::ALL.len());
+            if index == Engine::ALL.len() { let _: () = msg_send![picker, addItemWithTitle: uistr(Engine::Unsupported.label())]; }
+            let _: () = msg_send![picker, selectItemAtIndex: index as NSInteger];
+            let _: () = msg_send![picker, setIdentifier: nsstr("beek-translation-engine")];
+            let _: () = msg_send![view, addSubview: picker];
+            let alert: id = msg_send![class!(NSAlert), new];
+            let _: () = msg_send![alert, setMessageText: uistr("翻译服务设置")];
+            let _: () = msg_send![alert, setInformativeText: uistr("选择翻译引擎，再配置并启用。每个引擎的设置单独保留。\n不会自动切换服务；仅在你点击翻译后发送选区。")];
+            let _: () = msg_send![alert, setAccessoryView: view];
+            let _: id = msg_send![alert, addButtonWithTitle: uistr("配置并启用…")];
+            let _: id = msg_send![alert, addButtonWithTitle: uistr("取消")];
+            let response: NSInteger = msg_send![alert, runModal];
+            let chosen: NSInteger = msg_send![picker, indexOfSelectedItem];
+            let _: () = msg_send![alert, release]; let _: () = msg_send![view, release]; let _: () = msg_send![picker, release];
+            leave_dialog_context(prev);
+            if response==1000 { Engine::ALL.get(chosen as usize).copied() } else { None }
+        }}?;
+        selected = picked;
+        let mut provider = drafts.get(selected.key()).cloned().unwrap_or_default();
+        let mut error = String::new();
+        loop {
+            let (response, values) = unsafe {
+                let _pool = crate::macos_runtime::AutoreleasePool::new();
+                let prev = enter_dialog_context();
+                // key, label, placeholder, value, secure
+                let specs: Vec<(&str,&str,&str,String,bool)> = match selected {
+                    Engine::PublicBaidu => vec![],
+                    Engine::Ark => vec![("key","API Key（也可使用 BEEK_ARK_KEY）","API Key",provider.api_key.clone(),true),("model","模型 / 接入点 ID（留空用默认模型）","doubao-seed-2-0-mini-260428",provider.model.clone().unwrap_or_default(),false),("url","OpenAI 兼容服务完整地址（可留空）","https://…/chat/completions",provider.base_url.clone().unwrap_or_default(),false)],
+                    Engine::Azure => vec![("key","Azure 资源密钥","资源密钥",provider.api_key.clone(),true),("region","资源区域（全球资源可留空）","例如 eastasia",provider.region.clone(),false)],
+                    Engine::Baidu => vec![("app_id","百度翻译 App ID","App ID",provider.app_id.clone(),false),("key","百度翻译密钥","密钥",provider.api_key.clone(),true)],
+                    Engine::Google => vec![("key","Google Cloud Translation API Key","API Key",provider.api_key.clone(),true)],
+                    Engine::MyMemory => vec![("source","源语言代码（不支持自动识别）","en / ja / fr",if provider.source_language.is_empty(){"en".into()}else{provider.source_language.clone()},false),("email","有效邮箱（可留空）","可选邮箱",provider.email.clone(),false)],
+                    Engine::LibreTranslate => vec![("url","LibreTranslate / Argos 服务地址","http://127.0.0.1:5000/translate",provider.base_url.clone().unwrap_or_default(),false),("key","服务 API Key（本地服务可留空）","可选 API Key",provider.api_key.clone(),true)],
+                    _ => unreachable!(),
+                };
+                let height = (specs.len() * 58) as f64;
+                let view: id = msg_send![class!(NSView), alloc];
+                let view: id = msg_send![view, initWithFrame: NSRect::new(NSPoint::new(0.,0.),NSSize::new(460.,height))];
+                let mut owned = Vec::new(); let mut fields = Vec::new();
+                for (index,(key,title,placeholder,value,secure)) in specs.iter().enumerate() {
+                    let y = height - (index as f64 + 1.) * 58.;
+                    let caption = label(title, NSRect::new(NSPoint::new(0.,y+30.),NSSize::new(460.,18.)));
+                    let input: id = if *secure {
+                        let alloc: id = msg_send![class!(NSSecureTextField), alloc];
+                        let field: id = msg_send![alloc, initWithFrame: NSRect::new(NSPoint::new(0.,y+2.),NSSize::new(460.,26.))];
+                        let _: () = msg_send![field, setStringValue: nsstr(value)]; let _: () = msg_send![field, setEditable: YES]; field
+                    } else { field(value,placeholder,NSRect::new(NSPoint::new(0.,y+2.),NSSize::new(460.,26.))) };
+                    let _: () = msg_send![input, setIdentifier: nsstr(&format!("beek-engine-{key}"))];
+                    let _: () = msg_send![view, addSubview: caption]; let _: () = msg_send![view, addSubview: input];
+                    owned.extend([caption,input]); fields.push((key.to_string(),input));
+                }
+                let alert: id = msg_send![class!(NSAlert), new];
+                let _: () = msg_send![alert, setMessageText: uistr(selected.label())];
+                let help = if !error.is_empty(){error.clone()}else{match selected {
+                    Engine::Ark=>"提供流式翻译与单词详解。凭据只保存在本机。",
+                    Engine::PublicBaidu=>"无需 Key，初次使用默认启用。点击翻译后，选中文本经 Cloudflare 转发给百度；公共服务端不保存原文/译文；本机可按缓存设置复用译文。共享免费额度有限，单次最多 1500 字节；繁忙或额度用尽时可切换自己的百度 Key 或其他服务。",
+                    Engine::Baidu=>"翻译为菜单中选择的语言。请填写自己的 App ID 和密钥。支持结果缓存。",
+                    Engine::MyMemory=>"翻译为菜单中选择的语言；单次最多 500 字节。需要明确源语言。邮箱为可选项。",
+                    Engine::LibreTranslate=>"翻译为菜单中选择的语言。需要已运行的 LibreTranslate 服务（可使用 Argos 模型）；BeeK 不会自动安装或启动它。",
+                    _=>"翻译为菜单中选择的语言。请先开通对应翻译 API；保存配置本身不会发起网络请求。",
+                }.into()};
+                let _: () = msg_send![alert, setInformativeText: uistr(&help)];
+                let _: () = msg_send![alert, setAccessoryView: view];
+                for title in ["保存并启用","返回","取消"] { let _: id = msg_send![alert, addButtonWithTitle: uistr(title)]; }
+                if selected == Engine::LibreTranslate { let _: id = msg_send![alert, addButtonWithTitle: uistr("本地安装说明…")]; }
+                if let Some((_,first))=fields.first() { let window: id = msg_send![alert, window]; let _: () = msg_send![window, makeFirstResponder: *first]; }
+                let response: NSInteger = msg_send![alert, runModal];
+                let values=fields.iter().map(|(key,input)|(key.clone(),nsstring_value(msg_send![*input,stringValue]).trim().to_owned())).collect::<Vec<_>>();
+                let _: () = msg_send![alert, release]; let _: () = msg_send![view, release];
+                for object in owned { let _: () = msg_send![object, release]; }
+                leave_dialog_context(prev);
+                (response,values)
+            };
+            for (key,value) in values { match key.as_str() {
+                "key"=>provider.api_key=value,"model"=>provider.model=(!value.is_empty()).then_some(value),"url"=>provider.base_url=(!value.is_empty()).then_some(value),"region"=>provider.region=value,"app_id"=>provider.app_id=value,"source"=>provider.source_language=value,"email"=>provider.email=value,_=>{}
+            }}
+            match response {
+                1000=>match crate::config::validate_engine_settings(selected,&provider) { Ok(())=>return Some((selected,provider)),Err(message)=>error=message },
+                1001=>{ drafts.insert(selected.key().into(),provider); break; },
+                1003 if selected == Engine::LibreTranslate => local_translation_help_dialog(),
+                _=>return None,
+            }
+        }
+    }
+}
+
+/// Bundled user help: available offline, independent of the external docs repo.
+fn local_translation_help_dialog() {
+    let guide=localization::choose(include_str!("../resources/help/libretranslate-install.txt"),include_str!("../resources/help/libretranslate-install.en.txt"));
+    let prompt=localization::choose(include_str!("../resources/help/libretranslate-agent-prompt.txt"),include_str!("../resources/help/libretranslate-agent-prompt.en.txt"));
+    let mut feedback = String::new();
+    loop {
+        let response = unsafe {
+            let _pool = crate::macos_runtime::AutoreleasePool::new();
+            let previous = enter_dialog_context();
+            let alert: id = msg_send![class!(NSAlert), new];
+            let _: () = msg_send![alert, setMessageText: uistr("本地翻译安装说明")];
+            let body = format!("{}LibreTranslate 提供接口，Argos 提供本机模型。\n\n1. 推荐点击“复制 AI 安装提示词”，粘贴给能操作终端的 AI 助手（如小K），完成检查、安装和验证。\n\n2. 手动安装可选 Docker 或独立 Python 环境；点击“复制完整安装说明”可取得所有命令、启动/停止和排错方法。\n\n3. 首次需要联网下载 en/zh 模型。服务就绪后，用公开短句测试 /translate，确认返回非空 translatedText。\n\n4. 返回配置填写：\nhttp://127.0.0.1:5000/translate\nAPI Key 默认留空，然后保存并启用。\n\n只监听本机；复制不会自动执行安装。速度取决于电脑和文本长度。",feedback);
+            let body=if localization::is_english(){format!("{}{}",localization::tr(&feedback),guide)}else{body};
+            let _: () = msg_send![alert, setInformativeText: uistr(&body)];
+            for title in ["返回配置","复制 AI 安装提示词","复制完整安装说明","官方安装文档"] { let _: id = msg_send![alert, addButtonWithTitle: uistr(title)]; }
+            let result: NSInteger = msg_send![alert, runModal];
+            let _: () = msg_send![alert, release];
+            leave_dialog_context(previous);
+            result
+        };
+        match response {
+            1001 => { crate::clipboard::write_string(prompt); crate::clipboard::note_own_write(); feedback = "AI 安装提示词已复制。\n\n".into(); },
+            1002 => { crate::clipboard::write_string(guide); crate::clipboard::note_own_write(); feedback = "完整安装说明已复制。\n\n".into(); },
+            1003 => crate::update::open_url("https://docs.libretranslate.com/guides/installation/"),
+            _ => return,
         }
     }
 }
@@ -181,7 +323,7 @@ fn label(text: &str, frame: NSRect) -> id {
     unsafe {
         let l: id = msg_send![class!(NSTextField), alloc];
         let l: id = msg_send![l, initWithFrame: frame];
-        let _: () = msg_send![l, setStringValue: nsstr(text)];
+        let _: () = msg_send![l, setStringValue: uistr(text)];
         let _: () = msg_send![l, setBezeled: NO];
         let _: () = msg_send![l, setEditable: NO];
         let _: () = msg_send![l, setSelectable: NO];
@@ -195,7 +337,7 @@ fn field(value: &str, placeholder: &str, frame: NSRect) -> id {
         let f: id = msg_send![class!(NSTextField), alloc];
         let f: id = msg_send![f, initWithFrame: frame];
         let _: () = msg_send![f, setStringValue: nsstr(value)];
-        let _: () = msg_send![f, setPlaceholderString: nsstr(placeholder)];
+        let _: () = msg_send![f, setPlaceholderString: uistr(placeholder)];
         let _: () = msg_send![f, setEditable: YES];
         f
     }
@@ -234,15 +376,14 @@ pub fn key_settings_dialog(mut key: String, mut model: String) -> Option<KeyInpu
             let _: () = msg_send![view, addSubview: model_field];
 
             let alert: id = msg_send![class!(NSAlert), new];
-            let _: () = msg_send![alert, setMessageText: nsstr("BeeK 翻译服务设置")];
-            let _: () = msg_send![alert, setInformativeText: nsstr(
-                "Key 只保存在本机：~/Library/Application Support/BeeK/config.json。\n\
-                 也可以改用环境变量 BEEK_ARK_KEY（此处的配置优先）。"
+            let _: () = msg_send![alert, setMessageText: uistr("BeeK 翻译服务设置")];
+            let _: () = msg_send![alert, setInformativeText: uistr(
+                localization::choose("Key 只保存在本机：~/Library/Application Support/BeeK/config.json。\n也可以改用环境变量 BEEK_ARK_KEY（此处的配置优先）。","Your key is stored only on this Mac in ~/Library/Application Support/BeeK/config.json.\nYou can also use BEEK_ARK_KEY; saved settings take priority.")
             )];
             let _: () = msg_send![alert, setAccessoryView: view];
-            let _: () = msg_send![alert, addButtonWithTitle: nsstr("保存")];
-            let _: () = msg_send![alert, addButtonWithTitle: nsstr("取消")];
-            let _: () = msg_send![alert, addButtonWithTitle: nsstr("如何获取 Key…")];
+            let _: () = msg_send![alert, addButtonWithTitle: uistr("保存")];
+            let _: () = msg_send![alert, addButtonWithTitle: uistr("取消")];
+            let _: () = msg_send![alert, addButtonWithTitle: uistr("如何获取 Key…")];
 
             // 让光标直接落在 Key 输入框里
             let win: id = msg_send![alert, window];
@@ -291,6 +432,7 @@ pub fn about_dialog() -> usize {
         build,
         crate::update::REPO
     );
+    let body=if localization::is_english(){format!("A lightweight selection translator for macOS\n\nVersion v{} (build {})\nRepository: github.com/{}\n\nSelect text, click the bee, and read its translation.\nSingle words can include pronunciation, definitions, examples, and usage. Click the speaker to listen.",version,build,crate::update::REPO)}else{body};
     // 标题不再带 emoji：NSAlert 的图标本来就是 app 自己的图标（真实素材），
     // 再写一个 🐝 字形等于在真图标下面又贴了个假图标。
     alert("BeeK", &body, &["检查更新…", "打开 README", "好"])

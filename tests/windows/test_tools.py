@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -224,6 +225,23 @@ class MockServerTests(unittest.TestCase):
         self.assertEqual(json.loads(self.request('/stats', 'GET')[1])['requests'], before + 4)
         self.assertEqual(self.request('/sse/normal', body=b'invalid')[0], 400)
         self.assertEqual(self.request('/sse/normal', body=b'x' * (128 * 1024 + 1))[0], 413)
+
+    def test_oversized_headers_without_body_do_not_block_rejection(self):
+        before = json.loads(self.request('/stats', 'GET')[1])['requests']
+        conn = http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=4)
+        try:
+            conn.putrequest('POST', '/sse/normal')
+            conn.putheader('Content-Length', str(mock.MAX_BODY + 1))
+            start = time.monotonic()
+            conn.endheaders()
+            response = conn.getresponse()
+            self.assertEqual(response.status, 413)
+            self.assertEqual(response.getheader('Connection'), 'close')
+            response.read()
+            self.assertLess(time.monotonic() - start, 2.5)
+        finally:
+            conn.close()
+        self.assertEqual(json.loads(self.request('/stats', 'GET')[1])['requests'], before)
 
 
 if __name__ == '__main__':
