@@ -5,7 +5,7 @@
 //
 // 替换为什么交给一个临时 shell 脚本：正在运行的 app 不能删掉自己再把自己拷回来
 // （bundle 被占用），所以流程是「先把新 app 解压好 → 生成脚本 → 退出自己 →
-// 脚本等进程退出后替换 + 重新签名 + 让 launchd 重新拉起」。
+// 独立脚本准备完整 bundle、等进程退出后切换目录，再重新打开」。
 // 这里只做纯逻辑和 IO，弹窗由主循环负责（AppKit 只能在主线程用）。
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -26,9 +26,6 @@ const LATEST_DOWNLOAD: &str = "https://github.com/kaisersong/beek/releases/lates
 
 /// 当前版本：编译期写进二进制的 Cargo 版本，是「有没有新版本」的基准
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// launchd 的 label（替换完成后用它把 app 再拉起来）
-pub const LAUNCH_LABEL: &str = "com.kaisersong.beek";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Release {
@@ -250,10 +247,6 @@ pub fn staged() -> Option<Staged> {
     Some(staged)
 }
 
-pub fn clear_staged() {
-    let _ = std::fs::remove_file(staged_path());
-}
-
 /// 更新包存放目录：~/Library/Application Support/BeeK/update
 pub fn update_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -333,7 +326,7 @@ fn find_app(dir: &Path) -> Option<PathBuf> {
 
 /// 生成替换脚本（不改动 app，只写文件），返回脚本路径。
 ///
-/// 脚本内容：让 launchd 先别拉起 → 等旧进程退出 → 换 bundle → 重新签名 → 再拉起。
+/// 脚本先复制并校验独立的新 bundle，等旧进程退出后切换目录，再重新打开。
 /// 重新签名沿用安装脚本同样的策略（优先 Apple Development 证书）：
 /// TCC 按签名身份记辅助功能授权，换成 ad-hoc 就会让用户重新授权一次。
 pub fn install_script(new_app: &Path, version: &str) -> Result<PathBuf, String> {
@@ -352,75 +345,87 @@ pub fn install_script_to(
     relaunch: bool,
     name: &str,
 ) -> Result<PathBuf, String> {
-    let script = PathBuf::from(format!("/tmp/{}.sh", name));
-    let body = format!(
-        r#"#!/bin/sh
-# 由 BeeK 自动更新生成：替换 /Applications/BeeK.app
-LOG=/tmp/beek_update.log
-exec >>"$LOG" 2>&1
-echo "== $(date '+%F %T') 开始替换：{version} =="
-APP="/Applications/BeeK.app"
-# 路径必须加引号：解压目录在 ~/Library/Application Support 下，含空格，
-# 不加引号会被 shell 截断（实测：脚本走到 ditto 时源路径为空、替换失败，旧 app 已被删）
-NEW="{new_app}"
-LABEL={label}
-if [ "{relaunch}" = "1" ]; then
-    # 立即更新：先让旧进程退出，再替换，最后重新拉起
-    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null
-    i=0
-    while pgrep -x BeeK >/dev/null && [ $i -lt 30 ]; do sleep 0.5; i=$((i+1)); done
-    if pgrep -x BeeK >/dev/null; then echo "旧进程仍在运行，放弃替换"; exit 1; fi
-else
-    # 静默安装（退出时 / 下次启动时）：**不动进程**。
-    # macOS 允许替换正在运行的 bundle（进程持有的是旧 inode），
-    # 这里 bootout 的话会把用户正在用的 app 直接杀掉，得不偿失。
-    echo "静默安装：只替换 bundle，不动正在运行的进程"
-fi
-rm -rf "$APP" || {{ echo "删除旧 app 失败"; exit 1; }}
-ditto "$NEW" "$APP" || {{ echo "复制新 app 失败"; exit 1; }}
-xattr -dr com.apple.quarantine "$APP" 2>/dev/null
-# 如果新包本来就是 Developer ID 签名（CI 出的、已公证），就**保留原签名**：
-# 重签会换成这台机器的 Apple Development 身份 → 辅助功能/自动化授权失效、
-# 而且公证 staple 也跟着失效。只有本地/临时包才需要重签。
-INCOMING_ID=$(codesign -dv --verbose=4 "$NEW" 2>&1 | sed -n 's/^Authority=\(Developer ID Application.*\)/\1/p' | head -1)
-if [ -n "$INCOMING_ID" ]; then
-    echo "新包已是 Developer ID 签名（${{INCOMING_ID}}）→ 保留原签名与公证"
-else
-    DEVID=$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)
-    if [ -n "$DEVID" ]; then
-        codesign --force --sign "$DEVID" --identifier com.kaisersong.beek "$APP"
-    else
-        echo "⚠️ 没找到 Apple Development 证书，退回 ad-hoc（辅助功能需重新勾选）"
-        codesign --force --sign - --identifier com.kaisersong.beek "$APP"
-    fi
-fi
-if [ "{relaunch}" = "1" ]; then
-    launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$LABEL.plist"
-else
-    echo "（静默安装：不重新拉起，下次启动即为新版本）"
-fi
-echo "== 替换完成，当前版本 $(/usr/libexec/PlistBuddy -c Print:CFBundleShortVersionString "$APP/Contents/Info.plist" 2>/dev/null) =="
-"#,
-        version = version,
-        new_app = new_app.display(),
-        label = LAUNCH_LABEL,
-        relaunch = if relaunch { "1" } else { "0" }
+    // A private, unique directory prevents concurrent attempts from overwriting
+    // the script and avoids predictable files in the shared /tmp directory.
+    let mut nonce = [0u8; 16];
+    getrandom::fill(&mut nonce).map_err(|e| format!("创建更新脚本随机名失败：{}", e))?;
+    let nonce: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+    let dir = std::env::temp_dir().join(format!("beek-update-{nonce}"));
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .map_err(|e| format!("创建更新脚本目录失败：{}", e))?;
+    let name = Path::new(name).file_name().unwrap_or_default().to_string_lossy();
+    let script = dir.join(format!("{name}.sh"));
+    let body = install_script_body(
+        Path::new("/Applications/BeeK.app"),
+        new_app,
+        version,
+        relaunch,
+        std::process::id(),
+        Path::new("/tmp/beek_update.log"),
     );
     std::fs::write(&script, body).map_err(|e| format!("写替换脚本失败：{}", e))?;
     Ok(script)
 }
 
-/// 后台启动替换脚本（调用方随后应当立刻退出自己）
+const INSTALL_SCRIPT: &str = include_str!("update_install.sh");
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn install_script_body(
+    app: &Path,
+    new_app: &Path,
+    version: &str,
+    relaunch: bool,
+    parent_pid: u32,
+    log: &Path,
+) -> String {
+    let args = [
+        app.to_string_lossy().into_owned(),
+        new_app.to_string_lossy().into_owned(),
+        version.to_string(),
+        if relaunch { "1" } else { "0" }.to_string(),
+        parent_pid.to_string(),
+        log.to_string_lossy().into_owned(),
+    ]
+    .iter()
+    .map(|s| shell_quote(s))
+    .collect::<Vec<_>>()
+    .join(" ");
+    format!("#!/bin/sh\nset -- {args}\n{INSTALL_SCRIPT}")
+}
+
+/// Spawn outside the app's launchd process group, with no shell interpolation.
+/// The caller exits only after spawn confirms that the helper executable started.
 pub fn run_script(script: &Path) -> Result<(), String> {
-    std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "nohup sh {} >> /tmp/beek_update.log 2>&1 &",
-            script.display()
-        ))
-        .status()
-        .map_err(|e| format!("启动替换脚本失败：{}", e))
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let mut command = Command::new("/usr/bin/nohup");
+    command
+        .arg("/bin/sh")
+        .arg(script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(|| {
+            extern "C" {
+                fn setsid() -> i32;
+            }
+            if setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command
+        .spawn()
         .map(|_| ())
+        .map_err(|e| format!("启动替换脚本失败：{}", e))
 }
 
 /// 用系统默认程序打开链接（README / Release 页 / 授权面板都用它）
@@ -488,7 +493,7 @@ pub fn selftest_install() {
         Ok(path) => {
             let body = std::fs::read_to_string(&path).unwrap_or_default();
             // 路径带引号是硬要求：解压目录在 ~/Library/Application Support 下，含空格
-            let quoted = body.contains("NEW=\"") && body.contains("APP=\"");
+            let quoted = body.contains(&shell_quote(&fake.to_string_lossy()));
             eprintln!(
                 "[自检] 替换脚本已生成：{}（含版本 9.9.9={}，bootout={}，bootstrap={}，路径已加引号={}）",
                 path.display(),
@@ -619,4 +624,46 @@ pub fn selftest() {
         asset_name("1.2.3"),
         README_KEY_URL
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_arguments_preserve_paths_without_evaluating_shell_syntax() {
+        let app = Path::new("/tmp/Applications/BeeK.app");
+        let incoming = Path::new("/tmp/Application Support/it's $(exit 42)/BeeK.app");
+        let body = install_script_body(app, incoming, "9.9.9", true, 123, Path::new("/tmp/log"));
+        // Execute the generated argument setup, capturing the exact arguments
+        // that the embedded installer receives, including quotes and spaces.
+        let setup = body.split_once(INSTALL_SCRIPT).unwrap().0;
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", &format!("{setup}printf '%s\\n' \"$@\"")])
+            .output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(),
+            "/tmp/Applications/BeeK.app\n/tmp/Application Support/it's $(exit 42)/BeeK.app\n9.9.9\n1\n123\n/tmp/log\n");
+    }
+
+    #[test]
+    fn helper_detaches_from_parent_process_group_and_handles_quoted_script_path() {
+        let mut nonce = [0u8; 8];
+        getrandom::fill(&mut nonce).unwrap();
+        let dir = std::env::temp_dir().join(format!("beek helper '{:x}", u64::from_ne_bytes(nonce)));
+        std::fs::create_dir(&dir).unwrap();
+        let script = dir.join("install 'script.sh");
+        let marker = dir.join("process-group");
+        std::fs::write(&script, format!("ps -o pgid= -p $$ > {}", shell_quote(&marker.to_string_lossy()))).unwrap();
+        run_script(&script).unwrap();
+        let mut group = None;
+        for _ in 0..100 {
+            group = std::fs::read_to_string(&marker).ok().and_then(|s| s.trim().parse::<i32>().ok());
+            if group.is_some() { break; }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        extern "C" { fn getpgrp() -> i32; }
+        assert_ne!(group.expect("helper did not run"), unsafe { getpgrp() });
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

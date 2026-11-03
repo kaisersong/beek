@@ -355,7 +355,6 @@ pub fn quit_now() -> ! {
                 if let Err(e) = crate::update::run_script(&script) {
                     eprintln!("[beek] 退出时安装更新失败：{}", e);
                 } else {
-                    crate::update::clear_staged();
                     eprintln!("[beek] 退出：已安排静默安装 v{}", staged.version);
                 }
             }

@@ -2111,23 +2111,11 @@ fn main() {
         }
         // 编辑菜单要等 gpui 把主菜单建好之后再补上去
         menubar::install_edit_menu();
-        // 上次退出时可能已经下载好更新（比如进程被强杀），这里补装一次：
-        // 换掉磁盘上的 bundle 后本进程还是旧版本，退出后下一次启动才是新版本。
+        // Retain staged updates until quit: replacing a bundle while this
+        // process initializes can race resource/signature loading.
         if !update_ui_probe {
         if let Some(staged) = update::staged() {
-            eprintln!(
-                "[beek] 启动：发现已下载的更新 v{}，静默安装（本次仍以 v{} 运行）",
-                staged.version,
-                update::CURRENT_VERSION
-            );
-            if let Ok(script) = update::install_script_ex(
-                std::path::Path::new(&staged.app),
-                &staged.version,
-                false,
-            ) {
-                let _ = update::run_script(&script);
-                update::clear_staged();
-            }
+            menubar::set_update_hint(&localization::message("更新到 v{}（退出后生效）", &[&staged.version]));
         }
         }
         menubar::dump_app_menus();
