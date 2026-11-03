@@ -275,7 +275,6 @@ impl Prompt {
                 let _: () = msg_send![self.window, setFrameOrigin:point];
             }
             let app: id = msg_send![class!(NSApplication), sharedApplication];
-            let _: () = msg_send![app, setActivationPolicy:0i64];
             let _: () = msg_send![app, activateIgnoringOtherApps:YES];
             let _: () = msg_send![self.window, makeKeyAndOrderFront:nil];
             let _: () = msg_send![self.window, orderFrontRegardless];
@@ -297,6 +296,7 @@ impl Prompt {
         unsafe {
             let app: id = msg_send![class!(NSApplication), sharedApplication];
             let modal: id = msg_send![app, modalWindow];
+            let activation_policy: i64 = msg_send![app, activationPolicy];
             let visible: i8 = msg_send![self.window, isVisible];
             let key: i8 = msg_send![self.window, isKeyWindow];
             let frame: NSRect = msg_send![self.window, frame];
@@ -321,7 +321,7 @@ impl Prompt {
                 target == self.delegate && tag == index as i64
             });
             let menu = crate::menubar::update_menu_state();
-            serde_json::json!({"visible":visible != 0,"key":key != 0,"modal":modal != nil,"on_screen":on_screen,"buttons_wired":wired,"enabled_actions":menu.0,"disabled_actions":menu.1})
+            serde_json::json!({"visible":visible != 0,"key":key != 0,"modal":modal != nil,"activation_policy":activation_policy,"on_screen":on_screen,"buttons_wired":wired,"enabled_actions":menu.0,"disabled_actions":menu.1})
         }
     }
 
@@ -448,6 +448,15 @@ impl Probe {
             assert_eq!(record[key], true, "{key}");
         }
         assert_eq!(record["disabled_actions"], 0);
+        let expected_policy = if crate::config::load().show_in_dock {
+            0
+        } else {
+            1
+        };
+        assert_eq!(
+            record["activation_policy"], expected_policy,
+            "update notice changed Dock policy"
+        );
         assert!(record["enabled_actions"].as_u64().unwrap() > 0);
         self.records.push(record);
         if self.step == 1 {
@@ -477,20 +486,6 @@ impl Drop for Prompt {
             let _: () = msg_send![self.alert, release];
             let _: () = msg_send![self.window, release];
             let _: () = msg_send![self.delegate, release];
-        }
-        unsafe {
-            let app: id = msg_send![class!(NSApplication), sharedApplication];
-            let windows: id = msg_send![app, windows];
-            let count: usize = msg_send![windows, count];
-            let another_window = (0..count).any(|index| {
-                let window: id = msg_send![windows, objectAtIndex:index];
-                let visible: i8 = msg_send![window, isVisible];
-                let style: usize = msg_send![window, styleMask];
-                visible != 0 && style & 1 != 0
-            });
-            if !another_window {
-                crate::menubar::set_dock_visible(crate::config::load().show_in_dock);
-            }
         }
         crate::ax::pulse_self_ui();
     }
