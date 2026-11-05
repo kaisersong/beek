@@ -14,15 +14,19 @@ A lightweight selection translator for macOS and Windows 11 x64.
   <img src="resources/screenshots/onboarding-welcome-en.png" width="960" alt="BeeK macOS welcome screen, with a translation card preview and a Get started button.">
 </p>
 
-**1.1.1 is available**: four-step guided setup, Chinese/English UI, eight translation targets, switchable services, and a shared result cache on macOS. It also fixes update dialogs blocking menus, disabled language submenus, and update notices changing Dock visibility. [Release notes](https://github.com/kaisersong/beek/releases/tag/v1.1.1)
+**1.1.2 update:** Windows gains the macOS-style four-step onboarding, Chinese/English UI, eight translation targets, seven providers and cache settings. Both platforms fix pronunciation display and copy behavior. [Release notes](https://github.com/kaisersong/beek/releases/tag/v1.1.2). Download availability and build status are shown in [Releases](https://github.com/kaisersong/beek/releases) and [Actions](https://github.com/kaisersong/beek/actions).
 
 | Feature | macOS | Windows 11 x64 |
 | --- | --- | --- |
 | Select text → click the bee → translate | Available | Available |
 | Doubao translation and word explanations | Available | Available |
-| New onboarding, bilingual UI, target-language picker | Available | Not yet available |
-| Multiple providers and configurable result cache | Available | Not yet available |
+| Onboarding, bilingual UI, eight target languages | Available | Available in 1.1.2 |
+| Multiple providers and configurable result cache | Available | Available in 1.1.2 |
 | Distribution | Developer ID signed and notarized | Unsigned public preview |
+
+## Translation cards and copying
+
+Only AI dictionary results separate a complete pronunciation line into the header. Missing pronunciation has no placeholder, and ordinary translations keep their first line. Loading, errors and blank results do not overwrite the clipboard. You can copy text already received during streaming; dictionary copies include the source word and any available pronunciation. Speech reads the original word.
 
 ## Install
 
@@ -75,6 +79,18 @@ Use a loopback endpoint such as `http://127.0.0.1:5000/translate`. Install and v
 
 On macOS, **Check for updates…** immediately shows progress in a modeless window. Downloading and installing are separate choices, menus remain usable, and update notices preserve your Dock setting. Automatic checks can prepare updates in the background for installation on exit.
 
-Windows does not automatically download or install updates; download a newer package from [Releases](https://github.com/kaisersong/beek/releases).
+Windows can optionally check for updates automatically. Installation remains manual; download a newer package from [Releases](https://github.com/kaisersong/beek/releases).
 
 See the [Chinese README](README.md) for source builds, configuration examples, selection internals, and development tools. Internal engineering documents are maintained in the separate mydocs repository; they are not required to build BeeK.
+
+## Windows 1.1.2 preview
+
+Windows 1.1.2 includes the same four-step onboarding composition as macOS,
+using its horizon artwork, native interactive controls, service configuration and
+explicit trial translation, plus Chinese/English/system UI language,
+eight target languages, all seven translation providers and a configurable
+memory cache. New users can start with free public Baidu translation; existing
+Ark settings and credentials are preserved. Each service stores its own key in
+Windows Credential Manager. Save settings with Ctrl+S; Try translation sends
+only a public sample. Automatic update checks are optional; installation remains
+manual. Upgrade to 1.1.2 for these additions; existing service settings and credentials are retained.

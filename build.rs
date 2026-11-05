@@ -24,6 +24,8 @@ fn main() {
         PathBuf::from("src/main.rs"),
         PathBuf::from("src/lib.rs"),
         PathBuf::from("src/icons.rs"),
+        PathBuf::from("resources/i18n/en.json"),
+        PathBuf::from("resources/onboarding/horizon.png"),
         PathBuf::from("src/bin/selection-host.rs"),
         PathBuf::from("resources/windows/beek.rc"),
         PathBuf::from("resources/windows/BeeK.ico"),

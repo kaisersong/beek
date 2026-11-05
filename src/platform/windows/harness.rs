@@ -185,6 +185,11 @@ fn network(base: &str) -> Result<serde_json::Value, String> {
     let mut passed = true;
     let request = |id, path: &str| Request {
         generation: id,
+        engine: crate::core::translation_engine::Engine::Ark,
+        config: crate::core::translation_engine::EngineConfig {
+            api_key: "public-fixture-key".into(),
+            ..Default::default()
+        },
         text: "Hello public fixture.".into(),
         key: "public-fixture-key".into(),
         model: "public-model".into(),

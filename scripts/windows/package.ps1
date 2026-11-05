@@ -38,6 +38,7 @@ if($LASTEXITCODE -ne 0){throw 'Installer compilation failed'}
 $setup=Join-Path $OutputDirectory "BeeK-v$version-windows-x64-setup.exe";Sign $setup
 if($Formal){$records=@{};foreach($file in @((Join-Path $payload 'beek.exe'),(Join-Path $payload 'beek-selection-host.exe'),$setup)){$signature=Get-AuthenticodeSignature $file;$records[[IO.Path]::GetFileName($file)]=@{status=$signature.Status.ToString();thumbprint=$signature.SignerCertificate.Thumbprint;sha256=(Get-FileHash $file -Algorithm SHA256).Hash.ToLower()}};@{schema=1;expected_thumbprint=$PublisherThumbprint;files=$records;signed_uninstaller=$true}|ConvertTo-Json -Depth 6|ForEach-Object {[IO.File]::WriteAllText((Join-Path $OutputDirectory 'windows-signatures.json'),$_,[Text.UTF8Encoding]::new($false))}}
 $zip=Join-Path $OutputDirectory "BeeK-v$version-windows-x64.zip"
-Compress-Archive -Path (Join-Path $payload '*') -DestinationPath $zip
+& python (Join-Path $PSScriptRoot 'portable_zip.py') --payload $payload --output $zip
+if($LASTEXITCODE -ne 0){throw 'Portable ZIP integrity verification failed'}
 foreach($file in @($zip,$setup)){[IO.File]::WriteAllText(($file+'.sha256'),((Get-FileHash $file -Algorithm SHA256).Hash.ToLower()+'  '+[IO.Path]::GetFileName($file)+"`n"),[Text.UTF8Encoding]::new($false))}
 Write-Host "Created $($manifest.distribution) packages in $OutputDirectory. Packaging is not G5 acceptance."

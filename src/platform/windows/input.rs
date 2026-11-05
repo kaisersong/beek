@@ -50,6 +50,7 @@ actions!(
 
 pub struct TextInput {
     masked: bool,
+    compact: bool,
     saved_secret: bool,
     scroll_x: Pixels,
     revision: u64,
@@ -657,11 +658,11 @@ impl Render for TextInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .bg(rgb(0xeeeeee))
-            .line_height(px(30.))
-            .text_size(px(24.))
+            .line_height(px(if self.compact { 24. } else { 30. }))
+            .text_size(px(if self.compact { 15. } else { 24. }))
             .child(
                 div()
-                    .h(px(30. + 4. * 2.))
+                    .h(px(if self.compact { 32. } else { 38. }))
                     .overflow_hidden()
                     .w_full()
                     .p(px(4.))
@@ -690,6 +691,10 @@ impl TextInput {
     }
     pub fn set_saved_secret(&mut self, saved: bool, cx: &mut Context<Self>) {
         self.saved_secret = saved;
+        cx.notify();
+    }
+    pub fn set_compact(&mut self, compact: bool, cx: &mut Context<Self>) {
+        self.compact = compact;
         cx.notify();
     }
     pub fn mask(&mut self) {
@@ -737,6 +742,7 @@ impl TextInput {
     pub fn new(cx: &mut Context<Self>, placeholder: &str) -> Self {
         Self {
             masked: false,
+            compact: false,
             saved_secret: false,
             scroll_x: px(0.),
             revision: 0,

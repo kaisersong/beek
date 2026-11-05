@@ -1,9 +1,16 @@
+use super::onboarding;
 use super::{
     input::{self, ClipboardIntent, TextInput},
     native::{self, Event},
     selection::{Coordinator, Outcome},
     store::Store,
     util,
+};
+use crate::core::{
+    localization::{self, tr, UiLanguage},
+    translation_cache::CacheSettings,
+    translation_engine::{self as engines, Engine},
+    translation_language::TargetLanguage,
 };
 use crate::{
     core::{
@@ -16,24 +23,28 @@ use crate::{
     icons::{self, IconKind},
 };
 use gpui::{prelude::*, *};
+use std::collections::BTreeMap;
 use std::{
     collections::VecDeque,
     sync::{atomic::Ordering, mpsc, Arc, Mutex},
     time::{Duration, Instant},
 };
 
-enum Command {
+pub(super) enum Command {
     Click(Selection),
     Translate(Selection, bool),
     Copy(String, u32),
     Edit(Entity<TextInput>, ClipboardIntent),
     Speak(String),
     Close,
-    Save(Settings, KeyEdit),
+    Save(Settings, KeyEdit, bool),
     Update,
+    Demo,
+    OpenGuide,
+    Guide(onboarding::Action),
     Drag([i32; 2]),
 }
-type Tx = mpsc::SyncSender<Command>;
+pub(super) type Tx = mpsc::SyncSender<Command>;
 actions!(
     windows_ui,
     [
@@ -98,6 +109,7 @@ impl Render for Bee {
 }
 struct Panel {
     active: bool,
+    engine: Engine,
     focus: FocusHandle,
     selection: Selection,
     body: String,
@@ -120,23 +132,36 @@ impl Panel {
         cx.notify();
     }
     fn word(&self) -> Option<&str> {
-        crate::core::prompts::is_single_word(&self.selection.text)
+        (self.engine == Engine::Ark && crate::core::prompts::is_single_word(&self.selection.text))
             .then(|| self.selection.text.trim())
     }
-    fn copy_text(&self) -> String {
-        let (pron, body) = stream::split_pron(&self.body);
-        match (self.word(), pron) {
+    fn pron_and_body(&self) -> (Option<String>, String) {
+        if self.word().is_some() && !self.error {
+            stream::split_pron(&self.body)
+        } else {
+            (None, self.body.clone())
+        }
+    }
+    fn can_copy(&self) -> bool {
+        !self.error && !self.body.trim().is_empty()
+    }
+    fn copy_text(&self) -> Option<String> {
+        if !self.can_copy() {
+            return None;
+        }
+        let (pron, body) = self.pron_and_body();
+        Some(match (self.word(), pron) {
             (Some(word), Some(pron)) => format!("{word}  {pron}\n{body}"),
             (Some(word), None) => format!("{word}\n{body}"),
             _ => body,
-        }
+        })
     }
     fn copy(&mut self, _: &CopyPreview, _: &mut Window, _: &mut Context<Self>) {
         self.copy_result();
     }
     fn copy_result(&self) {
-        if !self.body.is_empty() && !self.error {
-            let _ = self.tx.try_send(Command::Copy(self.copy_text(), unsafe {
+        if let Some(text) = self.copy_text() {
+            let _ = self.tx.try_send(Command::Copy(text, unsafe {
                 windows::Win32::System::DataExchange::GetClipboardSequenceNumber()
             }));
         }
@@ -193,19 +218,19 @@ fn text_height(window: &Window, text: &str, font_size: f32, width: f32) -> f32 {
 impl Render for Panel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let preview = self.snapshot && !self.active && self.body.is_empty() && !self.error;
-        let (pron, body) = stream::split_pron(&self.body);
+        let (pron, body) = self.pron_and_body();
         let word = self.word().map(str::to_owned);
         let shown = if preview {
             self.selection.text.clone()
         } else if self.error {
-            format!("翻译失败：{}", self.status)
+            localization::message("翻译失败：{}", &[tr(&self.status)])
         } else if self.body.is_empty() {
             if self.active && self.status != "正在翻译…" {
-                self.status.clone()
+                tr(&self.status).to_owned()
             } else if word.is_some() {
-                "查询中…".into()
+                tr("查询中…").into()
             } else {
-                "翻译中…".into()
+                tr("翻译中…").into()
             }
         } else {
             body
@@ -215,7 +240,11 @@ impl Render for Panel {
         } else if preview {
             self.status.clone()
         } else {
-            "点击弹窗外任意处关闭".into()
+            format!(
+                "{} · {}",
+                tr(self.engine.label()),
+                tr("点击弹窗外任意处关闭")
+            )
         };
         let content_width = POPUP_W - POPUP_PAD * 2.;
         let header_height = if word.is_some() && !preview {
@@ -248,9 +277,10 @@ impl Render for Panel {
                 cx.notify();
             });
         }
-        let copied = self
-            .copied_until
-            .is_some_and(|until| until > Instant::now());
+        let copied = self.can_copy()
+            && self
+                .copied_until
+                .is_some_and(|until| until > Instant::now());
         #[cfg(feature = "test-fixtures")]
         super::diagnostics::event(
             "panel_layout",
@@ -323,15 +353,10 @@ impl Render for Panel {
                                         .text_color(rgb(0x1f1f1f))
                                         .child(word),
                                 )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(if pron.is_some() {
-                                            0x666666
-                                        } else {
-                                            0xcccccc
-                                        }))
-                                        .child(pron.clone().unwrap_or_else(|| "读音…".into())),
+                                .children(
+                                    pron.clone().map(|p| {
+                                        div().text_sm().text_color(rgb(0x666666)).child(p)
+                                    }),
                                 )
                                 .child(
                                     div()
@@ -392,7 +417,7 @@ impl Render for Panel {
                                 .text_color(rgb(0x666666))
                                 .hover(|s| s.bg(rgb(0xe8e8e8)))
                                 .cursor_pointer()
-                                .child("翻译 (Enter)")
+                                .child(tr("翻译 (Enter)"))
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(|this, _, window, cx| {
@@ -401,6 +426,19 @@ impl Render for Panel {
                                 ),
                         )
                     })
+                    .child(
+                        div()
+                            .id("close-card")
+                            .cursor_pointer()
+                            .px_1()
+                            .child("×")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|s, _, _, _| {
+                                    let _ = s.tx.try_send(Command::Close);
+                                }),
+                            ),
+                    )
                     .when(!preview, |d| {
                         d.child(
                             div()
@@ -454,42 +492,127 @@ impl Render for Panel {
 }
 struct Form {
     _subscriptions: Vec<Subscription>,
-    save_revision: Option<(Vec<u64>, [bool; 5])>,
+    save_revision: Option<(Vec<u64>, [bool; 6])>,
     fields: Vec<Entity<TextInput>>,
     cfg: Settings,
     status: String,
     busy: bool,
     clear: bool,
     tx: Tx,
+    drafts: BTreeMap<String, (String, bool)>,
+    guide_mode: bool,
+    focus: FocusHandle,
 }
 impl Form {
-    fn signature(&self, cx: &App) -> (Vec<u64>, [bool; 5]) {
+    fn visible_fields(&self) -> Vec<usize> {
+        let mut fields = match self.cfg.translation_engine {
+            Engine::Ark => vec![0, 1, 2],
+            Engine::Azure => vec![0, 5],
+            Engine::Baidu => vec![0, 4],
+            Engine::Google => vec![0],
+            Engine::MyMemory => vec![6, 7],
+            Engine::LibreTranslate => vec![0, 2],
+            _ => vec![],
+        };
+        if !self.guide_mode {
+            fields.extend([3, 8, 9]);
+        }
+        fields
+    }
+    fn capture(&mut self, cx: &App) {
+        let p = self.cfg.active_provider_mut();
+        p.model = self.fields[1].read(cx).value().trim().into();
+        if p.model.is_empty() {
+            p.model = crate::core::prompts::DEFAULT_MODEL.into();
+        }
+        p.base_url = self.fields[2].read(cx).value().trim().into();
+        p.app_id = self.fields[4].read(cx).value().trim().into();
+        p.region = self.fields[5].read(cx).value().trim().into();
+        p.source_language = self.fields[6].read(cx).value().trim().into();
+        p.email = self.fields[7].read(cx).value().trim().into();
+        self.cfg.hotkey = self.fields[3].read(cx).value().trim().into();
+        self.drafts.insert(
+            self.cfg.translation_engine.key().into(),
+            (self.fields[0].read(cx).value(), self.clear),
+        );
+    }
+    fn switch_engine(&mut self, engine: Engine, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy || engine == self.cfg.translation_engine {
+            return;
+        }
+        self.capture(cx);
+        self.cfg.translation_engine = engine;
+        let p = self.cfg.active_provider();
+        let (key, clear) = self.drafts.get(engine.key()).cloned().unwrap_or_default();
+        self.clear = clear;
+        for (i, value) in [
+            (0, key),
+            (1, p.model),
+            (2, p.base_url),
+            (4, p.app_id),
+            (5, p.region),
+            (6, p.source_language),
+            (7, p.email),
+        ] {
+            self.fields[i].update(cx, |f, cx| f.set_value(&value, cx));
+        }
+        self.fields[0].update(cx, |f, cx| {
+            f.set_saved_secret(p.credential_ref.is_some(), cx)
+        });
+        self.status.clear();
+        if let Some(index) = self.visible_fields().first() {
+            self.fields[*index].read(cx).focus(window);
+        } else {
+            window.focus(&self.focus);
+        }
+        cx.notify();
+    }
+    fn signature(&self, cx: &App) -> (Vec<u64>, [bool; 6]) {
         (
-            self.fields.iter().map(|f| f.read(cx).revision()).collect(),
+            self.fields
+                .iter()
+                .map(|f| f.read(cx).revision())
+                .chain([
+                    self.cfg.translation_engine as u64,
+                    self.cfg.translation_target as u64,
+                    self.cfg.ui_language as u64,
+                ])
+                .collect(),
             [
                 self.cfg.selection_enabled,
                 self.cfg.copy_to_popup,
                 self.cfg.hotkey_enabled,
                 self.cfg.autostart,
                 self.clear,
+                self.cfg.auto_update,
             ],
         )
     }
     fn next(&mut self, _: &NextField, w: &mut Window, cx: &mut Context<Self>) {
-        let n = self
-            .fields
+        let fields = self.visible_fields();
+        if fields.is_empty() {
+            w.focus(&self.focus);
+            return;
+        }
+        let n = fields
             .iter()
-            .position(|f| f.focus_handle(cx).is_focused(w))
+            .position(|i| self.fields[*i].focus_handle(cx).is_focused(w))
             .unwrap_or(0);
-        self.fields[(n + 1) % self.fields.len()].read(cx).focus(w);
+        self.fields[fields[(n + 1) % fields.len()]]
+            .read(cx)
+            .focus(w);
     }
     fn previous(&mut self, _: &PreviousField, w: &mut Window, cx: &mut Context<Self>) {
-        let n = self
-            .fields
+        let fields = self.visible_fields();
+        if fields.is_empty() {
+            w.focus(&self.focus);
+            return;
+        }
+        let n = fields
             .iter()
-            .position(|f| f.focus_handle(cx).is_focused(w))
+            .position(|i| self.fields[*i].focus_handle(cx).is_focused(w))
             .unwrap_or(0);
-        self.fields[(n + self.fields.len() - 1) % self.fields.len()]
+        self.fields[fields[(n + fields.len() - 1) % fields.len()]]
             .read(cx)
             .focus(w);
     }
@@ -500,10 +623,21 @@ impl Form {
         if self.busy {
             return;
         }
+        self.capture(cx);
         let mut cfg = self.cfg.clone();
-        cfg.provider.model = self.fields[1].read(cx).value().trim().into();
-        cfg.provider.base_url = self.fields[2].read(cx).value().trim().into();
-        cfg.hotkey = self.fields[3].read(cx).value().trim().into();
+
+        let cache = CacheSettings::from_input(
+            self.fields[8].read(cx).value().as_str(),
+            self.fields[9].read(cx).value().as_str(),
+        );
+        match cache {
+            Ok(cache) => cfg.translation_cache = cache,
+            Err(error) => {
+                self.status = error;
+                cx.notify();
+                return;
+            }
+        }
         if cfg.hotkey_enabled && native::parse_hotkey(&cfg.hotkey).is_none() {
             self.status = "快捷键格式例如 Ctrl+Alt+T；需修饰键和一个英文字母".into();
             cx.notify();
@@ -522,7 +656,11 @@ impl Form {
         } else {
             KeyEdit::Replace(key)
         };
-        if self.tx.try_send(Command::Save(cfg, edit)).is_ok() {
+        if self
+            .tx
+            .try_send(Command::Save(cfg, edit, self.guide_mode))
+            .is_ok()
+        {
             self.busy = true;
             self.save_revision = Some(self.signature(cx));
             self.status = "正在保存…".into();
@@ -532,94 +670,282 @@ impl Form {
 }
 impl Render for Form {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let provider = self.cfg.active_provider();
         let labels = [
-            if self.cfg.provider.credential_ref.is_some() {
+            if provider.credential_ref.is_some() {
                 "API Key（已保存；输入新 Key 可替换）"
             } else {
                 "API Key（输入后显示为星号）"
             },
             "模型 / 推理接入点",
-            "完整 API 地址（chat/completions）",
+            "服务地址",
             "全局快捷键（默认 Ctrl+Alt+T）",
+            "百度 App ID",
+            "Azure 区域",
+            "源语言（例如 en）",
+            "邮箱（可选）",
+            "缓存条数（0–1000；0 关闭）",
+            "缓存有效分钟（0–1440）",
         ];
         let mut view = div()
             .id("settings")
             .size_full()
             .p_6()
-            .bg(rgb(0xf8f7f3))
-            .text_color(rgb(0x252525))
+            .bg(rgb(0xf8f9fa))
+            .text_color(rgb(0x25282d))
             .flex()
             .flex_col()
             .gap_3()
             .overflow_y_scroll()
             .key_context("BeeKSettings")
+            .track_focus(&self.focus)
             .on_action(cx.listener(Self::next))
             .on_action(cx.listener(Self::previous))
             .on_action(cx.listener(Self::save))
-            .child(div().text_xl().child("BeeK 设置"));
-        for (i, label) in labels.into_iter().enumerate() {
-            view = view
-                .child(div().text_sm().child(label))
-                .child(self.fields[i].clone());
+            .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(tr(
+                if self.guide_mode {
+                    "翻译服务设置"
+                } else {
+                    "BeeK 设置"
+                },
+            )))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x666b73))
+                    .child(tr("翻译服务")),
+            );
+        let mut providers = div().flex().flex_wrap().gap_2();
+        for engine in Engine::ALL {
+            providers = providers.child(
+                div()
+                    .id(SharedString::from(format!("engine-{}", engine.key())))
+                    .px_3()
+                    .py_2()
+                    .rounded(px(8.))
+                    .text_size(px(13.))
+                    .border_1()
+                    .border_color(rgb(if self.cfg.translation_engine == engine {
+                        0x869aaf
+                    } else {
+                        0xe0e4e8
+                    }))
+                    .bg(rgb(if self.cfg.translation_engine == engine {
+                        0xe4edf5
+                    } else {
+                        0xffffff
+                    }))
+                    .cursor_pointer()
+                    .child(tr(engine.label()))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |s, _, w, cx| s.switch_engine(engine, w, cx)),
+                    ),
+            );
         }
-        let flags = [
-            ("选中文本后显示蜜蜂按钮", self.cfg.selection_enabled),
-            ("复制文本后显示（默认关闭）", self.cfg.copy_to_popup),
-            ("启用全局快捷键", self.cfg.hotkey_enabled),
-            ("登录 Windows 时启动", self.cfg.autostart),
-            ("清除已保存的 API Key", self.clear),
-        ];
-        for (i, (label, on)) in flags.into_iter().enumerate() {
+        view = view.child(providers);
+        if !self.guide_mode {
+            view = view
+                .child(div().text_sm().child(tr("翻译为")))
+                .child(div().flex().flex_wrap().gap_2().children(
+                    TargetLanguage::ALL.into_iter().map(|language| {
+                        div()
+                            .id(SharedString::from(format!("target-{}", language.key())))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(if self.cfg.translation_target == language {
+                                0xdce7f0
+                            } else {
+                                0xffffff
+                            }))
+                            .cursor_pointer()
+                            .text_sm()
+                            .child(tr(language.label()))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |s, _, _, cx| {
+                                    if !s.busy {
+                                        s.cfg.translation_target = language;
+                                        cx.notify();
+                                    }
+                                }),
+                            )
+                    }),
+                ))
+                .child(div().text_sm().child(tr("界面语言")))
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .children(UiLanguage::ALL.into_iter().map(|language| {
+                            div()
+                                .id(SharedString::from(format!("ui-{:?}", language)))
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .bg(rgb(if self.cfg.ui_language == language {
+                                    0xdce7f0
+                                } else {
+                                    0xffffff
+                                }))
+                                .cursor_pointer()
+                                .text_sm()
+                                .child(language.label())
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |s, _, _, cx| {
+                                        if !s.busy {
+                                            s.cfg.ui_language = language;
+                                            localization::configure(
+                                                language,
+                                                &super::util::system_language(),
+                                            );
+                                            cx.notify();
+                                        }
+                                    }),
+                                )
+                        })),
+                );
+        }
+        for index in self.visible_fields() {
+            view = view
+                .child(div().text_sm().child(tr(labels[index])))
+                .child(self.fields[index].clone());
+        }
+        if self.cfg.translation_engine == Engine::Ark && self.guide_mode {
             view = view.child(
                 div()
-                    .id(i)
+                    .text_xs()
+                    .text_color(rgb(0x666b73))
+                    .child(tr("模型可留空，使用默认豆包模型。")),
+            );
+        }
+        if self.cfg.translation_engine == Engine::PublicBaidu {
+            view = view.child(div().text_sm().child(tr(
+                "免费公共服务无需 Key，单次最多 1500 字节；该服务不缓存译文。",
+            )));
+        }
+        if self.cfg.translation_engine == Engine::LibreTranslate {
+            view=view.child(div().text_sm().child(tr("本地默认地址为 http://127.0.0.1:5000/translate，请先安装并启动 LibreTranslate / Argos 服务。")));
+        }
+        let flags = if self.guide_mode {
+            vec![]
+        } else {
+            vec![
+                ("选中文本后显示蜜蜂按钮", self.cfg.selection_enabled, 0),
+                ("复制文本后显示（默认关闭）", self.cfg.copy_to_popup, 1),
+                ("启用全局快捷键", self.cfg.hotkey_enabled, 2),
+                ("登录 Windows 时启动", self.cfg.autostart, 3),
+                ("清除已保存的 API Key", self.clear, 4),
+                ("自动检查更新", self.cfg.auto_update, 5),
+            ]
+        };
+        for (label, on, index) in flags {
+            if index == 4
+                && matches!(
+                    self.cfg.translation_engine,
+                    Engine::PublicBaidu | Engine::MyMemory
+                )
+            {
+                continue;
+            }
+            view = view.child(
+                div()
+                    .id(index)
                     .cursor_pointer()
                     .text_sm()
-                    .child(format!("{} {label}", if on { "☑" } else { "☐" }))
+                    .child(format!("{} {}", if on { "☑" } else { "☐" }, tr(label)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |s, _, _, cx| {
-                            match i {
+                            if s.busy {
+                                return;
+                            }
+                            match index {
                                 0 => s.cfg.selection_enabled = !s.cfg.selection_enabled,
                                 1 => s.cfg.copy_to_popup = !s.cfg.copy_to_popup,
                                 2 => s.cfg.hotkey_enabled = !s.cfg.hotkey_enabled,
                                 3 => s.cfg.autostart = !s.cfg.autostart,
-                                _ => s.clear = !s.clear,
+                                4 => s.clear = !s.clear,
+                                _ => s.cfg.auto_update = !s.cfg.auto_update,
                             }
                             cx.notify();
                         }),
                     ),
             );
         }
+        view = view
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x795a22))
+                    .child(tr(&self.status).to_owned()),
+            )
+            .child(
+                div()
+                    .id("save")
+                    .p_3()
+                    .rounded(px(10.))
+                    .bg(rgb(0x232627))
+                    .text_color(white())
+                    .cursor_pointer()
+                    .child(tr(if self.busy {
+                        "保存中…"
+                    } else if self.guide_mode {
+                        "保存并启用"
+                    } else {
+                        "保存 (Ctrl+S)"
+                    }))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, cx| s.submit(cx))),
+            );
+        if self.guide_mode {
+            return view.child(
+                div()
+                    .id("cancel-service")
+                    .p_2()
+                    .text_sm()
+                    .text_color(rgb(0x666b73))
+                    .cursor_pointer()
+                    .child(tr("取消"))
+                    .on_mouse_down(MouseButton::Left, |_, w, _| w.remove_window()),
+            );
+        }
         view.child(
             div()
+                .id("try-translation")
+                .cursor_pointer()
                 .text_sm()
-                .text_color(rgb(0x795a22))
-                .child(self.status.clone()),
+                .child(tr("点击试译"))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|s, _, _, _| {
+                        let _ = s.tx.try_send(Command::Demo);
+                    }),
+                ),
         )
-        .when(!native::HOTKEY_OK.load(Ordering::Acquire), |d| {
-            d.child("快捷键注册失败，可能被其他应用占用；请修改后保存。")
-        })
         .child(
             div()
-                .id("save")
-                .p_2()
-                .rounded_md()
-                .bg(rgb(0xffd359))
+                .id("show-guide")
                 .cursor_pointer()
-                .child(if self.busy {
-                    "保存中…"
-                } else {
-                    "保存 (Ctrl+S)"
-                })
-                .on_mouse_down(MouseButton::Left, cx.listener(|s, _, _, cx| s.submit(cx))),
+                .text_sm()
+                .child(tr("使用引导"))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|s, _, _, _| {
+                        let _ = s.tx.try_send(Command::OpenGuide);
+                    }),
+                ),
         )
         .child(
             div()
                 .id("updates")
-                .text_sm()
                 .cursor_pointer()
-                .child(format!("BeeK {} · 手动检查更新", env!("CARGO_PKG_VERSION")))
+                .text_sm()
+                .child(localization::message(
+                    "BeeK {} · 手动检查更新",
+                    &[env!("CARGO_PKG_VERSION")],
+                ))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|s, _, _, _| {
@@ -627,35 +953,67 @@ impl Render for Form {
                     }),
                 ),
         )
-        .child(
-            div()
-                .text_xs()
-                .child("仅点击翻译后发送所选文本。剪贴板回退不会模拟 Ctrl+C；不自动下载安装更新。"),
-        )
+        .child(div().text_xs().text_color(rgb(0x666b73)).child(tr(
+            "仅点击翻译后发送所选文本。剪贴板回退不会模拟 Ctrl+C；不自动下载安装更新。",
+        )))
     }
 }
+
 fn open_form(cx: &mut App, tx: Tx, cfg: Settings, status: String) -> Option<WindowHandle<Form>> {
+    open_form_mode(cx, tx, cfg, status, false)
+}
+fn open_form_mode(
+    cx: &mut App,
+    tx: Tx,
+    cfg: Settings,
+    status: String,
+    guide_mode: bool,
+) -> Option<WindowHandle<Form>> {
     let handle = cx
         .open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some("BeeK Settings".into()),
+                    title: Some(
+                        tr(if guide_mode {
+                            "翻译服务设置"
+                        } else {
+                            "BeeK 设置"
+                        })
+                        .into(),
+                    ),
                     ..Default::default()
                 }),
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
-                    size(px(720.), px(780.)),
+                    if guide_mode {
+                        size(px(640.), px(650.))
+                    } else {
+                        size(px(720.), px(780.))
+                    },
                     cx,
                 ))),
                 ..Default::default()
             },
             |w, cx| {
                 let mut fields = Vec::new();
+                let provider = cfg.active_provider();
                 for (i, (label, value)) in [
                     ("API Key", ""),
-                    ("model", cfg.provider.model.as_str()),
-                    ("API URL", cfg.provider.base_url.as_str()),
+                    ("model", provider.model.as_str()),
+                    ("API URL", provider.base_url.as_str()),
                     ("hotkey", cfg.hotkey.as_str()),
+                    ("App ID", provider.app_id.as_str()),
+                    ("region", provider.region.as_str()),
+                    ("source language", provider.source_language.as_str()),
+                    ("email", provider.email.as_str()),
+                    (
+                        "cache entries",
+                        &cfg.translation_cache.max_entries.to_string(),
+                    ),
+                    (
+                        "cache minutes",
+                        &cfg.translation_cache.ttl_minutes.to_string(),
+                    ),
                 ]
                 .into_iter()
                 .enumerate()
@@ -663,16 +1021,38 @@ fn open_form(cx: &mut App, tx: Tx, cfg: Settings, status: String) -> Option<Wind
                     let field = cx.new(|cx| {
                         let mut f = TextInput::new(cx, label);
                         f.set_value(value, cx);
+                        f.set_compact(guide_mode, cx);
                         if i == 0 {
                             f.mask();
-                            f.set_saved_secret(cfg.provider.credential_ref.is_some(), cx);
+                            f.set_saved_secret(provider.credential_ref.is_some(), cx);
                         }
                         f
                     });
                     fields.push(field);
                 }
-                fields[0].read(cx).focus(w);
+                let first = match cfg.translation_engine {
+                    Engine::PublicBaidu | Engine::Unsupported => 3,
+                    Engine::MyMemory => 6,
+                    _ => 0,
+                };
+                if !guide_mode
+                    || !matches!(
+                        cfg.translation_engine,
+                        Engine::PublicBaidu | Engine::Unsupported
+                    )
+                {
+                    fields[first].read(cx).focus(w);
+                }
                 cx.new(|cx| {
+                    let focus = cx.focus_handle();
+                    if guide_mode
+                        && matches!(
+                            cfg.translation_engine,
+                            Engine::PublicBaidu | Engine::Unsupported
+                        )
+                    {
+                        w.focus(&focus);
+                    }
                     let subscriptions = fields
                         .iter()
                         .map(|field| {
@@ -695,6 +1075,9 @@ fn open_form(cx: &mut App, tx: Tx, cfg: Settings, status: String) -> Option<Wind
                         _subscriptions: subscriptions,
                         save_revision: None,
                         fields,
+                        guide_mode,
+                        focus,
+                        drafts: BTreeMap::new(),
                         cfg,
                         status,
                         busy: false,
@@ -815,6 +1198,7 @@ fn open_panel(cx: &mut App, tx: Tx, s: Selection, snapshot: bool) -> Option<Wind
                     }
                     Panel {
                         active: false,
+                        engine: Engine::Ark,
                         error: false,
                         copied_until: None,
                         anchor: Some(anchor),
@@ -872,6 +1256,136 @@ fn open_panel(cx: &mut App, tx: Tx, s: Selection, snapshot: bool) -> Option<Wind
     }
     Some(w)
 }
+/// Runs only in a fixture build on the interactive desktop. Rejected copies
+/// must not enqueue a write or change the actual clipboard sequence number.
+#[cfg(feature = "test-fixtures")]
+pub fn copy_result_selftest() {
+    Application::new().run(|cx| {
+        let (tx, rx) = mpsc::sync_channel(8);
+        let panel = cx.new(|cx| Panel {
+            active: false,
+            engine: Engine::Ark,
+            focus: cx.focus_handle(),
+            selection: Selection {
+                source: Source {
+                    hwnd: 0,
+                    pid: 1,
+                    created: 1,
+                    generation: 1,
+                },
+                epoch: 1,
+                runtime_id: vec![],
+                text: "word".into(),
+                rects: vec![],
+                clipboard_sequence: None,
+            },
+            body: String::new(),
+            status: String::new(),
+            error: false,
+            copied_until: None,
+            anchor: None,
+            layout_height: 0.,
+            snapshot: false,
+            tx,
+        });
+        let mut passed = 0;
+        for (body, error, active) in [
+            ("", false, true),
+            ("error", true, false),
+            ("", false, false),
+            (" \n\t\u{3000}", false, false),
+        ] {
+            let before =
+                unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() };
+            panel.update(cx, |panel, _| {
+                panel.body = body.into();
+                panel.error = error;
+                panel.active = active;
+                panel.copied_until = Some(Instant::now() + Duration::from_secs(1));
+                assert!(!panel.can_copy());
+                panel.copy_result();
+            });
+            assert!(rx.try_recv().is_err());
+            assert_eq!(
+                unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() },
+                before
+            );
+            assert!(!panel.read(cx).can_copy());
+            passed += 1;
+        }
+        for (engine, text, raw, pron, body, expected) in [
+            (
+                Engine::Ark,
+                "word",
+                "读音：/wɜːd/\n- n. 单词",
+                Some("/wɜːd/"),
+                "- n. 单词",
+                "word  /wɜːd/\n- n. 单词",
+            ),
+            (
+                Engine::Ark,
+                "word",
+                "读音：/wɜ",
+                None,
+                "读音：/wɜ",
+                "word\n读音：/wɜ",
+            ),
+            (
+                Engine::Ark,
+                "word",
+                "- n. 单词",
+                None,
+                "- n. 单词",
+                "word\n- n. 单词",
+            ),
+            (
+                Engine::Ark,
+                "word",
+                "读音：/wɜːd/\n",
+                Some("/wɜːd/"),
+                "",
+                "word  /wɜːd/\n",
+            ),
+            (
+                Engine::Ark,
+                "two words",
+                "读音：ordinary translation\n正文",
+                None,
+                "读音：ordinary translation\n正文",
+                "读音：ordinary translation\n正文",
+            ),
+            (
+                Engine::LibreTranslate,
+                "word",
+                "读音：ordinary translation\n正文",
+                None,
+                "读音：ordinary translation\n正文",
+                "读音：ordinary translation\n正文",
+            ),
+        ] {
+            panel.update(cx, |panel, _| {
+                panel.engine = engine;
+                panel.selection.text = text.into();
+                panel.body = raw.into();
+                panel.error = false;
+                assert_eq!(
+                    panel.pron_and_body(),
+                    (pron.map(str::to_owned), body.into())
+                );
+                assert_eq!(panel.copy_text().as_deref(), Some(expected));
+                panel.copy_result();
+            });
+            assert!(matches!(rx.try_recv().unwrap(), Command::Copy(value, _) if value == expected));
+            passed += 1;
+        }
+        println!(
+            "{{\"passed\":{},\"rejected_clipboard_unchanged\":true,\"real_panel_entry\":true}}",
+            passed
+        );
+        cx.quit();
+    });
+}
+
 /// Visual QA uses the real views and native popup geometry, without opening the
 /// settings store, installing hooks, reading a selection or making a request.
 #[cfg(feature = "test-fixtures")]
@@ -883,13 +1397,18 @@ pub fn preview(state: &str) {
             source: Source { hwnd: 0, pid: 1, created: 1, generation: 1 },
             epoch: 1,
             runtime_id: vec![],
-            text: if state == "paragraph" || state == "long" {
+            text: if state == "paragraph" || state == "long" || state == "text-prefix" {
                 "Selection translation should feel instant and unobtrusive.".into()
             } else { "serendipity".into() },
             rects: vec![Rect { x: 400., y: if state == "edge" { 990. } else { 300. }, width: 180., height: 22. }],
             clipboard_sequence: None,
         };
-        if state == "selection" {
+        if state.starts_with("onboarding")||state.starts_with("welcome") {
+            let mut cfg=Settings::default();cfg.ui_language=if state.ends_with("-en"){UiLanguage::English}else{UiLanguage::Chinese};localization::configure(cfg.ui_language,"zh-CN");
+            if let Some(g)=onboarding::open(cx,tx,cfg,String::new()){let step=state.split('-').find_map(|p|p.parse::<usize>().ok()).unwrap_or(0);let _=g.update(cx,|g,_,cx|g.navigate(step,cx));}
+        } else if state.starts_with("settings") {
+            let mut cfg=Settings::default();cfg.ui_language=if state.ends_with("-en"){UiLanguage::English}else{UiLanguage::Chinese};localization::configure(cfg.ui_language,"zh-CN");let _=open_form(cx,tx,cfg,String::new());
+        } else if state == "selection" {
             let _ = open_bee(cx, tx, selection);
         } else if let Some(handle) = open_panel(cx, tx, selection, state == "snapshot") {
             let _ = handle.update(cx, |panel, _, cx| {
@@ -897,8 +1416,14 @@ pub fn preview(state: &str) {
                     "loading" | "error" | "snapshot" => String::new(),
                     "paragraph" => "划词翻译应当响应迅速，不打扰阅读。".into(),
                     "long" => (1..=30).map(|i| format!("第{i}行：这是公开的长文本测试，验证卡片高度上限与内部滚动。\n")).collect(),
-                    _ => "读音：/ˌserənˈdɪpəti/\n- n. 意外发现美好事物的运气\n- 例句：It was pure serendipity. 这纯属意外之喜。\n- 常见搭配：a moment of serendipity".into(),
+                    "partial-pron" => "读音：/ˌserən".into(),
+                    "no-pron" => "- n. 意外发现美好事物的运气".into(),
+                    "pron-only" => "读音：/ˌserənˈdɪpəti/\n".into(),
+                    "text-prefix" | "plain-prefix" => "读音：这是普通译文的原始第一行\n正文必须完整保留。".into(),
+                    "legacy" => "读音：/ˌserənˈdɪpəti/\n- n. 意外发现美好事物的运气\n- 例句：It was pure serendipity. 这纯属意外之喜。\n- 常见搭配：a moment of serendipity".into(),
+                    _ => "读音：/ˌserənˈdɪpəti/\n- n. 意外发现美好事物的运气".into(),
                 };
+                if state == "plain-prefix" { panel.engine = Engine::LibreTranslate; }
                 panel.error = state == "error";
                 panel.active = state == "loading";
                 if panel.error { panel.status = "网络连接暂时不可用，请重试".into(); }
@@ -923,13 +1448,25 @@ enum Purpose {
     Clipboard(bool),
     Copy,
 }
+#[derive(Clone, Copy, PartialEq)]
+enum SaveOrigin {
+    Settings,
+    GuideService,
+    GuidePreference,
+    GuideFinish,
+}
+#[derive(Clone, Copy, PartialEq)]
+enum RequestTarget {
+    Panel,
+    Guide,
+}
 enum Background {
-    Saved(Result<Settings, String>, Option<String>),
-    Request(u64, Result<stream::Request, String>),
+    Saved(Result<Settings, String>, Option<String>, SaveOrigin),
+    Request(u64, Result<stream::Request, String>, RequestTarget),
 }
 enum Work {
-    Save(Settings, Settings, KeyEdit),
-    Request(u64, Settings, String),
+    Save(Settings, Settings, KeyEdit, SaveOrigin),
+    Request(u64, Settings, String, RequestTarget),
 }
 fn selection_status(status: Status) -> &'static str {
     match status {
@@ -987,7 +1524,9 @@ pub fn run() -> Result<(), String> {
     let mut valid = loaded.is_ok();
     let mut initial_error = loaded.as_ref().err().cloned().unwrap_or_default();
     let initial = loaded.unwrap_or_default();
+    localization::configure(initial.ui_language, &super::util::system_language());
     let pool = Pool::new();
+    pool.configure_cache(initial.translation_cache);
     let speech = super::speech::Speech::new();
     let (tx, rx) = mpsc::sync_channel(32);
     let (bg_tx, bg_rx) = mpsc::sync_channel(2);
@@ -997,32 +1536,57 @@ pub fn run() -> Result<(), String> {
     std::thread::spawn(move || {
         while let Ok(work) = work_rx.recv() {
             let result = match work {
-                Work::Save(old, next, key) => {
+                Work::Save(old, next, key, origin) => {
                     let saved = {
                         let mut store = store.lock().unwrap();
-                        let saved = store.save(&old, next, key);
+                        let checked = if origin == SaveOrigin::GuideService {
+                            let key = match &key {
+                                KeyEdit::Replace(value) => Ok(value.trim().to_owned()),
+                                KeyEdit::Keep => store.key(&next),
+                                KeyEdit::Clear => Ok(String::new()),
+                            };
+                            key.and_then(|key| {
+                                engines::validate(next.translation_engine, &next.engine_config(key))
+                            })
+                        } else {
+                            Ok(())
+                        };
+                        let saved = checked.and_then(|_| store.save(&old, next, key));
                         if saved.is_ok() {
                             let _ = store.cleanup();
                         }
                         saved
                     };
-                    let warning = saved
-                        .as_ref()
-                        .ok()
-                        .and_then(|cfg| super::integration::autostart(cfg.autostart).err());
-                    Background::Saved(saved, warning)
+                    let warning = saved.as_ref().ok().and_then(|cfg| {
+                        if util::test_profile().is_some() {
+                            None
+                        } else {
+                            super::integration::autostart(cfg.autostart).err()
+                        }
+                    });
+                    Background::Saved(saved, warning, origin)
                 }
-                Work::Request(g, config, text) => {
+                Work::Request(g, config, text, target) => {
                     let key = store.lock().unwrap().key(&config);
                     Background::Request(
                         g,
-                        key.map(|key| stream::Request {
-                            generation: g,
-                            text,
-                            key,
-                            model: config.provider.model,
-                            endpoint: config.provider.base_url,
+                        key.and_then(|key| {
+                            let engine_config = config.engine_config(key.clone());
+                            engines::validate(config.translation_engine, &engine_config)?;
+                            Ok(stream::Request {
+                                generation: g,
+                                text,
+                                key,
+                                model: config.active_provider().model,
+                                endpoint: engines::endpoint(
+                                    config.translation_engine,
+                                    &engine_config,
+                                ),
+                                engine: config.translation_engine,
+                                config: engine_config,
+                            })
                         }),
+                        target,
                     )
                 }
             };
@@ -1033,7 +1597,7 @@ pub fn run() -> Result<(), String> {
     });
     super::diagnostics::event("startup_phase", serde_json::json!({"phase":"gpui"}));
     Application::new().run(move|cx|{
-  input::bind(cx);cx.bind_keys([KeyBinding::new("tab",NextField,Some("BeeKSettings")),KeyBinding::new("shift-tab",PreviousField,Some("BeeKSettings")),KeyBinding::new("ctrl-s",SaveFields,Some("BeeKSettings")),KeyBinding::new("enter",TranslateSnapshot,Some("BeeKPreview")),KeyBinding::new("escape",CloseView,Some("BeeKPreview")),KeyBinding::new("ctrl-c",CopyPreview,Some("BeeKPreview"))]);
+  input::bind(cx);onboarding::bind(cx);cx.bind_keys([KeyBinding::new("tab",NextField,Some("BeeKSettings")),KeyBinding::new("shift-tab",PreviousField,Some("BeeKSettings")),KeyBinding::new("ctrl-s",SaveFields,Some("BeeKSettings")),KeyBinding::new("enter",TranslateSnapshot,Some("BeeKPreview")),KeyBinding::new("escape",CloseView,Some("BeeKPreview")),KeyBinding::new("ctrl-c",CopyPreview,Some("BeeKPreview"))]);
   let host=match cx.open_window(WindowOptions{titlebar:None,show:false,focus:false,kind:WindowKind::PopUp,window_bounds:Some(WindowBounds::Windowed(Bounds::new(point(px(0.),px(0.)),size(px(1.),px(1.))))),..Default::default()},|_,cx|cx.new(|_|Host)).map_err(|_|()){Ok(host)=>host,Err(_)=>{util::fatal("图形初始化失败，请检查显卡驱动");cx.quit();return;}};
   // A restart child reaches GPUI/GPU window creation before ChildReady. Until
   // ParentExitCommitted and actual parent death it installs no tray or hooks.
@@ -1042,19 +1606,27 @@ pub fn run() -> Result<(), String> {
    let coordinator=Coordinator::start()?;let desktop=native::Desktop::start(etx)?;desktop.configure(cfg.hotkey_enabled,&cfg.hotkey,cfg.copy_to_popup);Ok((instance,coordinator,desktop))
   })();
   let(mut instance,coordinator,desktop)=match initialized{Ok(v)=>v,Err(e)=>{if !restarting{util::fatal(&e);}cx.quit();return;}};
-  let mut form=if std::env::args().any(|a|a=="--autostart"){None}else{open_form(cx,tx.clone(),cfg.clone(),initial_error.clone())};let mut bee:Option<WindowHandle<Bee>>=None;let mut panel:Option<WindowHandle<Panel>>=None;
+  let needs_guide=cfg.onboarding_revision<onboarding::REVISION;
+  let mut guide=if needs_guide {onboarding::open(cx,tx.clone(),cfg.clone(),initial_error.clone())}else{None};
+  let mut form=if needs_guide||std::env::args().any(|a|a=="--autostart"){None}else{open_form(cx,tx.clone(),cfg.clone(),initial_error.clone())};let mut bee:Option<WindowHandle<Bee>>=None;let mut panel:Option<WindowHandle<Panel>>=None;
   cx.spawn(async move|cx|{
-   let(_host,_desktop)=(host,desktop);let mut config_valid=valid;let mut epoch=native::EPOCH.load(Ordering::Acquire);let mut trigger=0;let mut id=0;let mut generation=0;let mut pending:Option<(u64,Purpose)>=None;let mut cache:Option<(Selection,Instant)>=None;let mut last_source:Option<Source>=None;let mut mailbox:Option<(u64,Mailbox)>=None;let mut dragging:Option<([i32;2],[i32;2])>=None;let mut saving=false;let mut request_snapshot=false;let mut request_epoch=0;let mut hotkey_requested=false;let mut copy_requested=false;let mut quiet_at=Instant::now();let mut system_epoch=native::SYSTEM_EPOCH.load(Ordering::Acquire);let mut edits:VecDeque<(Entity<TextInput>,ClipboardIntent)>=VecDeque::new();let mut edit_active:Option<(u64,Entity<TextInput>,ClipboardIntent)>=None;let mut failed_copy:Option<Instant>=None;let mut last_applied_edit:Option<(Entity<TextInput>,u64,u64,Instant)>=None;let mut last_settings_status:Option<String>=if initial_error.is_empty(){None}else{Some(initial_error.clone())};
+   let(_host,_desktop)=(host,desktop);let mut config_valid=valid;let mut epoch=native::EPOCH.load(Ordering::Acquire);let mut trigger=0;let mut id=0;let mut generation=0;let mut pending:Option<(u64,Purpose)>=None;let mut cache:Option<(Selection,Instant)>=None;let mut last_source:Option<Source>=None;let mut mailbox:Option<(u64,Mailbox)>=None;let mut dragging:Option<([i32;2],[i32;2])>=None;let mut saving=false;let mut hotkey_requested=false;let mut copy_requested=false;let mut quiet_at=Instant::now();let mut system_epoch=native::SYSTEM_EPOCH.load(Ordering::Acquire);let mut edits:VecDeque<(Entity<TextInput>,ClipboardIntent)>=VecDeque::new();let mut edit_active:Option<(u64,Entity<TextInput>,ClipboardIntent)>=None;let mut failed_copy:Option<Instant>=None;let mut last_applied_edit:Option<(Entity<TextInput>,u64,u64,Instant)>=None;let mut last_settings_status:Option<String>=if initial_error.is_empty(){None}else{Some(initial_error.clone())};
+   let mut guide_generation=0u64;let mut guide_pending=false;let mut guide_mailbox:Option<(u64,Mailbox)>=None;let mut settings_from_guide=false;
+   let mut next_update=Instant::now()+Duration::from_secs(10);
    loop {
-    let context=native::SYSTEM_EPOCH.load(Ordering::Acquire);if context!=system_epoch{#[cfg(feature="test-fixtures")]super::diagnostics::event("system_epoch_changed",serde_json::json!({"before":system_epoch,"after":context}));system_epoch=context;edits.clear();edit_active=None;failed_copy=None;last_applied_edit=None;pending=None;cache=None;generation+=1;pool.cancel_pending();mailbox=None;request_snapshot=false;let _=cx.update(|cx|{hide(&mut bee,cx);hide(&mut panel,cx);if let Some(f)=form{let _=f.update(cx,|f,w,cx|{let _=native::keep_accessible(w);f.status="系统状态已变化，未完成的剪贴板操作已取消".into();cx.notify();});}});}
+    if cfg.auto_update && Instant::now()>=next_update {let _=super::integration::check_updates(false);next_update=Instant::now()+Duration::from_secs(6*60*60);}
+    let context=native::SYSTEM_EPOCH.load(Ordering::Acquire);if context!=system_epoch{#[cfg(feature="test-fixtures")]super::diagnostics::event("system_epoch_changed",serde_json::json!({"before":system_epoch,"after":context}));system_epoch=context;edits.clear();edit_active=None;failed_copy=None;last_applied_edit=None;pending=None;cache=None;generation+=1;pool.cancel_pending();mailbox=None;let _=cx.update(|cx|{hide(&mut bee,cx);hide(&mut panel,cx);if let Some(f)=form{let _=f.update(cx,|f,w,cx|{let _=native::keep_accessible(w);f.status="系统状态已变化，未完成的剪贴板操作已取消".into();cx.notify();});}});}
     let changed=native::EPOCH.load(Ordering::Acquire);
     if let Some(source)=util::current(changed){last_source=Some(source);}
-    if changed!=epoch{#[cfg(feature="test-fixtures")]super::diagnostics::event("ui_epoch_changed",serde_json::json!({"before":epoch,"after":changed}));epoch=changed;quiet_at=Instant::now();pending=None;cache=None;if !request_snapshot{generation+=1;pool.cancel_pending();mailbox=None;}let _=cx.update(|cx|{hide(&mut bee,cx);if panel.is_some_and(|w|w.update(cx,|p,_,_|!p.snapshot).unwrap_or(false)){hide(&mut panel,cx);}});}
-    if panel.is_some_and(|p|p.update(cx,|p,_,_|!p.snapshot&&!util::is_current(p.selection.source)).unwrap_or(false)){#[cfg(feature="test-fixtures")]super::diagnostics::event("panel_source_changed",serde_json::json!({"foreground":unsafe{windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow()}.0 as usize}));generation+=1;pool.cancel_pending();mailbox=None;let _=cx.update(|cx|hide(&mut panel,cx));}
+    if changed!=epoch{#[cfg(feature="test-fixtures")]super::diagnostics::event("ui_epoch_changed",serde_json::json!({"before":epoch,"after":changed}));epoch=changed;quiet_at=Instant::now();pending=None;cache=None;let _=cx.update(|cx|hide(&mut bee,cx));}
+
     if cache.as_ref().is_some_and(|(s,at)|at.elapsed()>Duration::from_millis(TTL_MS)||!util::is_current(s.source)){cache=None;let _=cx.update(|cx|hide(&mut bee,cx));}
     let t=native::triggered();if edit_active.is_none()&&edits.is_empty()&&cfg.selection_enabled&&!hotkey_requested&&!copy_requested&&pending.as_ref().is_none_or(|(_,p)|matches!(p,Purpose::Detect))&&t!=trigger&&native::quiet_since(t){trigger=t;if let Some(source)=util::current(epoch){id+=1;coordinator.request(id,source,epoch,util::cursor(),false);pending=Some((id,Purpose::Detect));}}
     while let Ok(event)=erx.try_recv(){match event{
-     Event::Settings|Event::About=>{let about=matches!(event,Event::About);let info=format!("BeeK {} · Windows x64 · helper {} · {}",env!("CARGO_PKG_VERSION"),env!("BEEK_BUILD_ID").get(..12).unwrap_or("unknown"),coordinator.snapshot());let _=cx.update(|cx|{hide(&mut bee,cx);let active=form.and_then(|f|f.update(cx,|_,w,_|native::activate(w)).ok());if active.is_none(){form=open_form(cx,tx.clone(),cfg.clone(),if about{info.clone()}else{last_settings_status.clone().unwrap_or_default()});}if about{if let Some(f)=form{let _=f.update(cx,|f,_,cx|{f.status=info;cx.notify();});}}});},
+     Event::Guide=>{let _=tx.try_send(Command::OpenGuide);},
+     Event::Settings|Event::About=>{settings_from_guide=false;let about=matches!(event,Event::About);let info=format!("BeeK {} · Windows x64 · helper {} · {}",env!("CARGO_PKG_VERSION"),env!("BEEK_BUILD_ID").get(..12).unwrap_or("unknown"),coordinator.snapshot());let _=cx.update(|cx|{hide(&mut bee,cx);let active=form.and_then(|f|f.update(cx,|f,w,cx|{f.guide_mode=false;w.resize(size(px(720.),px(780.)));w.set_window_title(tr("BeeK 设置"));for field in &f.fields{field.update(cx,|field,cx|field.set_compact(false,cx));}cx.notify();native::activate(w)}).ok());if active.is_none(){form=open_form(cx,tx.clone(),cfg.clone(),if about{info.clone()}else{last_settings_status.clone().unwrap_or_default()});}if about{if let Some(f)=form{let _=f.update(cx,|f,_,cx|{f.status=info;cx.notify();});}}});},
+     Event::OutsideClick=>{if panel.is_some_and(|p|p.update(cx,|p,_,_|!p.snapshot).unwrap_or(false)){generation+=1;pool.cancel_pending();mailbox=None;let _=cx.update(|cx|hide(&mut panel,cx));}},
+     Event::Update=>{let _=tx.try_send(Command::Update);},
      Event::IpcUnavailable=>{let message="实例通信暂不可用，请从托盘退出后重新启动".to_owned();last_settings_status=Some(message.clone());let _=cx.update(|cx|if let Some(f)=form{let _=f.update(cx,|f,_,cx|{f.status=message;cx.notify();});});},
      Event::Restore=>coordinator.restore(),Event::Quit=>{super::lifecycle::exit_deadline();let _=cx.update(|cx|cx.quit());return;},
      Event::Restart=>{if let Err(e)=instance.restart(){let _=cx.update(|cx|if let Some(f)=form{let _=f.update(cx,|s,_,cx|{s.status=e;cx.notify();});});}},
@@ -1103,7 +1675,7 @@ pub fn run() -> Result<(), String> {
        Purpose::Copy=>{},
        Purpose::Detect=>{cache=Some((s.clone(),Instant::now()));let _=cx.update(|cx|{hide(&mut bee,cx);bee=open_bee(cx,tx.clone(),s);});},
        Purpose::Verify(old)=>if old.same_selection(&s){let _=tx.try_send(Command::Translate(s,false));}else{let _=cx.update(|cx|hide(&mut bee,cx));},
-       Purpose::Preview|Purpose::Clipboard(false)=>{generation+=1;pool.cancel_pending();mailbox=None;request_snapshot=false;let _=cx.update(|cx|{hide(&mut bee,cx);hide(&mut panel,cx);panel=open_panel(cx,tx.clone(),s,true);});},
+       Purpose::Preview|Purpose::Clipboard(false)=>{generation+=1;pool.cancel_pending();mailbox=None;let _=cx.update(|cx|{hide(&mut bee,cx);hide(&mut panel,cx);panel=open_panel(cx,tx.clone(),s,true);});},
        Purpose::Clipboard(true)=>{cache=Some((s.clone(),Instant::now()));let _=cx.update(|cx|{hide(&mut bee,cx);bee=open_bee(cx,tx.clone(),s);});}
       }}
      },
@@ -1113,23 +1685,52 @@ pub fn run() -> Result<(), String> {
      Outcome::Paused=>{let _=cx.update(|cx|{hide(&mut bee,cx);if let Some(f)=form{let _=f.update(cx,|s,_,cx|{s.status="选区检测已暂停，请从托盘手动恢复".into();cx.notify();});}});},_=>{}
     }}
     while let Ok(command)=rx.try_recv(){match command{
+     Command::OpenGuide=>{let _=cx.update(|cx|{hide(&mut bee,cx);hide(&mut panel,cx);let shown=guide.and_then(|g|g.update(cx,|_,w,_|native::activate(w)).ok());if shown.is_none(){guide=onboarding::open(cx,tx.clone(),cfg.clone(),String::new());}});},
+     Command::Guide(action)=>{
+      use onboarding::Action;
+      match action {
+       Action::Close=>{guide_generation+=1;guide_pending=false;guide_mailbox=None;let _=cx.update(|cx|hide(&mut guide,cx));},
+       Action::Console|Action::KeyGuide=>{let _=cx.update(|cx|cx.open_url(if matches!(action,Action::Console){"https://console.volcengine.com/ark/"}else{"https://docs.volcengine.com/docs/ark/manage-api-keys?lang=zh"}));},
+       Action::Configure(engine)=>{settings_from_guide=true;let _=cx.update(|cx|{
+        let existing=form.and_then(|f|f.update(cx,|f,w,cx|{f.guide_mode=true;w.resize(size(px(640.),px(650.)));w.set_window_title(tr("翻译服务设置"));for field in &f.fields{field.update(cx,|field,cx|field.set_compact(true,cx));}if let Some(engine)=engine{f.switch_engine(engine,w,cx);}if let Some(index)=f.visible_fields().first(){f.fields[*index].read(cx).focus(w);}else{w.focus(&f.focus);}let _=native::activate(w);cx.notify();}).ok());
+        if existing.is_none(){let mut next=cfg.clone();if let Some(engine)=engine{next.translation_engine=engine;}form=open_form_mode(cx,tx.clone(),next,String::new(),true);}
+       });},
+       Action::SelectionSettings=>{settings_from_guide=false;let _=cx.update(|cx|{
+        let existing=form.and_then(|f|f.update(cx,|f,w,cx|{f.guide_mode=false;w.resize(size(px(720.),px(780.)));w.set_window_title(tr("BeeK 设置"));for field in &f.fields{field.update(cx,|field,cx|field.set_compact(false,cx));}if let Some(index)=f.visible_fields().first(){f.fields[*index].read(cx).focus(w);}let _=native::activate(w);cx.notify();}).ok());
+        if existing.is_none(){form=open_form(cx,tx.clone(),cfg.clone(),String::new());}
+       });},
+       Action::Trial=>if !guide_pending&&guide_mailbox.is_none(){
+        if saving||!config_valid{let _=cx.update(|cx|if let Some(g)=guide{let _=g.update(cx,|g,_,cx|{g.notice=tr("请先填写并启用有效的翻译服务，再试译。").into();cx.notify();});});}
+        else{guide_generation+=1;let g=guide_generation;guide_pending=work_tx.try_send(Work::Request(g,cfg.clone(),onboarding::sample(cfg.translation_target).into(),RequestTarget::Guide)).is_ok();let accepted=guide_pending;let _=cx.update(|cx|if let Some(g)=guide{let _=g.update(cx,|g,_,cx|{g.trial_busy=accepted;g.trial_result.clear();g.notice=if accepted{String::new()}else{tr("设置操作繁忙，请稍后重试").into()};cx.notify();});});}
+       },
+       Action::UiLanguage(_)|Action::Target(_)|Action::Finish|Action::Skip=>if !saving {
+        let mut next=cfg.clone();let origin=match action{Action::UiLanguage(language)=>{next.ui_language=language;SaveOrigin::GuidePreference},Action::Target(target)=>{next.translation_target=target;SaveOrigin::GuidePreference},_=>{next.onboarding_revision=onboarding::REVISION;SaveOrigin::GuideFinish}};
+        saving=work_tx.try_send(Work::Save(cfg.clone(),next,KeyEdit::Keep,origin)).is_ok();let accepted=saving;let _=cx.update(|cx|if let Some(g)=guide{let _=g.update(cx,|g,_,cx|{g.saving=accepted;if !accepted{g.notice=tr("设置操作繁忙，请稍后重试").into();}cx.notify();});});
+       }
+      }
+     },
      Command::Click(s)=>if cache.as_ref().is_some_and(|(c,at)|c.same_selection(&s)&&at.elapsed()<Duration::from_millis(TTL_MS))&&s.epoch==epoch&&util::is_current(s.source){id+=1;let point=s.rects.last().map(|r|[(r.x+r.width/2.) as i32,(r.y+r.height/2.) as i32]).unwrap_or_else(util::cursor);coordinator.request(id,s.source,epoch,point,s.clipboard_sequence.is_some());pending=Some((id,Purpose::Verify(s)));},
      Command::Translate(s,snapshot)=>{
       if snapshot{let valid=panel.is_some_and(|p|p.update(cx,|p,_,_|p.snapshot&&p.selection.same_selection(&s)).unwrap_or(false));if !valid{continue;}}
       else if s.epoch!=native::EPOCH.load(Ordering::Acquire)||!util::is_current(s.source){continue;}
-      generation+=1;pool.cancel_pending();request_snapshot=snapshot;request_epoch=s.epoch;let g=generation;let config=cfg.clone();let text=s.text.clone();
-      let _=cx.update(|cx|{hide(&mut bee,cx);if !snapshot{hide(&mut panel,cx);panel=open_panel(cx,tx.clone(),s,false);}if let Some(p)=panel{let _=p.update(cx,|p,_,cx|{p.active=true;p.error=false;p.copied_until=None;p.status="正在翻译…".into();p.body.clear();cx.notify();});}});
-      let error=if saving{Some("设置正在保存，请稍后重新选择或重试")}else if !config_valid{Some("配置损坏，恢复并保存设置前不能发送翻译请求")}else if work_tx.try_send(Work::Request(g,config,text)).is_err(){Some("设置操作繁忙，请稍后重试")}else{None};
+      generation+=1;pool.cancel_pending();let g=generation;let config=cfg.clone();let text=s.text.clone();
+      let _=cx.update(|cx|{hide(&mut bee,cx);if !snapshot{hide(&mut panel,cx);panel=open_panel(cx,tx.clone(),s,false);}if let Some(p)=panel{let _=p.update(cx,|p,_,cx|{p.engine=cfg.translation_engine;p.active=true;p.error=false;p.copied_until=None;p.status="正在翻译…".into();p.body.clear();cx.notify();});}});
+      let error=if saving{Some("设置正在保存，请稍后重新选择或重试")}else if !config_valid{Some("配置损坏，恢复并保存设置前不能发送翻译请求")}else if work_tx.try_send(Work::Request(g,config,text,RequestTarget::Panel)).is_err(){Some("设置操作繁忙，请稍后重试")}else{None};
       if let Some(error)=error{let _=cx.update(|cx|if let Some(p)=panel{let _=p.update(cx,|p,_,cx|{p.active=false;p.error=true;p.status=error.into();cx.notify();});});}
      },
-     Command::Save(next,key) if !saving=>{
-      saving=if edit_active.is_some()||!edits.is_empty(){false}else{work_tx.try_send(Work::Save(cfg.clone(),next,key)).is_ok()};if !saving{let _=cx.update(|cx|if let Some(f)=form{let _=f.update(cx,|f,_,cx|{f.busy=false;f.status=if edit_active.is_some()||!edits.is_empty(){"请等待剪贴板编辑完成后再保存"}else{"设置操作繁忙，请稍后重试"}.into();cx.notify();});});}
+     Command::Save(next,key,service) if !saving=>{
+      saving=if edit_active.is_some()||!edits.is_empty(){false}else{work_tx.try_send(Work::Save(cfg.clone(),next,key,if service{SaveOrigin::GuideService}else{SaveOrigin::Settings})).is_ok()};if !saving{let _=cx.update(|cx|if let Some(f)=form{let _=f.update(cx,|f,_,cx|{f.busy=false;f.status=if edit_active.is_some()||!edits.is_empty(){"请等待剪贴板编辑完成后再保存"}else{"设置操作繁忙，请稍后重试"}.into();cx.notify();});});}
      },
+     Command::Save(_,_,_)=>{let _=cx.update(|cx|if let Some(f)=form{let _=f.update(cx,|f,_,cx|{f.busy=false;f.status=tr("设置正在保存，请稍后重新选择或重试").into();cx.notify();});});},
      Command::Copy(text,sequence)=>{if let Some(source)=util::source(unsafe{windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow()},epoch){id+=1;coordinator.copy(id,source,epoch,text,sequence);pending=Some((id,Purpose::Copy));}else{let _=cx.update(|cx|if let Some(p)=panel{let _=p.update(cx,|p,_,cx|{p.status="复制未完成，请返回普通桌面后重试".into();cx.notify();});});}},
      Command::Edit(field,mut intent)=>{
       #[cfg(feature="test-fixtures")]super::diagnostics::event("editor_intent",match &intent{ClipboardIntent::Paste{ticket,..}=>serde_json::json!({"kind":"paste","ticket":ticket}),ClipboardIntent::Copy{ticket,cut,..}=>serde_json::json!({"kind":if *cut{"cut"}else{"copy"},"ticket":ticket})});if let ClipboardIntent::Paste{ticket,at,..}=&mut intent{if let Some((target,old,new,completed))=&last_applied_edit{if target==&field&&*ticket==*old&&*at<=*completed{*ticket=*new;}}}if edits.len()<4{let ignore=matches!(&intent,ClipboardIntent::Paste{at,..} if failed_copy.is_some_and(|failed|*at<=failed));if !ignore{edits.push_back((field,intent));}else{let _=cx.update(|cx|if let Some(f)=form{let _=f.update(cx,|f,_,cx|{f.status="先前复制未完成，关联粘贴已取消，请重试".into();cx.notify();});});}}else{let _=cx.update(|cx|if let Some(f)=form{let _=f.update(cx,|f,_,cx|{f.status="剪贴板操作繁忙，请稍后重试".into();cx.notify();});});}},
      Command::Speak(text)=>{let result=speech.speak(generation,text);let _=cx.update(|cx|if let Some(p)=panel{let _=p.update(cx,|p,_,cx|{p.status=result.map(|_|"正在朗读…").unwrap_or_else(|e|e).into();cx.notify();});});},Command::Close=>{generation+=1;pool.cancel_pending();mailbox=None;let _=cx.update(|cx|{hide(&mut panel,cx);hide(&mut bee,cx);});},
-     Command::Update=>{let queued=super::integration::open_updates();let _=cx.update(|cx|if let Some(f)=form{let _=f.update(cx,|f,_,cx|{f.status=if queued{"正在检查 Windows 稳定版更新…"}else{"更新检查繁忙，请稍后重试"}.into();cx.notify();});});},
+     Command::Demo=>{
+      let s=Selection{source:Source{hwnd:0,pid:std::process::id(),created:1,generation:epoch},epoch,runtime_id:vec![],text:"Reading opens a window to the world.".into(),rects:vec![],clipboard_sequence:None};
+      let _=cx.update(|cx|{hide(&mut bee,cx);hide(&mut panel,cx);panel=open_panel(cx,tx.clone(),s.clone(),true);});let _=tx.try_send(Command::Translate(s,true));
+     },
+     Command::Update=>{let queued=super::integration::open_updates();let _=cx.update(|cx|{if form.is_none(){form=open_form(cx,tx.clone(),cfg.clone(),String::new());}if let Some(f)=form{let _=f.update(cx,|f,_,cx|{f.status=if queued{"正在检查 Windows 稳定版更新…"}else{"更新检查繁忙，请稍后重试"}.into();cx.notify();});}});},
      Command::Drag(at)=>{if let Some(p)=panel{let mut origin=None;let _=p.update(cx,|p,w,_|{if !p.snapshot{if let Ok(h)=native::hwnd(w){let mut rect=windows::Win32::Foundation::RECT::default();if unsafe{windows::Win32::UI::WindowsAndMessaging::GetWindowRect(h,&mut rect)}.is_ok(){origin=Some([rect.left,rect.top]);}}}});if let Some(origin)=origin{dragging=Some((at,origin));}}},_=>{}
     }}
     if edit_active.is_none(){if let Some((field,intent))=edits.pop_front(){
@@ -1137,11 +1738,33 @@ pub fn run() -> Result<(), String> {
      if let Some(source)=source{id+=1;match &intent{ClipboardIntent::Paste{sequence,..}=>coordinator.paste(id,source,epoch,*sequence),ClipboardIntent::Copy{text,sequence,..}=>coordinator.copy(id,source,epoch,text.clone(),*sequence)}edit_active=Some((id,field,intent));}else{edits.clear();let message="设置窗口已不可用，未完成的输入操作已取消".to_owned();last_settings_status=Some(message.clone());let _=cx.update(|cx|if let Some(f)=form{let _=f.update(cx,|f,_,cx|{f.status=message;cx.notify();});});}
     }}
     while let Ok(message)=bg_rx.try_recv(){match message{
-     Background::Saved(result,warning)=>{saving=false;let committed=result.is_ok();let status=match result{Ok(saved)=>{cfg=saved;config_valid=true;_desktop.configure(cfg.hotkey_enabled,&cfg.hotkey,cfg.copy_to_popup);warning.unwrap_or_else(||"已保存".into())},Err(e)=>e};last_settings_status=Some(status.clone());let editing=edit_active.is_some()||!edits.is_empty();let _=cx.update(|cx|if let Some(f)=form{let _=f.update(cx,|f,_,cx|{let signature=f.save_revision.take();let unchanged=signature.as_ref().is_some_and(|s|s==&f.signature(cx))&&!editing;f.busy=false;f.status=status;if committed{if unchanged{f.cfg=cfg.clone();}else{f.status.push_str("；提交后的新修改尚未保存");}f.cfg.provider.credential_ref=cfg.provider.credential_ref.clone();f.fields[0].update(cx,|key,cx|key.set_saved_secret(cfg.provider.credential_ref.is_some(),cx));if signature.as_ref().is_some_and(|(_,flags)|flags[4]==f.clear){f.clear=false;}if !editing&&signature.as_ref().is_some_and(|(fields,_)|fields[0]==f.fields[0].read(cx).revision()){f.fields[0].update(cx,|key,cx|key.set_value("",cx));}}cx.notify();});});},
-     Background::Request(g,result) if g==generation&&(request_snapshot||request_epoch==native::EPOCH.load(Ordering::Acquire))&&panel.is_some_and(|p|p.update(cx,|_,_,_|()).is_ok())=>match result{Ok(request)=>mailbox=Some((g,pool.submit(request))),Err(e)=>{let _=cx.update(|cx|if let Some(p)=panel{let _=p.update(cx,|p,_,cx|{p.active=false;p.error=true;p.status=e;cx.notify();});});}},_=>{}
+     Background::Saved(result,warning,origin)=>{
+      saving=false;let committed=result.is_ok();
+      let status=match result{Ok(saved)=>{cfg=saved;config_valid=true;pool.configure_cache(cfg.translation_cache);localization::configure(cfg.ui_language,&super::util::system_language());generation+=1;guide_generation+=1;guide_pending=false;guide_mailbox=None;pool.cancel_pending();mailbox=None;let _=cx.update(|cx|{hide(&mut bee,cx);hide(&mut panel,cx);});_desktop.configure(cfg.hotkey_enabled,&cfg.hotkey,cfg.copy_to_popup);warning.unwrap_or_else(||"已保存".into())},Err(e)=>e};
+      last_settings_status=Some(status.clone());let editing=edit_active.is_some()||!edits.is_empty();let mut close_service=false;
+      let _=cx.update(|cx|{
+       if let Some(f)=form{let _=f.update(cx,|f,_,cx|{
+        if matches!(origin,SaveOrigin::Settings|SaveOrigin::GuideService){
+         let signature=f.save_revision.take();let unchanged=signature.as_ref().is_some_and(|s|s==&f.signature(cx))&&!editing;f.busy=false;f.status=status.clone();
+         if committed{if unchanged{f.cfg=cfg.clone();close_service=settings_from_guide;}else{f.status.push_str("；提交后的新修改尚未保存");}f.cfg.provider.credential_ref=cfg.provider.credential_ref.clone();for(name,p)in &mut f.cfg.providers{p.credential_ref=cfg.providers.get(name).and_then(|p|p.credential_ref.clone());}f.drafts.remove(cfg.translation_engine.key());f.fields[0].update(cx,|key,cx|key.set_saved_secret(f.cfg.active_provider().credential_ref.is_some(),cx));if signature.as_ref().is_some_and(|(_,flags)|flags[4]==f.clear){f.clear=false;}if !editing&&signature.as_ref().is_some_and(|(fields,_)|fields[0]==f.fields[0].read(cx).revision()){f.fields[0].update(cx,|key,cx|key.set_value("",cx));}}
+        }else if committed{f.cfg.ui_language=cfg.ui_language;f.cfg.translation_target=cfg.translation_target;f.cfg.onboarding_revision=cfg.onboarding_revision;}
+        cx.notify();
+       });}
+       if close_service{hide(&mut form,cx);settings_from_guide=false;}
+       if committed&&origin==SaveOrigin::GuideFinish{hide(&mut guide,cx);}
+       else if let Some(g)=guide{let _=g.update(cx,|g,w,cx|{g.saving=false;if committed{if close_service{g.settings_changed(cfg.clone(),cx);let _=native::activate(w);}else{g.cfg=cfg.clone();w.set_window_title(tr("BeeK 使用引导"));g.trial_busy=false;g.trial_result.clear();g.notice.clear();}}else{g.notice=tr(&status).into();}cx.notify();});}
+      });
+     },
+     Background::Request(g,result,RequestTarget::Guide) if g==guide_generation=>{
+      guide_pending=false;if guide.is_some_and(|w|w.update(cx,|_,_,_|()).is_ok()){
+       match result {Ok(request)=>{if let Some(text)=pool.cached(&request){let _=cx.update(|cx|if let Some(g)=guide{let _=g.update(cx,|g,_,cx|g.finish_trial(Ok(text),true,cx));});}else{guide_mailbox=Some((g,pool.submit(request)));}},Err(error)=>{let _=cx.update(|cx|if let Some(g)=guide{let _=g.update(cx,|g,_,cx|g.finish_trial(Err(error),false,cx));});}}
+      }
+     },
+     Background::Request(g,result,RequestTarget::Panel) if g==generation&&panel.is_some_and(|p|p.update(cx,|_,_,_|()).is_ok())=>match result{Ok(request)=>mailbox=Some((g,pool.submit(request))),Err(e)=>{let _=cx.update(|cx|if let Some(p)=panel{let _=p.update(cx,|p,_,cx|{p.active=false;p.error=true;p.status=e;cx.notify();});});}},_=>{}
     }}
-    if let Some(status)=super::integration::update_result(){let _=cx.update(|cx|if let Some(f)=form{let _=f.update(cx,|f,_,cx|{f.status=status;cx.notify();});});}
-    if !native::HOTKEY_OK.load(Ordering::Acquire){let _=cx.update(|cx|if let Some(f)=form{let _=f.update(cx,|f,_,cx|{if !f.status.contains("快捷键"){f.status="全局快捷键注册失败（冲突或格式无效），请修改后保存".into();cx.notify();}});});}
+    if let Some((g,m))=&guide_mailbox{if *g==guide_generation{let progress=std::mem::replace(&mut *m.lock().unwrap(),Progress::Idle);if let Progress::Done(result)=progress{let _=cx.update(|cx|if let Some(g)=guide{let _=g.update(cx,|g,_,cx|g.finish_trial(result,false,cx));});guide_mailbox=None;}}}
+    if let Some(status)=super::integration::update_result(){last_settings_status=Some(status.clone());let _=cx.update(|cx|if let Some(f)=form{let _=f.update(cx,|f,_,cx|{f.status=status;cx.notify();});});}
+    if !native::HOTKEY_OK.load(Ordering::Acquire){let _=cx.update(|cx|if let Some(f)=form{let _=f.update(cx,|f,_,cx|{if !f.guide_mode&&!f.status.contains("快捷键"){f.status="全局快捷键注册失败（冲突或格式无效），请修改后保存".into();cx.notify();}});});}
     let mut completed=false;
     if let Some((g,m))=&mailbox{if *g==generation{let progress=std::mem::replace(&mut *m.lock().unwrap(),Progress::Idle);completed=matches!(progress,Progress::Done(_));if !matches!(progress,Progress::Idle){let _=cx.update(|cx|if let Some(p)=panel{let _=p.update(cx,|p,_,cx|{match progress{Progress::Idle=>{},Progress::Loading=>{p.status="正在翻译…".into();},Progress::Queued=>{p.status="等待前面的实际请求结束…".into();},Progress::Text(text)=>{p.status="正在翻译…".into();p.body=text;},Progress::Done(Ok(text))=>{p.active=false;p.error=false;p.body=text;p.status="完成".into();},Progress::Done(Err(e))=>{p.active=false;p.error=true;p.status=e;}}cx.notify();});});}}}
     if completed{#[cfg(feature="test-fixtures")]super::diagnostics::event("translation_completed",serde_json::json!({"generation":generation}));mailbox=None;}

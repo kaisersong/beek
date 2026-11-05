@@ -325,12 +325,13 @@ impl Instance {
         let own = me()?;
         let security = Security::new(&sid)?;
         let attributes = security.attributes();
-        let name = util::wide(format!("Local\\BeeK-{sid}-{}", own.session));
+        let suffix = util::profile_suffix();
+        let name = util::wide(format!("Local\\BeeK-{sid}-{}{suffix}", own.session));
         let mutex = unsafe { CreateMutexW(Some(&attributes), true, PCWSTR(name.as_ptr())) }
             .map_err(|_| "无法取得 BeeK 会话锁")?;
         let existing = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
         let mutex = Handle(mutex);
-        let pipe_name = format!("\\\\.\\pipe\\BeeK-{sid}-{}", own.session);
+        let pipe_name = format!("\\\\.\\pipe\\BeeK-{sid}-{}{suffix}", own.session);
         let path = util::known_folder(true)?.join(format!("instance-{}.json", own.session));
         if existing {
             let deadline = Instant::now() + Duration::from_secs(1);
@@ -473,6 +474,9 @@ impl Instance {
         }))
     }
     pub fn restart(&mut self) -> Result<(), String> {
+        if util::test_profile().is_some() {
+            return Err("隔离测试配置不执行产品重启".into());
+        }
         if self.restart_events.is_some() || self.restart_busy.load(Ordering::Acquire) {
             return Err("重启正在进行".into());
         }

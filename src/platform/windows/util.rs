@@ -253,7 +253,35 @@ pub fn process_alive(pid: u32, created: u64) -> bool {
             && (((c.dwHighDateTime as u64) << 32) | c.dwLowDateTime as u64) == created
     }
 }
+/// Available only in fixture builds. Shipping binaries always use Known Folders.
+pub fn test_profile() -> Option<PathBuf> {
+    #[cfg(feature = "test-fixtures")]
+    {
+        let args = std::env::args().collect::<Vec<_>>();
+        if let Some(index) = args.iter().position(|a| a == "--test-profile") {
+            let path = PathBuf::from(args.get(index + 1)?);
+            if path.is_absolute() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+pub fn profile_suffix() -> String {
+    use sha2::{Digest, Sha256};
+    test_profile()
+        .map(|p| {
+            format!(
+                "-test-{:x}",
+                Sha256::digest(p.as_os_str().as_encoded_bytes())
+            )
+        })
+        .unwrap_or_default()
+}
 pub fn known_folder(local: bool) -> std::result::Result<PathBuf, String> {
+    if let Some(root) = test_profile() {
+        return Ok(root.join(if local { "local" } else { "roaming" }));
+    }
     unsafe {
         let p = SHGetKnownFolderPath(
             if local {
@@ -352,4 +380,15 @@ pub fn check_platform() -> std::result::Result<(), String> {
         return Err("BeeK 首版需要 Windows 11 x64 桌面系统".into());
     }
     Ok(())
+}
+
+/// Stack-owned locale buffer; no allocation or OS resource escapes this call.
+pub fn system_language() -> String {
+    let mut name = [0u16; 85];
+    let len = unsafe { windows::Win32::Globalization::GetUserDefaultLocaleName(&mut name) };
+    if len > 1 {
+        String::from_utf16_lossy(&name[..len as usize - 1])
+    } else {
+        "zh-CN".into()
+    }
 }

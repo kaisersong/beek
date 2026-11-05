@@ -1,34 +1,36 @@
-## BeeK v1.1.1
-
-### macOS
-
-- 修复更新提示反复切换 Dock 显示状态的问题；更新窗口现在保留用户的 Dock 显示设置。
-
-- 全新四步首次使用引导，介绍取词权限、点击翻译与服务配置，重点推荐豆包；试译按钮直接可见，无需选中示例。
-- 中英文界面，可选跟随系统；独立选择8种翻译目标语言：简体中文、英文、日文、韩文、繁体中文、法文、德文、西班牙文。
-- 可切换免费公共百度、自己的百度 Key、豆包 / OpenAI 兼容、Azure、Google、MyMemory 和 LibreTranslate / Argos。公共百度无需用户填写 Key，共享额度有限；其他服务使用用户自己的账号与额度。
-- 所有引擎使用近期结果缓存，相同内容命中后直接展示。默认128条、30分钟，可关闭；最多1000条、24小时、总计2MiB，退出应用后清空。缓存按引擎、账号、请求设置和目标语言隔离。
-- 内置中英文本地翻译安装说明及可复制的 AI 安装提示词；BeeK 不会自动执行安装命令。
-- 修复译文完成后卡片消失、浮动按钮与多屏定位问题。
-- 修复检查更新时菜单变灰：立即展示进度，结果使用非模态窗口，重复点击合并处理；修复语言子菜单被自动禁用。
-- 包含主分支已有的更新安装改进：先准备完整 bundle，退出旧进程后切换，保留签名，并在启动失败时回退到 LaunchServices。
+## BeeK v1.1.2
 
 ### Windows 11 x64 公开预览
 
-- 修复 Chrome 首次取词的焦点事件使选区失效，以及内部子窗口动画关闭翻译卡片的问题。
-- 改进桌面测试工具的焦点处理及网络错误夹具。
-- 本次 Windows 仍使用原有界面与豆包翻译设置；macOS 的新引导、中英文界面、目标语言菜单、多引擎和缓存设置尚未同步到 Windows。
-- Windows 包为未签名公开预览，可能显示未知发布者提示，尚未完成完整多屏 / 混合 DPI 验收。
+- 四步使用引导对齐 macOS 的云海背景、版式与交互：欢迎、划词演示、翻译服务、试译完成；可从设置或托盘重开。
+- 支持跟随系统 / 简体中文 / English 界面，以及独立选择 8 种翻译目标语言。
+- 支持公共百度、豆包 / OpenAI 兼容、Azure、个人百度 Key、Google、MyMemory、LibreTranslate / Argos。新用户默认公共百度免 Key；旧用户保留既有引擎、配置与凭据，各服务密钥独立存入 Windows Credential Manager。
+- 新增有界进程内缓存及设置，默认 128 条 / 30 分钟，可关闭；公共 / 个人百度模式不使用缓存。缓存不写磁盘，按服务、账号、目标语言及请求参数隔离。
+- 引导中的服务保存返回试译页，只有主动点击试译才发送公开例句；演示在本地完成。保存服务不会误标引导完成。
+- 拖选新文字时保留当前翻译卡片，点击新蜜蜂后才替换；普通外部点击和关闭按钮可收起卡片。
+- 可选自动检查更新，安装仍由用户手动完成。修复切换服务后的输入焦点与 Ctrl+S 保存。
+- 改进便携 ZIP 打包，按 manifest 核对文件清单、大小、SHA256 和 ZIP CRC。
+
+### 两平台读音与复制修正
+
+- 只有真实 AI 词典结果才拆分完整读音首行；普通译文中含“读音：”也完整保留。
+- 无读音时不显示占位，部分流式首行保持原文。
+- 加载、错误和纯空白结果不覆盖剪贴板、不显示复制成功反馈；仍可复制当前已收到的流式正文。
+- 词典复制包含原词和可用读音，其他服务保持普通译文。朗读对象仍是原词。
+- 本版继续使用原有翻译提示词；简短释义 / 短语提示词实验未纳入本版。
 
 ### 验证与安装
 
-- macOS 本地执行 locked Rust 测试、更新安装脚本测试及 Python 工具测试；原生菜单48组语言组合、16项更新窗口状态检查通过。真实界面工具连接失败，菜单鼠标点击仍需实际使用确认，未宣称全应用或跨天验收。
-- Windows 已在独立桌面验证 Chrome、Edge、Notepad 的选区及译文持续展示；本次构建另由 CI 执行源码测试与打包，不代表所有桌面场景验收完成。
-- macOS 分发包由 Release 工作流签名、公证并执行 Gatekeeper 验证；工作流结果为准。
-- macOS 下载 `BeeK.dmg`，打开后拖入“应用程序”；自动更新使用 `BeeK-v1.1.1.zip`。
-- Windows 下载 `BeeK-windows-x64-setup.exe`，或完整解压便携 ZIP 后运行 `beek.exe`，保留配套 helper。Windows 后续更新从 Releases 手动下载。
-- 提供 SHA256 校验文件。
+- 本地 macOS locked Rust 测试 88 项通过（使用已有 runtime shader feature），Windows 交互测试 71 项通过；Windows 工具 27 项、离线内容门槛夹具 17 项通过。
+- macOS 真实剪贴板入口 9 项、Windows Panel 复制入口 10 项通过。Windows 96 DPI 与 144 DPI 产品窗口检查通过；完整多屏 / 混合 DPI、200% 缩放与跨天验收仍未完成。macOS AX 内存压测无新的通过证据。
+- macOS 分发包由本次 Release 工作流签名、公证并执行 Gatekeeper 验证，结果以工作流为准。Windows 为未签名公开预览，可能显示未知发布者提示。
+- macOS 下载 `BeeK.dmg`，打开后拖入“应用程序”；内置更新器使用 `BeeK-v1.1.2.zip`。
+- Windows 下载 `BeeK-windows-x64-setup.exe`，或完整解压便携 ZIP，保留同目录的 `beek-selection-host.exe`。提供 SHA256 校验文件。
 
 ### English
 
-BeeK 1.1.1 includes the 1.1 feature set: guided setup, Chinese/English UI, eight translation targets, switchable providers, a shared free Baidu option, and a bounded cache across connected engines on macOS. It also fixes disappearing translation cards, update dialogs blocking menus, and disabled language submenus. Windows remains an unsigned preview with selection reliability fixes; the new macOS settings and onboarding are not yet available on Windows. Local services require installing the appropriate language models. Shared service quotas are limited; personal providers use your own account quota.
+Windows 1.1.2 gains the macOS-style four-step onboarding, bilingual UI, eight translation targets, seven providers and configurable process-local caching. Existing credentials and service settings are preserved. New selections keep the current translation card until the next bee click. Update checks are optional; installation remains manual.
+
+Both platforms preserve ordinary translations that start with a pronunciation prefix, omit missing-pronunciation placeholders, and prevent loading/error/blank results from overwriting the clipboard. Partial streamed results remain copyable. Translation prompts remain unchanged.
+
+macOS distribution uses the release signing/notarization pipeline. Windows is an unsigned public preview; full mixed-DPI, multiple-monitor and long-running acceptance is still pending. Build and artifact availability are determined by this release workflow.

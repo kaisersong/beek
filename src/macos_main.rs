@@ -233,27 +233,32 @@ impl PopupView {
     /// 单词模式：把「读音：…」那一行从正文里拆出来，返回 (读音, 不含读音行的正文)
     fn pron_and_body(&self) -> (Option<String>, String) {
         match &self.content {
-            PopupContent::Result(raw) => translate::split_pron(raw),
+            PopupContent::Result(raw) if self.word.is_some() => translate::split_pron(raw),
             _ => (None, self.body_text()),
         }
     }
 
+    fn can_copy(&self) -> bool {
+        matches!(&self.content, PopupContent::Result(raw) if !raw.trim().is_empty())
+    }
+
     /// 复制到剪贴板的内容：单词模式连词和读音一起复制，方便粘到别处
-    fn copy_text(&self) -> String {
+    fn copy_text(&self) -> Option<String> {
+        if !self.can_copy() {
+            return None;
+        }
         let (pron, body) = self.pron_and_body();
-        match (self.word.as_deref(), pron) {
+        Some(match (self.word.as_deref(), pron) {
             (Some(w), Some(p)) => format!("{}  {}\n{}", w, p, body),
             (Some(w), None) => format!("{}\n{}", w, body),
             _ => body,
-        }
+        })
     }
 
     /// 复制正文到系统剪贴板，并短暂显示「已复制」
-    fn copy(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.content, PopupContent::Loading) {
-            return;
-        }
-        cx.write_to_clipboard(ClipboardItem::new_string(self.copy_text()));
+    fn copy(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(text) = self.copy_text() else { return false; };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
         // 记一下「这次剪贴板是我们自己写的」：剪贴板监听要忽略它，
         // 否则点一次弹窗的复制按钮，会把自己的复制当成用户复制、又弹一个按钮出来
         clipboard::note_own_write();
@@ -270,6 +275,7 @@ impl PopupView {
             .ok();
         })
         .detach();
+        true
     }
 }
 
@@ -306,10 +312,7 @@ impl Render for PopupView {
                 .gap_1()
                 .mb(px(8.))
                 .child(div().text_lg().font_weight(FontWeight::BOLD).child(w))
-                .child(match pron.clone() {
-                    Some(p) => div().text_sm().text_color(rgb(0x666666)).child(p),
-                    None => div().text_sm().text_color(rgb(0xcccccc)).child(localization::tr("读音…")),
-                })
+                .children(pron.clone().map(|p| div().text_sm().text_color(rgb(0x666666)).child(p)))
                 .child(
                     div()
                         .id("beek-speak")
@@ -419,7 +422,7 @@ impl Render for PopupView {
                                             .h(px(8.))
                                             .bg(white())
                                             .border_1()
-                                            .border_color(if self.copied {
+                                            .border_color(if self.copied && self.can_copy() {
                                                 rgb(0x2f9e44)
                                             } else {
                                                 rgb(0x888888)
@@ -1944,8 +1947,59 @@ fn display_selftest() {
     });
 }
 
+// Bounded synthetic check of the real PopupView clipboard entry. No selection,
+// settings, HTTP, hooks or long-lived polling are started.
+#[cfg(feature = "test-fixtures")]
+fn copy_result_selftest() {
+    struct Restore { snapshot: Option<clipboard::Snapshot>, owned_count: i64 }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if clipboard::change_count() == self.owned_count {
+                if let Some(snapshot) = &self.snapshot { clipboard::restore(snapshot); clipboard::note_own_write(); }
+            }
+        }
+    }
+    Application::new().run(|cx| {
+        let _pool = macos_runtime::AutoreleasePool::new();
+        let mut restore = Restore { snapshot: clipboard::snapshot(), owned_count: clipboard::change_count() };
+        let popup = cx.new(|_| PopupView { content: PopupContent::Loading, engine_label: "fixture", cache_hit: false, word: Some("word".into()), anchor_bottom: false, win_h: 320., copied: false });
+        let mut passed = 0;
+        for content in [PopupContent::Loading, PopupContent::Error("synthetic failure".into()), PopupContent::Result(String::new()), PopupContent::Result(" \n\t\u{3000}".into())] {
+            clipboard::write_string("BeeK public clipboard sentinel");
+            restore.owned_count = clipboard::change_count();
+            let own_before = clipboard::is_self_inflicted(restore.owned_count);
+            let copied = popup.update(cx, |view, cx| { view.content = content; view.copied = false; view.copy(cx) });
+            assert!(!copied);
+            assert!(!popup.read(cx).copied);
+            assert_eq!(clipboard::change_count(), restore.owned_count);
+            assert_eq!(clipboard::is_self_inflicted(restore.owned_count), own_before);
+            assert_eq!(clipboard::read_string().as_deref(), Some("BeeK public clipboard sentinel"));
+            passed += 1;
+        }
+        for (word, raw, expected) in [
+            (None, "读音：ordinary text\n译文", "读音：ordinary text\n译文"),
+            (Some("word"), "读音：/wɜ", "word\n读音：/wɜ"),
+            (Some("word"), "- n. 单词", "word\n- n. 单词"),
+            (Some("word"), "读音：/wɜːd/\n- n. 单词", "word  /wɜːd/\n- n. 单词"),
+            (Some("word"), "读音：/wɜːd/\n", "word  /wɜːd/\n"),
+        ] {
+            let copied = popup.update(cx, |view, cx| { view.word = word.map(str::to_owned); view.content = PopupContent::Result(raw.into()); view.copy(cx) });
+            restore.owned_count = clipboard::change_count();
+            assert!(copied && popup.read(cx).copied);
+            assert_eq!(clipboard::read_string().as_deref(), Some(expected));
+            assert!(clipboard::is_self_inflicted(restore.owned_count));
+            passed += 1;
+        }
+        eprintln!("[beek-copy-result-test] PASS cases={} actual_clipboard=true no_http=true", passed);
+        drop(restore);
+        cx.quit();
+    });
+}
+
 // ---------- 主入口 ----------
 fn main() {
+    #[cfg(feature = "test-fixtures")]
+    if std::env::var_os("BEEK_COPY_RESULT_SELFTEST").is_some() { copy_result_selftest(); return; }
     if std::env::var("BEEK_DISPLAY_SELFTEST").is_ok() { display_selftest(); return; }
     if std::env::var("BEEK_TRANSLATE_SELFTEST").is_ok() {
         translate_selftest();
@@ -2397,11 +2451,8 @@ fn main() {
                                 // 自检模式：结果一落地立刻走一次复制，避免等待期间被外部点击打断
                                 if selftest_mode {
                                     if let Some(w) = popup_win.as_ref() {
-                                        let _ = w.update(cx, |view, _window, vcx| view.copy(vcx));
-                                        eprintln!(
-                                            "[beek] +{}ms 自检：译文落地即复制到剪贴板（同复制按钮走的函数）",
-                                            ms(t0)
-                                        );
+                                        let copied = w.update(cx, |view, _window, vcx| view.copy(vcx)).unwrap_or(false);
+                                        eprintln!("[beek] +{}ms 自检：结果复制（copied={}）", ms(t0), copied);
                                     }
                                 }
                                 eprintln!(
@@ -2419,7 +2470,7 @@ fn main() {
                             if let Some(w) = &popup_win {
                                 let ok = w
                                     .update(cx, |view, _window, vcx| view.copy(vcx))
-                                    .is_ok();
+                                    .unwrap_or(false);
                                 eprintln!("[beek] +{}ms 复制译文到剪贴板（ok={}）", ms(t0), ok);
                             } else {
                                 eprintln!("[beek] +{}ms 复制请求：弹窗已不在，跳过", ms(t0));
@@ -2656,4 +2707,33 @@ fn main() {
         })
         .detach();
     });
+}
+
+#[cfg(test)]
+mod minimal_translation_tests {
+    use super::{PopupContent, PopupView};
+    fn popup(word: Option<&str>, content: PopupContent) -> PopupView {
+        PopupView { content, engine_label: "fixture", cache_hit: false, word: word.map(str::to_owned), anchor_bottom: false, win_h: 320., copied: false }
+    }
+    #[test]
+    fn only_real_dictionary_results_split_a_complete_pronunciation_line() {
+        let raw = "读音：/wɜːd/\n- n. 单词";
+        assert_eq!(popup(None, PopupContent::Result(raw.into())).pron_and_body(), (None, raw.into()));
+        assert_eq!(popup(Some("word"), PopupContent::Result(raw.into())).pron_and_body(), (Some("/wɜːd/".into()), "- n. 单词".into()));
+        let partial = "读音：/wɜ";
+        assert_eq!(popup(Some("word"), PopupContent::Result(partial.into())).pron_and_body(), (None, partial.into()));
+    }
+    #[test]
+    fn copy_rejects_loading_error_and_raw_whitespace_but_keeps_partial_results() {
+        for content in [PopupContent::Loading, PopupContent::Error("synthetic failure".into()), PopupContent::Result(String::new()), PopupContent::Result(" \n\t\u{3000}".into())] {
+            assert!(popup(Some("word"), content).copy_text().is_none());
+        }
+        for (word, raw, expected) in [
+            (None, "读音：not a dictionary\nordinary translation", "读音：not a dictionary\nordinary translation"),
+            (Some("word"), "读音：/wɜ", "word\n读音：/wɜ"),
+            (Some("word"), "读音：/wɜːd/\n- n. 单词", "word  /wɜːd/\n- n. 单词"),
+            (Some("word"), "- n. 单词", "word\n- n. 单词"),
+            (Some("word"), "读音：/wɜːd/\n", "word  /wɜːd/\n"),
+        ] { assert_eq!(popup(word, PopupContent::Result(raw.into())).copy_text().as_deref(), Some(expected)); }
+    }
 }

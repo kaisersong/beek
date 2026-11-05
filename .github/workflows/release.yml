@@ -81,6 +81,7 @@ jobs:
       - name: macOS selection regression tests
         run: |
           python3 -m unittest discover -s tests/macos -v
+          python3 -m unittest discover -s tests/translation -p 'test_*.py'
           cargo test --locked --all-targets
 
       - name: 检查 secrets（缺了就明确失败，别默默出一个 ad-hoc 包）

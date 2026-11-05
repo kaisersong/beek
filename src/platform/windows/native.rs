@@ -34,6 +34,9 @@ pub enum Event {
     Quit,
     ClipboardChanged,
     IpcUnavailable,
+    Guide,
+    OutsideClick,
+    Update,
 }
 static EVENTS: OnceLock<mpsc::SyncSender<Event>> = OnceLock::new();
 pub static EPOCH: AtomicU64 = AtomicU64::new(1);
@@ -169,6 +172,12 @@ unsafe extern "system" fn mouse(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
                             ((data.pt.x as u32 as u64) << 32) | data.pt.y as u32 as u64,
                             Ordering::Release,
                         );
+                        let start = MOUSE_DOWN_POINT.load(Ordering::Acquire);
+                        let dx = data.pt.x - (start >> 32) as u32 as i32;
+                        let dy = data.pt.y - start as u32 as i32;
+                        if dx.abs() <= 3 && dy.abs() <= 3 {
+                            send(Event::OutsideClick);
+                        }
                         MOUSE_AT.store(
                             CLOCK.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1,
                             Ordering::Release,
@@ -583,15 +592,18 @@ unsafe extern "system" fn procedure(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LR
             TRAY if l.0 as u32 == WM_RBUTTONUP => {
                 if let Ok(menu) = CreatePopupMenu() {
                     let labels = [
-                        w!("Settings"),
-                        w!("Read clipboard..."),
-                        w!("Restore selection detection"),
-                        w!("About / updates"),
-                        w!("Restart BeeK"),
-                        w!("Quit BeeK"),
+                        "设置…",
+                        "读取剪贴板…",
+                        "恢复选区检测",
+                        "关于 BeeK",
+                        "重新启动 BeeK",
+                        "退出 BeeK",
+                        "使用引导",
+                        "检查更新…",
                     ];
                     for (i, label) in labels.into_iter().enumerate() {
-                        let _ = AppendMenuW(menu, MF_STRING, i + 1, label);
+                        let label = util::wide(crate::core::localization::tr(label));
+                        let _ = AppendMenuW(menu, MF_STRING, i + 1, PCWSTR(label.as_ptr()));
                     }
                     let p = util::cursor();
                     let _ = SetForegroundWindow(h);
@@ -612,6 +624,8 @@ unsafe extern "system" fn procedure(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LR
                         4 => send(Event::About),
                         5 => send(Event::Restart),
                         6 => send(Event::Quit),
+                        7 => send(Event::Guide),
+                        8 => send(Event::Update),
                         _ => {}
                     }
                     let _ = PostMessageW(Some(h), WM_NULL, WPARAM(0), LPARAM(0));

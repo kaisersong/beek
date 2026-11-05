@@ -1,3 +1,9 @@
+use super::{
+    translation_cache::{CacheSettings, TranslationCache},
+    translation_engine::{self as engines, Engine, EngineConfig},
+    translation_language::TargetLanguage,
+};
+use sha2::{Digest, Sha256};
 use std::{
     io::{self, BufRead, Read},
     sync::{
@@ -15,6 +21,32 @@ pub struct Request {
     pub key: String,
     pub model: String,
     pub endpoint: String,
+    pub engine: Engine,
+    pub config: EngineConfig,
+}
+impl Request {
+    fn cache_key(&self) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        for part in [
+            &self.text,
+            &self.key,
+            &self.model,
+            &self.endpoint,
+            self.engine.key(),
+            self.config.target_language.key(),
+            &self.config.app_id,
+            &self.config.region,
+            &self.config.source_language,
+            &self.config.email,
+        ] {
+            hash.update((part.len() as u64).to_le_bytes());
+            hash.update(part.as_bytes());
+        }
+        hash.finalize().into()
+    }
+    fn cacheable(&self) -> bool {
+        !matches!(self.engine, Engine::Baidu | Engine::PublicBaidu)
+    }
 }
 #[derive(Clone)]
 pub enum Progress {
@@ -45,6 +77,7 @@ struct State {
 }
 pub struct Pool {
     shared: Arc<(Mutex<State>, Condvar)>,
+    cache: Arc<Mutex<TranslationCache>>,
 }
 impl Default for Pool {
     fn default() -> Self {
@@ -54,10 +87,12 @@ impl Default for Pool {
 impl Pool {
     pub fn new() -> Self {
         let shared = Arc::new((Mutex::new(State::default()), Condvar::new()));
+        let cache = Arc::new(Mutex::new(TranslationCache::default()));
         // Exactly two real blocking HTTP workers. Logical cancellation never frees a
         // live HTTP slot; pending work is one replaceable latest request.
         for _ in 0..2 {
             let shared = shared.clone();
+            let cache = cache.clone();
             std::thread::spawn(move || loop {
                 let job = {
                     let (lock, wake) = &*shared;
@@ -85,21 +120,47 @@ impl Pool {
                 let mut full = String::new();
                 let mut at = Instant::now();
                 let mut bytes = 0;
-                let client = client();
-                let result = client.as_ref().map_err(Clone::clone).and_then(|client| {
-                    send(client, &job.request, job.deadline, |part| {
-                        full.push_str(part);
-                        bytes += part.len();
-                        if at.elapsed() >= Duration::from_millis(30) || bytes >= 4096 {
-                            let mut progress = job.mailbox.lock().unwrap();
-                            if !job.reported.load(Ordering::Acquire) {
-                                *progress = Progress::Text(full.clone());
+                let client = if job.request.engine == Engine::Ark {
+                    client()
+                } else {
+                    Err(String::new())
+                };
+                let result = if job.request.engine != Engine::Ark {
+                    if Instant::now() >= job.deadline {
+                        Err("翻译请求已超时".into())
+                    } else {
+                        engines::execute(
+                            job.request.engine,
+                            &job.request.config,
+                            &job.request.text,
+                            &job.request.endpoint,
+                        )
+                    }
+                } else {
+                    client.as_ref().map_err(Clone::clone).and_then(|client| {
+                        send(client, &job.request, job.deadline, |part| {
+                            full.push_str(part);
+                            bytes += part.len();
+                            if at.elapsed() >= Duration::from_millis(30) || bytes >= 4096 {
+                                let mut progress = job.mailbox.lock().unwrap();
+                                if !job.reported.load(Ordering::Acquire) {
+                                    *progress = Progress::Text(full.clone());
+                                }
+                                at = Instant::now();
+                                bytes = 0;
                             }
-                            at = Instant::now();
-                            bytes = 0;
-                        }
+                        })
                     })
-                });
+                };
+                if job.request.cacheable() && Instant::now() <= job.deadline {
+                    if let Ok(text) = &result {
+                        cache.lock().unwrap().insert(
+                            job.request.cache_key(),
+                            text.clone(),
+                            Instant::now(),
+                        );
+                    }
+                }
                 if job
                     .reported
                     .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -159,9 +220,28 @@ impl Pool {
             }
             std::thread::sleep(Duration::from_millis(25));
         });
-        Self { shared }
+        Self { shared, cache }
+    }
+    pub fn configure_cache(&self, settings: CacheSettings) {
+        self.cache
+            .lock()
+            .unwrap()
+            .apply_settings(settings, Instant::now());
+    }
+    pub fn cached(&self, request: &Request) -> Option<String> {
+        if request.cacheable() {
+            self.cache
+                .lock()
+                .unwrap()
+                .get(&request.cache_key(), Instant::now())
+        } else {
+            None
+        }
     }
     pub fn submit(&self, request: Request) -> Mailbox {
+        if let Some(text) = self.cached(&request) {
+            return Arc::new(Mutex::new(Progress::Done(Ok(text))));
+        }
         let mailbox = Arc::new(Mutex::new(Progress::Queued));
         let (lock, wake) = &*self.shared;
         let mut state = lock.lock().unwrap();
@@ -203,6 +283,13 @@ pub fn prompt(text: &str) -> String {
         super::prompts::translate_prompt(text)
     }
 }
+pub fn prompt_for(text: &str, target: TargetLanguage) -> String {
+    if is_word(text) {
+        super::prompts::explain_prompt_for(text, target)
+    } else {
+        super::prompts::translate_prompt_for(text, target)
+    }
+}
 fn client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(60))
@@ -224,9 +311,10 @@ fn send(
         .checked_duration_since(Instant::now())
         .filter(|d| !d.is_zero())
         .ok_or("翻译请求已超时")?;
+    engines::validate(r.engine, &r.config)?;
     // A request timeout installs the async body's total deadline too. The
     // blocking client's default alone only bounds each individual operation.
-    let response=client.post(&r.endpoint).timeout(remaining).bearer_auth(&r.key).json(&serde_json::json!({"model":r.model,"messages":[{"role":"user","content":prompt(&r.text)}],"stream":true,"thinking":{"type":"disabled"}})).send().map_err(|_|"翻译请求失败或超时，请检查网络和 API 设置")?;
+    let response=client.post(&r.endpoint).timeout(remaining).bearer_auth(&r.key).json(&serde_json::json!({"model":r.model,"messages":[{"role":"user","content":prompt_for(&r.text, r.config.target_language)}],"stream":true,"thinking":{"type":"disabled"}})).send().map_err(|_|"翻译请求失败或超时，请检查网络和 API 设置")?;
     if !response.status().is_success() {
         return Err(format!(
             "翻译服务返回 HTTP {}，请检查 API 设置或稍后重试",
@@ -313,6 +401,9 @@ fn consume(
             chunk(t);
         }
         if choice.get("finish_reason").is_some_and(|f| !f.is_null()) {
+            if choice.get("finish_reason").and_then(|v| v.as_str()) != Some("stop") {
+                return Err("翻译未完整结束，请重试".into());
+            }
             *finished = true;
         }
     }
@@ -361,5 +452,120 @@ mod tests {
             assert_eq!(parse(io::Cursor::new(valid), |_| {}).unwrap(), "ok");
         }
         assert!(parse(io::Cursor::new(format!(":{}\n", "a".repeat(FRAME))), |_| {}).is_err());
+    }
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::*;
+    use std::{io::Write, net::TcpListener, sync::atomic::AtomicUsize};
+    fn result(mailbox: Mailbox) -> Result<String, String> {
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Progress::Done(result) = &*mailbox.lock().unwrap() {
+                return result.clone();
+            }
+            assert!(Instant::now() < until, "translation pool did not complete");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    #[test]
+    fn real_plain_requests_cache_by_language_and_disabling_clears_results() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}/translate", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let seen = requests.clone();
+        let server = std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let until = Instant::now() + Duration::from_secs(10);
+            while seen.load(Ordering::Acquire) < 3 && Instant::now() < until {
+                match listener.accept() {
+                    Ok((mut socket, _)) => {
+                        socket.set_nonblocking(false).unwrap();
+                        socket
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .unwrap();
+                        let mut reader = io::BufReader::new(socket.try_clone().unwrap());
+                        let mut line = String::new();
+                        let mut len = 0;
+                        loop {
+                            line.clear();
+                            assert!(
+                                reader.read_line(&mut line).unwrap() > 0,
+                                "fixture request ended before headers"
+                            );
+                            if line == "\r\n" {
+                                break;
+                            }
+                            if line.to_lowercase().starts_with("content-length:") {
+                                len = line
+                                    .split(':')
+                                    .nth(1)
+                                    .unwrap()
+                                    .trim()
+                                    .parse::<usize>()
+                                    .unwrap();
+                            }
+                        }
+                        let mut bytes = vec![0; len];
+                        reader.read_exact(&mut bytes).unwrap();
+                        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                        assert_eq!(body["q"], "Public fixture sentence.");
+                        assert!(!body.get("messages").is_some());
+                        seen.fetch_add(1, Ordering::AcqRel);
+                        let body = r#"{"translatedText":"fixture translation"}"#;
+                        write!(socket,"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            }
+        });
+        let make = |target| Request {
+            generation: 1,
+            text: "Public fixture sentence.".into(),
+            key: String::new(),
+            model: String::new(),
+            endpoint: address.clone(),
+            engine: Engine::LibreTranslate,
+            config: EngineConfig {
+                target_language: target,
+                base_url: Some(address.clone()),
+                ..Default::default()
+            },
+        };
+        let pool = Pool::new();
+        assert_eq!(requests.load(Ordering::Acquire), 0);
+        assert_eq!(
+            result(pool.submit(make(TargetLanguage::Chinese))).unwrap(),
+            "fixture translation"
+        );
+        assert_eq!(
+            result(pool.submit(make(TargetLanguage::Chinese))).unwrap(),
+            "fixture translation"
+        );
+        assert_eq!(requests.load(Ordering::Acquire), 1);
+        result(pool.submit(make(TargetLanguage::English))).unwrap();
+        assert_eq!(requests.load(Ordering::Acquire), 2);
+        pool.configure_cache(CacheSettings {
+            max_entries: 0,
+            ttl_minutes: 30,
+        });
+        result(pool.submit(make(TargetLanguage::Chinese))).unwrap();
+        assert_eq!(requests.load(Ordering::Acquire), 3);
+        server.join().unwrap();
+        let mut request = make(TargetLanguage::Chinese);
+        request.engine = Engine::PublicBaidu;
+        assert!(!request.cacheable());
+        request.engine = Engine::Baidu;
+        assert!(!request.cacheable());
+    }
+    #[test]
+    fn incomplete_finish_never_becomes_a_successful_cached_translation() {
+        let stream=b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n";
+        assert!(parse(io::Cursor::new(stream), |_| {}).is_err());
+        assert!(prompt_for("hello", TargetLanguage::Japanese).contains("日文"));
     }
 }

@@ -108,6 +108,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def serve_fixture(self):
         name = self.path.strip("/")
+        if name == "libre":
+            self.send_json(200, {"translatedText": TEXT})
+            return
         if name.startswith("http/"):
             try:
                 code = int(name.split("/")[1])

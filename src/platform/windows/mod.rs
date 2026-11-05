@@ -4,6 +4,7 @@ mod input;
 mod integration;
 mod lifecycle;
 mod native;
+mod onboarding;
 mod pair;
 mod process;
 mod selection;
@@ -55,6 +56,11 @@ pub fn run() {
     {
         eprintln!("BeeK requires a logged-in interactive Windows desktop.");
         std::process::exit(2);
+    }
+    #[cfg(feature = "test-fixtures")]
+    if std::env::args().nth(1).as_deref() == Some("--test-copy-result") {
+        ui::copy_result_selftest();
+        return;
     }
     diagnostics::initialize();
     diagnostics::event("started", capabilities("main"));

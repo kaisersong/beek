@@ -4,12 +4,15 @@ use windows::{
     Win32::{System::Registry::*, UI::Shell::*, UI::WindowsAndMessaging::SW_SHOWNORMAL},
 };
 type UpdateWorker = (
-    std::sync::mpsc::SyncSender<u64>,
+    std::sync::mpsc::SyncSender<(u64, bool)>,
     std::sync::Arc<std::sync::Mutex<Option<(u64, String)>>>,
     std::sync::Arc<std::sync::atomic::AtomicU64>,
 );
 static UPDATES: std::sync::OnceLock<UpdateWorker> = std::sync::OnceLock::new();
 pub fn open_updates() -> bool {
+    check_updates(true)
+}
+pub fn check_updates(manual: bool) -> bool {
     let (tx, result, current) = UPDATES.get_or_init(|| {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let result = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -17,7 +20,7 @@ pub fn open_updates() -> bool {
         let out = result.clone();
         let current = latest.clone();
         std::thread::spawn(move || {
-            while let Ok(id) = rx.recv() {
+            while let Ok((id, manual)) = rx.recv() {
                 let (status, open) = check_update();
                 let accepted = {
                     let mut slot = out.lock().unwrap();
@@ -28,7 +31,7 @@ pub fn open_updates() -> bool {
                         false
                     }
                 };
-                if accepted && open {
+                if accepted && open && manual {
                     unsafe {
                         let _ = ShellExecuteW(
                             None,
@@ -49,7 +52,7 @@ pub fn open_updates() -> bool {
     let previous = current.load(std::sync::atomic::Ordering::Acquire);
     let id = previous.wrapping_add(1);
     current.store(id, std::sync::atomic::Ordering::Release);
-    if tx.try_send(id).is_err() {
+    if tx.try_send((id, manual)).is_err() {
         current.store(previous, std::sync::atomic::Ordering::Release);
         return false;
     }
@@ -91,7 +94,10 @@ fn check_update() -> (String, bool) {
     match result {
         Ok(None) => ("当前已是最新 Windows 版本".into(), false),
         Ok(Some(version)) => (
-            format!("发现 {version}，已打开固定发布页；请下载并检查签名后安装"),
+            crate::core::localization::message(
+                "发现 v{}，可从发布页下载 Windows 安装包。",
+                &[&version],
+            ),
             true,
         ),
         Err(error) => (error, false),

@@ -67,6 +67,7 @@ public static class BeeKDesktop {
  [DllImport("user32.dll")] static extern bool CloseClipboard();
  static int holding;
  public static bool HoldClipboard(int milliseconds){if(milliseconds<100||milliseconds>2500)throw new ArgumentOutOfRangeException();if(System.Threading.Interlocked.CompareExchange(ref holding,1,0)!=0)return false;bool opened=false;var ready=new System.Threading.ManualResetEventSlim();var t=new System.Threading.Thread(()=>{try{opened=OpenClipboard(IntPtr.Zero);ready.Set();if(opened)System.Threading.Thread.Sleep(milliseconds);}finally{if(opened)CloseClipboard();System.Threading.Interlocked.Exchange(ref holding,0);}});t.IsBackground=true;t.Start();if(!ready.Wait(1000))return false;return opened;}
+ public static void Wheel(int delta){Input i=new Input();i.Type=0;i.U.M.Flags=0x800;i.U.M.Data=unchecked((uint)delta);Emit(i);}
  public static void RightClick(int x,int y){SetCursorPos(x,y);Input i=new Input();i.Type=0;i.U.M.Flags=8;Emit(i);i.U.M.Flags=16;Emit(i);}
 }
 '@
@@ -187,6 +188,7 @@ try {
       else{throw 'unsupported selection gesture'}
       $value=$true
      }
+     'scroll' {Require-Foreground $request.hwnd;$w=Window-For $request.hwnd;$delta=[int]$request.delta;if([Math]::Abs($delta) -gt 2400){throw 'scroll exceeds bound'};[BeeKDesktop]::SetCursorPos($w.Bounds.Left+($w.Bounds.Right-$w.Bounds.Left)/2,$w.Bounds.Top+($w.Bounds.Bottom-$w.Bounds.Top)/2);[BeeKDesktop]::Wheel($delta);$value=$true}
      'keys' {Require-Foreground $request.hwnd;[BeeKDesktop]::Chord([int[]]$request.codes);$value=$true}
      'key-sequence' {Require-Foreground $request.hwnd;if($request.chords.Count -gt 20){throw 'too many chords'};foreach($chord in $request.chords){[BeeKDesktop]::Chord([int[]]$chord)};$value=$true}
      'text' {Require-Foreground $request.hwnd;if($request.text.Length -gt 16384){throw 'text too long'};[BeeKDesktop]::Text([string]$request.text);$value=$true}
@@ -218,7 +220,7 @@ try {
       })
      }
      'menu' {
-      if($request.label -notin @('Open input / IME probe','Show non-activating popup','Close all probe windows','Exit probe','Settings','Read clipboard...','Restore selection detection','About / updates','Restart BeeK','Quit BeeK')){throw 'unsupported test menu action'}
+      if($request.label -notin @('Open input / IME probe','Show non-activating popup','Close all probe windows','Exit probe','Settings','Read clipboard...','Restore selection detection','About / updates','Restart BeeK','Quit BeeK','Guide','Check updates')){throw 'unsupported test menu action'}
       $menu=@([BeeKDesktop]::Windows()|Where-Object {$_.Class -eq '#32768' -and $ownedPids.Contains([int]$_.Pid)})
       if($menu.Count -ne 1){throw 'probe menu missing'}
       $root=[Windows.Automation.AutomationElement]::FromHandle([IntPtr]$menu[0].Hwnd)
@@ -227,7 +229,7 @@ try {
       else {
        # Classic Win32 menus can expose only a root UIA element. Select a
        # visible, known row using its actual menu rectangle, not a message shim.
-       $labels=if($request.label -in @('Settings','Read clipboard...','Restore selection detection','About / updates','Restart BeeK','Quit BeeK')){@('Settings','Read clipboard...','Restore selection detection','About / updates','Restart BeeK','Quit BeeK')}else{@('Open input / IME probe','Show non-activating popup','Close all probe windows','Exit probe')}
+       $labels=if($request.label -in @('Settings','Read clipboard...','Restore selection detection','About / updates','Restart BeeK','Quit BeeK','Guide','Check updates')){@('Settings','Read clipboard...','Restore selection detection','About / updates','Restart BeeK','Quit BeeK','Guide','Check updates')}else{@('Open input / IME probe','Show non-activating popup','Close all probe windows','Exit probe')}
        $index=[array]::IndexOf($labels,[string]$request.label);$r=$menu[0].Bounds
        $row=($r.Bottom-$r.Top-6)/$labels.Count
        [BeeKDesktop]::Click($r.Left+120,[int]($r.Top+3+($index+0.5)*$row))

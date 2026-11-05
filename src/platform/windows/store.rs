@@ -25,7 +25,7 @@ impl Store {
         fs::create_dir_all(&dir).map_err(|_| "无法创建配置目录")?;
         Ok(Self {
             path: dir.join("config.json"),
-            namespace: "BeeK/ark/".into(),
+            namespace: format!("BeeK/ark{}/", util::profile_suffix()),
             lock: Mutex::new(()),
             expected: Mutex::new(None),
         })
@@ -197,7 +197,8 @@ impl Store {
             .map(|data| parse(&data))
             .transpose()
             .map_err(|_| "配置不可读，延后清理")?
-            .and_then(|cfg| cfg.provider.credential_ref);
+            .map(|cfg| cfg.credential_refs())
+            .unwrap_or_default();
         let filter = util::wide(format!("{}*", self.namespace));
         let mut count = 0;
         let mut credentials = std::ptr::null_mut();
@@ -241,7 +242,7 @@ impl Store {
                                 .saturating_mul(10_000_000);
                             if c.Type == CRED_TYPE_GENERIC
                                 && self.owns(&reference)
-                                && Some(&reference) != current.as_ref()
+                                && !current.contains(&reference)
                                 && now.saturating_sub(written) / 10_000_000 >= age.as_secs()
                             {
                                 failed |= self.delete_secret(&reference).is_err();
@@ -281,8 +282,11 @@ impl Store {
     pub fn key(&self, cfg: &Settings) -> Result<String, String> {
         // An explicit reference must resolve. Never hide credential loss by silently
         // falling back to another account in the process environment.
-        if let Some(reference) = &cfg.provider.credential_ref {
+        if let Some(reference) = &cfg.active_provider().credential_ref {
             return self.read_secret(reference);
+        }
+        if cfg.translation_engine != crate::core::translation_engine::Engine::Ark {
+            return Ok(String::new());
         }
         std::env::var("BEEK_ARK_KEY")
             .ok()
@@ -399,7 +403,13 @@ fn parse(data: &[u8]) -> Result<Settings, serde_json::Error> {
         || value.get("provider").is_some()
         || value.get("providers").is_none()
     {
-        return serde_json::from_value(value);
+        let cfg: Settings = serde_json::from_value(value)?;
+        if cfg.schema != 1 {
+            return Err(<serde_json::Error as serde::de::Error>::custom(
+                "unsupported schema",
+            ));
+        }
+        return Ok(cfg);
     }
     #[derive(serde::Deserialize, Default)]
     #[serde(default)]
@@ -420,6 +430,7 @@ fn parse(data: &[u8]) -> Result<Settings, serde_json::Error> {
     let old: Legacy = serde_json::from_value(value)?;
     let mut cfg = Settings::default();
     if let Some(ark) = old.providers.ark {
+        cfg.translation_engine = crate::core::translation_engine::Engine::Ark;
         cfg.provider.api_key = ark.api_key;
         if !ark.model.is_empty() {
             cfg.provider.model = ark.model;
@@ -456,7 +467,8 @@ mod tests {
     #[ignore = "requires an interactive Windows logon; run --include-ignored on the desktop"]
     fn real_vault_atomic_rollback_and_stale_session() {
         let mut s = store();
-        let initial = s.load().unwrap();
+        let mut initial = s.load().unwrap();
+        initial.translation_engine = crate::core::translation_engine::Engine::Ark;
         let old = s
             .save(
                 &initial,
@@ -488,6 +500,42 @@ mod tests {
         fs::write(&s.path, b"{}").unwrap();
         assert!(s.save(&old, old.clone(), KeyEdit::Keep).is_err());
         s.load().unwrap();
+        cleanup(s);
+    }
+    #[test]
+    #[ignore = "requires an interactive Windows logon"]
+    fn real_vault_multiple_services_survive_cleanup_and_reload() {
+        use crate::core::translation_engine::Engine;
+        let mut s = store();
+        let initial = s.load().unwrap();
+        let mut next = initial.clone();
+        next.translation_engine = Engine::Ark;
+        let ark = s
+            .save(
+                &initial,
+                next,
+                KeyEdit::Replace("public-ark-fixture".into()),
+            )
+            .unwrap();
+        let mut azure = ark.clone();
+        azure.translation_engine = Engine::Azure;
+        azure.active_provider_mut().region = "eastasia".into();
+        let azure = s
+            .save(&ark, azure, KeyEdit::Replace("public-azure-fixture".into()))
+            .unwrap();
+        s.cleanup_older_than(std::time::Duration::ZERO).unwrap();
+        let mut loaded = s.load().unwrap();
+        assert_eq!(s.key(&loaded).unwrap(), "public-azure-fixture");
+        loaded.translation_engine = Engine::Ark;
+        assert_eq!(s.key(&loaded).unwrap(), "public-ark-fixture");
+        let mut cleared = azure.clone();
+        cleared.translation_engine = Engine::Ark;
+        let cleared = s.save(&azure, cleared, KeyEdit::Clear).unwrap();
+        s.cleanup_older_than(std::time::Duration::ZERO).unwrap();
+        assert!(cleared.provider.credential_ref.is_none());
+        let mut loaded = s.load().unwrap();
+        loaded.translation_engine = Engine::Azure;
+        assert_eq!(s.key(&loaded).unwrap(), "public-azure-fixture");
         cleanup(s);
     }
     #[test]
