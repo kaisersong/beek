@@ -15,7 +15,7 @@ use crate::core::{
 use crate::{
     core::{
         appearance::{POPUP_DRAG_H, POPUP_FONT_PT, POPUP_MAX_H, POPUP_PAD, POPUP_W},
-        policy::TTL_MS,
+        policy::{selection_button_expired, TTL_MS},
         protocol::{Rect, Selection, Source, Status},
         settings::{KeyEdit, Settings},
         stream::{self, Mailbox, Pool, Progress},
@@ -67,6 +67,7 @@ struct Bee {
     tx: Tx,
     loading: bool,
     hovered: bool,
+    shown_at: Instant,
 }
 impl Render for Bee {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1131,6 +1132,7 @@ fn open_bee(cx: &mut App, tx: Tx, s: Selection) -> Option<WindowHandle<Bee>> {
                     tx,
                     loading: false,
                     hovered: false,
+                    shown_at: Instant::now(),
                 })
             },
         )
@@ -1769,6 +1771,7 @@ pub fn run() -> Result<(), String> {
     if let Some((g,m))=&mailbox{if *g==generation{let progress=std::mem::replace(&mut *m.lock().unwrap(),Progress::Idle);completed=matches!(progress,Progress::Done(_));if !matches!(progress,Progress::Idle){let _=cx.update(|cx|if let Some(p)=panel{let _=p.update(cx,|p,_,cx|{match progress{Progress::Idle=>{},Progress::Loading=>{p.status="正在翻译…".into();},Progress::Queued=>{p.status="等待前面的实际请求结束…".into();},Progress::Text(text)=>{p.status="正在翻译…".into();p.body=text;},Progress::Done(Ok(text))=>{p.active=false;p.error=false;p.body=text;p.status="完成".into();},Progress::Done(Err(e))=>{p.active=false;p.error=true;p.status=e;}}cx.notify();});});}}}
     if completed{#[cfg(feature="test-fixtures")]super::diagnostics::event("translation_completed",serde_json::json!({"generation":generation}));mailbox=None;}
     if let Some((start,origin))=dragging{if unsafe{windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(1)}>=0{dragging=None;}else{let point=util::cursor();if let Some(p)=panel{let _=p.update(cx,|_,w,_|native::move_popup(w,origin[0]+point[0]-start[0],origin[1]+point[1]-start[1]));}}}
+    if bee.is_some_and(|w|w.update(cx,|b,_,_|selection_button_expired(b.shown_at.elapsed().as_millis(),b.loading)).unwrap_or(false)){cache=None;let _=cx.update(|cx|hide(&mut bee,cx));}
     cx.background_executor().timer(Duration::from_millis(16)).await;
    }
   }).detach();

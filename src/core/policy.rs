@@ -4,7 +4,13 @@ use std::collections::{HashMap, VecDeque};
 pub const QUERY_MS: u64 = 1500;
 pub const PENDING_MS: u64 = 300;
 pub const TTL_MS: u64 = 8000;
+pub const SELECTION_BUTTON_TIMEOUT_MS: u64 = 5000;
 pub const MOUSE_ANCHOR_MS: u64 = 500;
+
+/// Once clicked, selection verification/translation owns the button's lifetime.
+pub fn selection_button_expired(elapsed_ms: u128, clicked: bool) -> bool {
+    !clicked && elapsed_ms >= u128::from(SELECTION_BUTTON_TIMEOUT_MS)
+}
 
 /// Internal browser surfaces can animate without moving the source window or
 /// its selection. Window-object notifications matter only for the source root;
@@ -150,6 +156,15 @@ impl Health {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_selection_button_expires_at_five_seconds_without_interrupting_a_click() {
+        assert!(!selection_button_expired(4999, false));
+        assert!(selection_button_expired(5000, false));
+        assert!(selection_button_expired(60_000, false));
+        assert!(!selection_button_expired(5000, true));
+        assert!(!selection_button_expired(60_000, true));
+    }
 
     #[test]
     fn browser_child_window_animation_keeps_the_current_selection() {

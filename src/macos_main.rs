@@ -106,6 +106,8 @@ fn ms(t0: Instant) -> u128 {
 struct IconView {
     text: String,
     bounds: SelBounds,
+    press_seq: u64,
+    shown_at: Instant,
     loading: bool,
     hovered: bool,
     pressed: bool,
@@ -509,10 +511,28 @@ fn close_icon_window(cx:&mut AsyncApp,slot:&mut Option<WindowHandle<IconView>>) 
     close_window(cx,slot);
 }
 
+fn expire_icon_window(
+    cx: &mut AsyncApp,
+    slot: &mut Option<WindowHandle<IconView>>,
+    gate: &mut PresentationGate,
+) {
+    let expired = slot.as_ref().and_then(|w| w.update(cx, |view, _, _| {
+        beek::core::policy::selection_button_expired(view.shown_at.elapsed().as_millis(), view.loading)
+            .then(|| (view.press_seq, view.text.clone()))
+    }).ok().flatten());
+    if let Some((press, text)) = expired {
+        // AX may temporarily lose and recover this selection after the timeout.
+        // Only a new gesture or changed text may show another button.
+        gate.consume(press, &text);
+        close_icon_window(cx, slot);
+    }
+}
+
 fn open_icon_window(
     cx: &mut AsyncApp,
     b: SelBounds,
     text: String,
+    press_seq: u64,
     tx: mpsc::Sender<UiEvent>,
 ) -> Option<WindowHandle<IconView>> {
     let screen = macos_display::screen_at(global_rect(b));
@@ -540,6 +560,8 @@ fn open_icon_window(
             cx.new(|_cx| IconView {
                 text,
                 bounds: b,
+                press_seq,
+                shown_at: Instant::now(),
                 loading: false,
                 hovered: false,
                 pressed: false,
@@ -1926,7 +1948,7 @@ fn display_selftest() {
                     (screen.bounds.x+screen.bounds.w-10.,screen.bounds.y+screen.bounds.h-30.)] {
                     let anchor=SelBounds{x,y,w:20.,h:18.};
                     let expected=icon_rect_for(&anchor);
-                    let mut icon=open_icon_window(cx,anchor,"Public fixture".into(),tx.clone());
+                    let mut icon=open_icon_window(cx,anchor,"Public fixture".into(),0,tx.clone());
                     let actual=icon.as_ref().unwrap().update(cx,|_,w,_|macos_display::window_rect(w).unwrap()).unwrap();
                     assert!((actual.x-expected.x).abs()<1. && actual.y<=expected.y+1.,"icon frame mismatch: {actual:?}");
                     let protected=visible_icon_rect().unwrap();
@@ -1941,6 +1963,36 @@ fn display_selftest() {
                     let mut slot=Some(popup);close_window(cx,&mut slot);
                 }
             }
+            // Exercise the real native close path and main-loop expiration policy.
+            // No AX monitor, HTTP request or preference write is started here.
+            let screen=&screens[0];
+            let anchor=SelBounds{x:screen.bounds.x+100.,y:screen.bounds.y+100.,w:20.,h:18.};
+            let mut gate=PresentationGate::default();
+            let timeout=Duration::from_millis(beek::core::policy::SELECTION_BUTTON_TIMEOUT_MS);
+            let mut icon=open_icon_window(cx,anchor,"Public idle selection".into(),1,tx.clone());
+            icon.as_ref().unwrap().update(cx,|v,_,_|v.shown_at=Instant::now()-timeout).unwrap();
+            close_icon_window(cx,&mut icon);
+            icon=open_icon_window(cx,anchor,"Public idle selection".into(),2,tx.clone());
+            expire_icon_window(cx,&mut icon,&mut gate);
+            assert!(icon.is_some(),"a replacement button must get its own deadline");
+            icon.as_ref().unwrap().update(cx,|v,_,_|{v.loading=true;v.shown_at=Instant::now()-timeout;}).unwrap();
+            expire_icon_window(cx,&mut icon,&mut gate);
+            assert!(icon.is_some(),"expiration must not interrupt a consumed click");
+            let (popup,_)=open_popup_window(cx,PopupContent::Result("公开测试译文。".into()),anchor,None,"测试",false).unwrap();
+            let started=Instant::now();
+            icon.as_ref().unwrap().update(cx,|v,_,_|{v.loading=false;v.shown_at=started;}).unwrap();
+            while icon.is_some() && started.elapsed()<timeout+Duration::from_secs(2) {
+                expire_icon_window(cx,&mut icon,&mut gate);
+                cx.background_executor().timer(Duration::from_millis(16)).await;
+            }
+            assert!(icon.is_none(),"idle button did not close");
+            assert!(started.elapsed()>=timeout,"idle button closed before its deadline");
+            assert!(visible_icon_rect().is_none(),"closed button retained its native hit target");
+            assert!(!gate.accepts(2,"Public idle selection"));
+            assert!(gate.accepts(3,"Public idle selection"));
+            popup.update(cx,|_,_,_|()).expect("button timeout closed the translation card");
+            let mut popup=Some(popup);close_window(cx,&mut popup);
+            eprintln!("[beek-icon-timeout-test] PASS idle_closed=true replacement_deadline=true clicked_preserved=true popup_preserved=true");
             eprintln!("[beek-display-test] PASS screens={} anchors={} native_icon_and_popup=true",screens.len(),screens.len()*2);
             let _=cx.update(|app|app.quit());
         }).detach();
@@ -2315,7 +2367,7 @@ fn main() {
                             // 点击新按钮才会切换请求与结果窗口。
                             close_icon_window(cx, &mut icon_win);
                             if icon_win.is_none() {
-                                icon_win = open_icon_window(cx, b, text, tx.clone());
+                                icon_win = open_icon_window(cx, b, text, press, tx.clone());
                                 // 记下窗口真实的 frame：算出来的位置和系统实际摆放的位置
                                 // 可能不一致（比如被 AppKit 挪走），排查「图标飘走」时要能分辨
                                 if let Some(w) = icon_win.as_ref() {
@@ -2623,6 +2675,7 @@ fn main() {
                         return;
                     }
                 }
+                expire_icon_window(cx, &mut icon_win, &mut presentation_gate);
                 // 「点击弹窗外部关闭」+「按住拖动条拖动弹窗」：弹窗是 focus:false 的
                 // 非激活窗口，点它外面/拖它都不会产生可用的窗口事件（gpui 的 mac 平台
                 // 也没有拖动窗口的 API），所以两件事都靠主动轮询全局鼠标状态来做。
