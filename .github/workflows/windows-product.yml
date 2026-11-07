@@ -101,7 +101,7 @@ jobs:
         run: if($env:BEEK_SIGNER){Remove-Item "Cert:\CurrentUser\My\$env:BEEK_SIGNER" -Force -DeleteKey -ErrorAction SilentlyContinue}
   mac-check:
     if: inputs.formal != true
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

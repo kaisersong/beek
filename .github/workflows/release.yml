@@ -44,7 +44,7 @@ jobs:
       formal: ${{ inputs.sign_windows == true || vars.WINDOWS_SIGN_RELEASES == 'true' }}
     secrets: inherit
   release:
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       APP: dist/BeeK.app
       EXPECTED_TEAM_ID: Y9YR86UG94
