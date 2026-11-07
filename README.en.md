@@ -4,6 +4,8 @@ Select text. Click the bee. Understand more.
 
 A lightweight selection translator for macOS and Windows 11 x64.
 
+Built with **Rust + GPUI**. Rust handles text selection, translation and background work; GPUI renders the bee button and translation cards, with native platform APIs providing system integration.
+
 [简体中文](README.md)
 
 [![Latest release](https://img.shields.io/github/v/release/kaisersong/beek)](https://github.com/kaisersong/beek/releases/latest)
@@ -14,7 +16,7 @@ A lightweight selection translator for macOS and Windows 11 x64.
   <img src="resources/screenshots/onboarding-welcome-en.png" width="960" alt="BeeK macOS welcome screen, with a translation card preview and a Get started button.">
 </p>
 
-**1.1.2 update:** Windows gains the macOS-style four-step onboarding, Chinese/English UI, eight translation targets, seven providers and cache settings. Both platforms fix pronunciation display and copy behavior. [Release notes](https://github.com/kaisersong/beek/releases/tag/v1.1.2). Download availability and build status are shown in [Releases](https://github.com/kaisersong/beek/releases) and [Actions](https://github.com/kaisersong/beek/actions).
+**1.1.3 update:** Unclicked bee buttons hide after five seconds on both platforms. On macOS, CloudHub selections use the app's own Copy command to avoid missing or shifted characters, then restore the clipboard. [Release notes](RELEASE_NOTES.md). Download availability and build status are shown in [Releases](https://github.com/kaisersong/beek/releases) and [Actions](https://github.com/kaisersong/beek/actions).
 
 | Feature | macOS | Windows 11 x64 |
 | --- | --- | --- |
@@ -25,6 +27,8 @@ A lightweight selection translator for macOS and Windows 11 x64.
 | Distribution | Developer ID signed and notarized | Unsigned public preview |
 
 ## Translation cards and copying
+
+An unclicked bee button hides after five seconds. A new selection starts a fresh timer, and hiding the button preserves any existing translation card.
 
 Only AI dictionary results separate a complete pronunciation line into the header. Missing pronunciation has no placeholder, and ordinary translations keep their first line. Loading, errors and blank results do not overwrite the clipboard. You can copy text already received during streaming; dictionary copies include the source word and any available pronunciation. Speech reads the original word.
 
@@ -46,6 +50,8 @@ The four-step onboarding covers welcome, selection gestures, service setup, and 
 **Doubao is recommended** for streaming translation and dictionary explanations. Create an API key in the [Volcengine Ark console](https://console.volcengine.com/ark/), enable your model, and enter the key and optional model/endpoint ID through onboarding or **Doubao API key…**. Calls use your own Ark account quota. Existing configurations keep their selected service and credentials.
 
 For browser selection, BeeK may also request Automation permission. If you previously denied it, use **System Settings → Privacy & Security → Automation**. Other selection fallbacks remain available.
+
+Most macOS apps use Accessibility text selection without touching the clipboard. CloudHub can report shifted text through that API, so BeeK reads its own Copy command instead and restores all clipboard types, including images. This workaround currently applies to CloudHub; it does not assume that every Electron app has the same issue.
 
 ## Translation services on macOS
 

@@ -1,36 +1,29 @@
-## BeeK v1.1.2
+## BeeK v1.1.3
 
-### Windows 11 x64 公开预览
+### 蜜蜂按钮自动隐藏
 
-- 四步使用引导对齐 macOS 的云海背景、版式与交互：欢迎、划词演示、翻译服务、试译完成；可从设置或托盘重开。
-- 支持跟随系统 / 简体中文 / English 界面，以及独立选择 8 种翻译目标语言。
-- 支持公共百度、豆包 / OpenAI 兼容、Azure、个人百度 Key、Google、MyMemory、LibreTranslate / Argos。新用户默认公共百度免 Key；旧用户保留既有引擎、配置与凭据，各服务密钥独立存入 Windows Credential Manager。
-- 新增有界进程内缓存及设置，默认 128 条 / 30 分钟，可关闭；公共 / 个人百度模式不使用缓存。缓存不写磁盘，按服务、账号、目标语言及请求参数隔离。
-- 引导中的服务保存返回试译页，只有主动点击试译才发送公开例句；演示在本地完成。保存服务不会误标引导完成。
-- 拖选新文字时保留当前翻译卡片，点击新蜜蜂后才替换；普通外部点击和关闭按钮可收起卡片。
-- 可选自动检查更新，安装仍由用户手动完成。修复切换服务后的输入焦点与 Ctrl+S 保存。
-- 改进便携 ZIP 打包，按 manifest 核对文件清单、大小、SHA256 和 ZIP CRC。
+- macOS 和 Windows 的蜜蜂按钮在显示 5 秒、用户未点击时自动隐藏。
+- 重新划词会重新计时；已点击并进入翻译的按钮交由翻译流程处理。
+- 隐藏按钮保留已有译文卡片；macOS 不会因为同一旧选区的 AX 恢复而重新弹出按钮。
 
-### 两平台读音与复制修正
+### macOS 云之家取词修正
 
-- 只有真实 AI 词典结果才拆分完整读音首行；普通译文中含“读音：”也完整保留。
-- 无读音时不显示占位，部分流式首行保持原文。
-- 加载、错误和纯空白结果不覆盖剪贴板、不显示复制成功反馈；仍可复制当前已收到的流式正文。
-- 词典复制包含原词和可用读音，其他服务保持普通译文。朗读对象仍是原词。
-- 本版继续使用原有翻译提示词；简短释义 / 短语提示词实验未纳入本版。
+- 修复云之家辅助功能接口返回选区漏字、错位时，BeeK 使用错误片段解释的问题。
+- 云之家改用应用自身“拷贝”命令获取完整文本，完整还原剪贴板的文本、图片及其他类型，并标记自身写入，避免复制监听重复触发。
+- 每次新划词或键盘改选按状态去重；普通点击、来源切换或同一选区轮询不会反复执行拷贝。拷贝失败时不退回已知错误的 AX 文本。
+- 本次兼容处理针对云之家，不代表其他 Electron 应用均存在同一问题。
 
-### 验证与安装
+### 技术与验证
 
-- 本地 macOS locked Rust 测试 88 项通过（使用已有 runtime shader feature），Windows 交互测试 71 项通过；Windows 工具 27 项、离线内容门槛夹具 17 项通过。
-- macOS 真实剪贴板入口 9 项、Windows Panel 复制入口 10 项通过。Windows 96 DPI 与 144 DPI 产品窗口检查通过；完整多屏 / 混合 DPI、200% 缩放与跨天验收仍未完成。macOS AX 内存压测无新的通过证据。
-- macOS 分发包由本次 Release 工作流签名、公证并执行 Gatekeeper 验证，结果以工作流为准。Windows 为未签名公开预览，可能显示未知发布者提示。
-- macOS 下载 `BeeK.dmg`，打开后拖入“应用程序”；内置更新器使用 `BeeK-v1.1.2.zip`。
-- Windows 下载 `BeeK-windows-x64-setup.exe`，或完整解压便携 ZIP，保留同目录的 `beek-selection-host.exe`。提供 SHA256 校验文件。
+- BeeK 使用 Rust + GPUI 开发；中英文 README 补充技术说明、按钮超时行为和云之家取词路径。
+- 修复代码在 macOS 标准格式检查、90 项 locked Rust 测试及 release 构建中通过；双机本地安装通过原生窗口和按钮超时自检，云之家真实划词由用户确认标题完整。
+- 合成文本的原生 Copy 成功路径、PNG / 纯文本 / 自定义剪贴板类型还原及 own-write 标记通过。本轮原生内存压力查询仍缺少诊断进程的辅助功能授权，没有新的压力通过证据。
+- v1.1.3 的双平台安装包、macOS 签名公证和资产校验结果以本次 Release 工作流为准。
 
 ### English
 
-Windows 1.1.2 gains the macOS-style four-step onboarding, bilingual UI, eight translation targets, seven providers and configurable process-local caching. Existing credentials and service settings are preserved. New selections keep the current translation card until the next bee click. Update checks are optional; installation remains manual.
+Unclicked bee buttons now hide after five seconds on macOS and Windows. New selections get a fresh timer, and existing translation cards remain open.
 
-Both platforms preserve ordinary translations that start with a pronunciation prefix, omit missing-pronunciation placeholders, and prevent loading/error/blank results from overwriting the clipboard. Partial streamed results remain copyable. Translation prompts remain unchanged.
+On macOS, CloudHub uses its own Copy command to obtain the complete selection when Accessibility returns shifted text. All clipboard types are restored, including images, and repeated polling does not repeatedly copy the same selection. This workaround currently applies to CloudHub.
 
-macOS distribution uses the release signing/notarization pipeline. Windows is an unsigned public preview; full mixed-DPI, multiple-monitor and long-running acceptance is still pending. Build and artifact availability are determined by this release workflow.
+BeeK is built with Rust + GPUI. Both READMEs now describe the stack and updated selection behavior. Final package availability, signing, notarization and asset validation are determined by the v1.1.3 Release workflow.

@@ -4,6 +4,8 @@
 
 在其他应用里选中文字，点一下小蜜蜂，译文就在身边。支持 macOS 和 Windows 11 x64。
 
+BeeK 使用 **Rust + GPUI** 开发：Rust 实现取词、翻译与后台逻辑，GPUI 绘制蜜蜂按钮和翻译卡片，并通过各平台原生 API 接入系统功能。
+
 [English](README.en.md)
 
 [![最新版本](https://img.shields.io/github/v/release/kaisersong/beek?label=%E6%9C%80%E6%96%B0%E7%89%88)](https://github.com/kaisersong/beek/releases/latest)
@@ -14,7 +16,7 @@
   <img src="resources/screenshots/onboarding-welcome-zh.png" width="960" alt="BeeK macOS 欢迎页：世界很大，理解很轻。右侧展示划词翻译卡片，左下方为开始体验按钮。">
 </p>
 
-**1.1.2 更新**：Windows 加入与 macOS 同布局的四步引导、中英文界面、8 种目标语言、7 种翻译服务和缓存设置；两平台修复读音显示与复制边界。[查看更新说明](https://github.com/kaisersong/beek/releases/tag/v1.1.2)。下载产物与构建状态以 [Releases](https://github.com/kaisersong/beek/releases) 和 [Actions](https://github.com/kaisersong/beek/actions) 为准。
+**1.1.3 更新**：两平台的蜜蜂按钮未点击时，显示 5 秒后自动隐藏；macOS 修复云之家选区漏字、错位的问题，通过应用自身拷贝读取完整选区并还原剪贴板。[查看更新说明](RELEASE_NOTES.md)。下载产物与构建状态以 [Releases](https://github.com/kaisersong/beek/releases) 和 [Actions](https://github.com/kaisersong/beek/actions) 为准。
 
 | 功能 | macOS | Windows 11 x64 |
 | --- | --- | --- |
@@ -34,11 +36,13 @@ Windows 安装后从开始菜单打开 BeeK；便携版请完整解压，保留 
 
 ## 翻译卡片与复制
 
+蜜蜂按钮出现后，5 秒内未点击会自动隐藏；重新划词会重新计时。按钮隐藏不会关闭已有的译文卡片。
+
 只有豆包 / OpenAI 兼容的单词详解会将完整的读音首行移到标题中；没有读音时不显示占位，普通译文的第一行完整保留。加载中、错误和空白结果不会覆盖剪贴板；流式翻译中可复制当前已收到的内容，词典结果会附原词和可用读音。朗读仍读原词。
 
 ## 特性（macOS）
 
-- **取词优先走 AX**：默认只通过 macOS 辅助功能接口读选中文本，多数应用（备忘录、Chrome、终端、访达、云之家等）选中即出图标，不用按键、不碰剪贴板。
+- **取词优先走 AX**：多数应用（备忘录、Chrome、终端、访达等）通过 macOS 辅助功能接口读选中文本，不用按键、不碰剪贴板。云之家可能返回错位的 AX 文本，因此优先读取它自身“拷贝”命令的结果，随后整体还原剪贴板（含图片）。
 - **AX 取不到时有两种兜底**（都在菜单里，可自行开关）：「剪贴板兜底取词」= 划词手势后 BeeK 自动模拟一次 ⌘C 去读（读完立即整体还原剪贴板，**默认开**）；「复制即弹按钮」= 你自己按 ⌘C 时在鼠标旁弹图标（**默认关** —— 它会在每次复制时弹，常复制的人会被打扰，只有 Safari、Muse、Grok Bot 这类应用才值得打开）。
 - **点击才翻译**：出现图标时不请求；点击图标才发请求。
 - **豆包支持词典式详解**：使用豆包 / OpenAI 兼容引擎且选中单个词时，输出读音、词性与释义、例句、常见搭配。标题行有喇叭图标，点击用系统语音朗读该词。
@@ -68,7 +72,7 @@ sh scripts/package_app.sh
 
 `scripts/package_app.sh` 按顺序做五件事：`cargo build --release`、停掉旧进程、组装 `/Applications/BeeK.app`、重新签名、启动 LaunchAgent。
 
-需要 Rust stable 和 Xcode Command Line Tools。
+需要 `rust-toolchain.toml` 指定的 Rust 1.99.1，以及带有 Metal 编译工具的 Xcode。
 
 ## 获取 API Key
 
@@ -143,16 +147,16 @@ sh scripts/package_app.sh
 
 ## 取词方式（macOS）
 
-BeeK 按下面的顺序取选中文本，前一条拿不到才走后面。这套顺序参考了开源实现
+BeeK 通常按下面的顺序取选中文本，前一条拿不到才走后面。云之家因 AX 文本可能错位，直接优先采用第 3 条的应用自身拷贝结果；其他 Electron 应用仍使用各自有效的路径。这套顺序参考了开源实现
 [SelectedTextKit](https://github.com/tisfeng/SelectedTextKit)（Easydict 的取词组件），
 并对照豆包的二进制（`libaha_cua.dylib` 导入 `AXUIElementCopyElementAtPosition`、
 `AXObserverAddNotification`、`CGEventTapCreate`）确认过思路。
 
 | 顺序 | 路径 | 适用 | 代价 |
 | --- | --- | --- | --- |
-| 1 | **AX 取词**：按鼠标坐标取元素，读它的 `AXSelectedText` | 备忘录、Chrome、终端、访达、云之家等 | 无（默认路径） |
+| 1 | **AX 取词**：按鼠标坐标取元素，读它的 `AXSelectedText` | 备忘录、Chrome、终端、访达等 | 无（默认路径） |
 | 2 | **浏览器 AppleScript**：`window.getSelection().toString()` | Safari 开箱可用；Chrome / Edge / Brave / Arc 需要先在该浏览器里开「查看 → 开发者 → 允许 Apple 事件中的 JavaScript」 | 首次需授权「控制浏览器」；不碰剪贴板。Chromium 系没开那个开关会自动回退到第 3 条 |
-| 3 | **菜单拷贝**：在目标应用菜单栏里找到「拷贝」项并按下（`AXPress`），让**应用自己**执行拷贝 | 其余应用，含 Muse、Grok Bot 等 Electron 应用 | 短暂占用剪贴板（读完立即还原） |
+| 3 | **菜单拷贝**：在目标应用菜单栏里找到「拷贝」项并按下（`AXPress`），让**应用自己**执行拷贝 | 云之家优先使用；其他应用在 AX 不可用时采用，含 Muse、Grok Bot 等 | 短暂占用剪贴板（读完立即还原） |
 | 4 | **复制即弹按钮**（默认关）：你自己按 ⌘C 时弹按钮，AX 已有选区时不弹 | 任何应用，兜底用 | 多按一次 ⌘C；每次复制都可能弹，故默认关 |
 | 5 | **剪贴板兜底**（可关）：自动合成一次 ⌘C 去取 | 时灵时不灵，最后手段 | 短暂占用剪贴板 |
 
