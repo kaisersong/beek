@@ -1,4 +1,10 @@
-## BeeK v1.1.3
+## BeeK v1.1.4
+
+### Windows 更新检查修正
+
+- 更新检查改用 GitHub 公开的最新版发布入口，移除对匿名 REST API 的依赖，避免该 API 配额用尽时出现 HTTP 403。
+- 发现新版本时，仍要求该版本的 Windows x64 安装器与便携包齐全；不会推荐预发布版、其他仓库的包或降级版本。下载和安装保持手动。
+- 修复已在 yzjw 本地安装构建中通过托盘菜单实测，原配置保留。原始 403 未在排查时重现，限流仅为疑似原因。
 
 ### 蜜蜂按钮自动隐藏
 
@@ -18,12 +24,15 @@
 - BeeK 使用 Rust + GPUI 开发；中英文 README 补充技术说明、按钮超时行为和云之家取词路径。
 - 修复代码在 macOS 标准格式检查、90 项 locked Rust 测试及 release 构建中通过；双机本地安装通过原生窗口和按钮超时自检，云之家真实划词由用户确认标题完整。
 - 合成文本的原生 Copy 成功路径、PNG / 纯文本 / 自定义剪贴板类型还原及 own-write 标记通过。本轮原生内存压力查询仍缺少诊断进程的辅助功能授权，没有新的压力通过证据。
-- v1.1.3 的双平台安装包、macOS 签名公证和资产校验结果以本次 Release 工作流为准。
+- Windows 更新修复通过格式检查、73 项 locked Rust 测试及 27 项 Windows 工具测试；两台 Windows 机器的显式在线检查通过。macOS 开发 shader 配置下 92 项 Rust 测试通过。
+- v1.1.4 的双平台安装包、macOS 签名公证和资产校验结果以本次 Release 工作流为准。
 
 ### English
+
+Windows update checks now use GitHub's public latest-release page instead of the anonymous REST API. Checks still require both exact Windows x64 packages and reject prerelease tags or downgrades. The fix was verified through the tray menu on yzjw with existing settings preserved. The originally reported HTTP 403 was not reproduced during investigation; API rate limiting remains a suspected cause.
 
 Unclicked bee buttons now hide after five seconds on macOS and Windows. New selections get a fresh timer, and existing translation cards remain open.
 
 On macOS, CloudHub uses its own Copy command to obtain the complete selection when Accessibility returns shifted text. All clipboard types are restored, including images, and repeated polling does not repeatedly copy the same selection. This workaround currently applies to CloudHub.
 
-BeeK is built with Rust + GPUI. Both READMEs now describe the stack and updated selection behavior. Final package availability, signing, notarization and asset validation are determined by the v1.1.3 Release workflow.
+BeeK is built with Rust + GPUI. Both READMEs now describe the stack and updated selection behavior. Final package availability, signing, notarization and asset validation are determined by the v1.1.4 Release workflow.

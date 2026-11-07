@@ -60,37 +60,7 @@ pub fn check_updates(manual: bool) -> bool {
     true
 }
 fn check_update() -> (String, bool) {
-    use std::{io::Read, time::Duration};
-    let result = (|| -> Result<Option<String>, String> {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .connect_timeout(Duration::from_secs(5))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|_| "无法初始化更新检查")?;
-        let mut response = client
-            .get("https://api.github.com/repos/kaisersong/beek/releases/latest")
-            .header("User-Agent", concat!("BeeK/", env!("CARGO_PKG_VERSION")))
-            .send()
-            .map_err(|_| "更新检查失败，请稍后重试")?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "更新检查失败（HTTP {}）",
-                response.status().as_u16()
-            ));
-        }
-        let mut bytes = Vec::new();
-        response
-            .by_ref()
-            .take(1024 * 1024 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| "更新响应读取失败")?;
-        if bytes.len() > 1024 * 1024 {
-            return Err("更新响应超出限制".into());
-        }
-        let release = serde_json::from_slice(&bytes).map_err(|_| "更新信息格式无效")?;
-        crate::core::release::windows_update(&release, env!("CARGO_PKG_VERSION"))
-    })();
+    let result = crate::core::release::check_windows_update(env!("CARGO_PKG_VERSION"));
     match result {
         Ok(None) => ("当前已是最新 Windows 版本".into(), false),
         Ok(Some(version)) => (

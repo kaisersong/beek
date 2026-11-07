@@ -16,7 +16,7 @@ BeeK 使用 **Rust + GPUI** 开发：Rust 实现取词、翻译与后台逻辑�
   <img src="resources/screenshots/onboarding-welcome-zh.png" width="960" alt="BeeK macOS 欢迎页：世界很大，理解很轻。右侧展示划词翻译卡片，左下方为开始体验按钮。">
 </p>
 
-**1.1.3 更新**：两平台的蜜蜂按钮未点击时，显示 5 秒后自动隐藏；macOS 修复云之家选区漏字、错位的问题，通过应用自身拷贝读取完整选区并还原剪贴板。[查看更新说明](RELEASE_NOTES.md)。下载产物与构建状态以 [Releases](https://github.com/kaisersong/beek/releases) 和 [Actions](https://github.com/kaisersong/beek/actions) 为准。
+**1.1.4 更新**：Windows 更新检查改用公开发布入口，移除对 GitHub 匿名 API 的依赖；两平台的蜜蜂按钮未点击时，显示 5 秒后自动隐藏；macOS 修复云之家选区漏字、错位的问题，通过应用自身拷贝读取完整选区并还原剪贴板。[查看更新说明](RELEASE_NOTES.md)。下载产物与构建状态以 [Releases](https://github.com/kaisersong/beek/releases) 和 [Actions](https://github.com/kaisersong/beek/actions) 为准。
 
 | 功能 | macOS | Windows 11 x64 |
 | --- | --- | --- |

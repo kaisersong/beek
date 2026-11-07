@@ -16,7 +16,7 @@ Built with **Rust + GPUI**. Rust handles text selection, translation and backgro
   <img src="resources/screenshots/onboarding-welcome-en.png" width="960" alt="BeeK macOS welcome screen, with a translation card preview and a Get started button.">
 </p>
 
-**1.1.3 update:** Unclicked bee buttons hide after five seconds on both platforms. On macOS, CloudHub selections use the app's own Copy command to avoid missing or shifted characters, then restore the clipboard. [Release notes](RELEASE_NOTES.md). Download availability and build status are shown in [Releases](https://github.com/kaisersong/beek/releases) and [Actions](https://github.com/kaisersong/beek/actions).
+**1.1.4 update:** Windows update checks use the public release page without depending on the anonymous GitHub API. Unclicked bee buttons hide after five seconds on both platforms. On macOS, CloudHub selections use the app's own Copy command to avoid missing or shifted characters, then restore the clipboard. [Release notes](RELEASE_NOTES.md). Download availability and build status are shown in [Releases](https://github.com/kaisersong/beek/releases) and [Actions](https://github.com/kaisersong/beek/actions).
 
 | Feature | macOS | Windows 11 x64 |
 | --- | --- | --- |
