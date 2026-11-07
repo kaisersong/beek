@@ -153,6 +153,7 @@ fn wait_change(before: i64, budget_ms: u64) -> bool {
 /// 直接留着 pasteboardItem 对象、clearContents 之后再 writeObjects 写回，
 /// 会抛 ObjC 异常把进程干掉（实测 abort，剪贴板还被留在清空状态）。
 /// 把每个类型的字节拷下来、还原时用 NSData 重建条目才稳。
+#[derive(PartialEq, Eq)]
 pub struct Snapshot(Vec<Vec<(String, Vec<u8>)>>);
 
 pub fn snapshot() -> Option<Snapshot> {

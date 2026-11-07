@@ -18,7 +18,7 @@ mod update;
 mod update_ui;
 
 use ax::{is_url, SelBounds};
-use beek::core::mac_selection::{self, Anchor, PresentationGate, SelectionGate};
+use beek::core::mac_selection::{self, Anchor, AppCopyGate, PresentationGate, SelectionGate};
 use gpui::*;
 use icons::IconKind;
 use std::sync::mpsc;
@@ -1189,6 +1189,8 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
         let mut icon_rect: Option<SelBounds> = None;
         let mut observed_press = 0;
         let mut observed_owner = None;
+        let mut observed_bundle = String::new();
+        let mut app_copy_gate = AppCopyGate::default();
         loop {
             std::thread::sleep(Duration::from_millis(50));
             let _pool = macos_runtime::AutoreleasePool::new();
@@ -1277,6 +1279,8 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
             let context = (owner, unsafe { ax::focused_window_key(owner) });
             if observed_owner != Some(context) {
                 observed_owner = Some(context);
+                observed_bundle = appcopy::frontmost_bundle_id();
+                app_copy_gate = AppCopyGate::default();
                 clip_selection = None;
             }
             let gesture = mac_selection::gesture_for_point(gesture,
@@ -1286,9 +1290,17 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
             if appcopy::frontmost_pid() != Some(owner) { continue; }
             if unsafe { ax::focused_window_key(owner) } != context.1 { continue; }
             let allowed = gate.allows(context, press_seq, gesture, sel.as_ref().map(|s| s.text.as_str()));
-            if down || !allowed { sel = None; }
             let gesture = gate.gesture_allowed(context, press_seq, gesture);
             if !gesture { pending_selection_check = None; }
+            let prefer_app_copy = mac_selection::requires_app_copy(&observed_bundle);
+            let app_copy_attempt = prefer_app_copy && app_copy_gate.should_copy(
+                press_seq, !down && (allowed || pending_selection_check.is_some()),
+                sel.as_ref().map(|s| s.text.as_str()),
+            );
+            if down || !allowed { sel = None; }
+            // Never let CloudHub's shifted AX text replace the authoritative Copy
+            // result on a later poll. A failed Copy must not translate partial text.
+            if prefer_app_copy { sel = None; }
             {
                 let count = clipboard::change_count();
                 if count != last_clip_count {
@@ -1324,76 +1336,76 @@ fn spawn_ax_monitor(tx: mpsc::Sender<UiEvent>) {
                     }
                 }
             }
-            // AX 什么都没给、而用户刚做了划词动作 → 这类应用（Safari / Muse / Grok Bot）
-            // 不会把选区暴露给 AX，改用「模拟 ⌘C + 读剪贴板」兜底（可在菜单里关掉）。
-            if sel.is_none() {
-                if let Some(at) = pending_selection_check {
-                    handled_release = Some(at);
-                    {
-                        let (px, py) = last_press.map(|(_, p)| p).unwrap_or((0., 0.));
-                        let who = unsafe { ax::describe_frontmost() };
-                        let at = unsafe { ax::describe_at_position(px, py) };
-                        eprintln!(
-                            "[beek] 取词：AX 没有返回选区（{}；{}；鼠标刚在 ({:.0}, {:.0}) 划过）",
-                            who, at, px, py
-                        );
-                        // 先走「让应用自己交出来」：AppleScript（浏览器）+ 按它的「拷贝」菜单项。
-                        // 这是 SelectedTextKit/Easydict 的主路线，比合成按键可靠得多。
-                        let mut got: Option<String> = None;
-                        // 应用明确说「没选中」时，就别再去合成 ⌘C 了 —— 那是权威答案
-                        let mut app_says_no_selection = false;
-                        {
-                            let pid = appcopy::frontmost_pid();
-                            if let Some(pid) = pid {
-                                let bid = appcopy::frontmost_bundle_id();
-                                match appcopy::selected_text_via_app(pid, &bid) {
-                                    appcopy::Outcome::Copied(t) => got = Some(t),
-                                    appcopy::Outcome::NoSelection => {
-                                        app_says_no_selection = true;
-                                        eprintln!("[beek] 取词：应用说没有可拷贝的内容（没选中），不弹按钮");
-                                    }
-                                    appcopy::Outcome::Unavailable => {}
-                                }
-                            }
-                        }
-                        if let Some(text) = got {
+            // 缺失 AX 选区，或应用的 AX 文本已知不可靠时，按新选区读取应用自身拷贝。
+            // 每次手势/键盘改选最多一次；云之家不回退到已知错位的 AX 文本。
+            if sel.is_none() && (if prefer_app_copy { app_copy_attempt } else { pending_selection_check.is_some() }) {
+                if let Some(at) = pending_selection_check { handled_release = Some(at); }
+                clip_selection = None;
+                let (px, py) = last_press.map(|(_, p)| p).unwrap_or((0., 0.));
+                if prefer_app_copy {
+                    eprintln!("[beek] 取词：应用 AX 文本不可靠，读取应用自身拷贝结果");
+                } else {
+                    let who = unsafe { ax::describe_frontmost() };
+                    let at = unsafe { ax::describe_at_position(px, py) };
+                    eprintln!("[beek] 取词：AX 没有返回选区（{}；{}；鼠标刚在 ({:.0}, {:.0}) 划过）", who, at, px, py);
+                }
+                // 先走「让应用自己交出来」：AppleScript（浏览器）+ 按它的「拷贝」菜单项。
+                // 这是 SelectedTextKit/Easydict 的主路线，比合成按键可靠得多。
+                let mut got: Option<String> = None;
+                // 应用明确说「没选中」时，就别再去合成 ⌘C 了 —— 那是权威答案
+                let mut app_says_no_selection = false;
+                if appcopy::frontmost_pid() != Some(owner) || unsafe { ax::focused_window_key(owner) } != context.1 {
+                    continue;
+                }
+                match appcopy::selected_text_via_app(owner, &observed_bundle) {
+                    appcopy::Outcome::Copied(t) => got = Some(t),
+                    appcopy::Outcome::NoSelection => {
+                        app_says_no_selection = true;
+                        eprintln!("[beek] 取词：应用说没有可拷贝的内容（没选中），不弹按钮");
+                    }
+                    appcopy::Outcome::Unavailable => {}
+                }
+                if mouse_track().lock().unwrap().press_seq != press_seq
+                    || appcopy::frontmost_pid() != Some(owner)
+                    || unsafe { ax::focused_window_key(owner) } != context.1 {
+                    clip_selection = None;
+                    continue;
+                }
+                if let Some(text) = got {
+                    let b = anchor_at(px, py);
+                    let rect = icon_rect_for(&b);
+                    clip_selection = Some((text.clone(), b, rect, Instant::now()));
+                    sel = Some(ax::Selection {
+                        text,
+                        bounds: b,
+                        source: "app-copy",
+                    });
+                } else if !app_says_no_selection && config::load().clipboard_fallback {
+                    match clipboard::copy_selection() {
+                        Some(text) => {
+                            eprintln!(
+                                "[beek] 取词：剪贴板兜底拿到 {} 字符",
+                                text.chars().count()
+                            );
                             let b = anchor_at(px, py);
                             let rect = icon_rect_for(&b);
-                            clip_selection = Some((text.clone(), b, rect, Instant::now()));
+                            clip_selection =
+                                Some((text.clone(), b, rect, Instant::now()));
                             sel = Some(ax::Selection {
                                 text,
                                 bounds: b,
-                                source: "app-copy",
+                                source: "clipboard",
                             });
-                        } else if !app_says_no_selection && config::load().clipboard_fallback {
-                            match clipboard::copy_selection() {
-                                Some(text) => {
-                                    eprintln!(
-                                        "[beek] 取词：剪贴板兜底拿到 {:?}",
-                                        text.chars().take(20).collect::<String>()
-                                    );
-                                    let b = anchor_at(px, py);
-                                    let rect = icon_rect_for(&b);
-                                    clip_selection =
-                                        Some((text.clone(), b, rect, Instant::now()));
-                                    sel = Some(ax::Selection {
-                                        text,
-                                        bounds: b,
-                                        source: "clipboard",
-                                    });
-                                }
-                                // 兜底跑了但没拿到内容：留日志，否则分不清是「没触发」还是「复制为空」
-                                None => eprintln!(
-                                    "[beek] 取词：剪贴板兜底也没拿到内容（该应用可能没响应 ⌘C）"
-                                ),
-                            }
                         }
+                        // 兜底跑了但没拿到内容：留日志，否则分不清是「没触发」还是「复制为空」
+                        None => eprintln!(
+                            "[beek] 取词：剪贴板兜底也没拿到内容（该应用可能没响应 ⌘C）"
+                        ),
                     }
                 }
-            } else {
-                pending_selection_check = None;
             }
-            if appcopy::frontmost_pid() != Some(owner) || unsafe { ax::focused_window_key(owner) } != context.1 { continue; }
+            if appcopy::frontmost_pid() != Some(owner) || unsafe { ax::focused_window_key(owner) } != context.1
+                || mouse_track().lock().unwrap().press_seq != press_seq { clip_selection = None; continue; }
             let cur = sel.as_ref().map(|s| s.text.clone()).or_else(|| {
                 clip_selection
                     .as_ref()
@@ -2139,16 +2151,18 @@ fn main() {
         // 用法：先在目标应用里选好文字、让它保持前台，再跑这个。
         let pid = appcopy::frontmost_pid().unwrap_or(0);
         let bid = appcopy::frontmost_bundle_id();
+        let original = clipboard::snapshot();
         eprintln!("[自检] 前台 pid={} bundle={:?}", pid, bid);
         match appcopy::selected_text_via_app(pid, &bid) {
             appcopy::Outcome::Copied(t) => eprintln!(
-                "[自检] 拿到文本：{:?}（{} 字符）→ 通过",
-                t.chars().take(40).collect::<String>(),
+                "[自检] 拿到文本（{} 字符）→ 通过",
                 t.chars().count()
             ),
             appcopy::Outcome::NoSelection => eprintln!("[自检] 应用说没选中（拷贝菜单项是灰的）"),
             appcopy::Outcome::Unavailable => eprintln!("[自检] 两条路都走不通"),
         }
+        assert!(original == clipboard::snapshot(), "app Copy did not restore all clipboard types");
+        eprintln!("[beek-appcopy-test] PASS clipboard_restored=true own_write={}", clipboard::is_self_inflicted(clipboard::change_count()));
         return;
     }
     if std::env::var("BEEK_CLIP_SELFTEST").is_ok() {

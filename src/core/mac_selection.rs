@@ -67,6 +67,38 @@ impl SelectionGate {
     }
 }
 
+/// CloudHub's AXSelectedText can be offset from its visible selection. Its own
+/// Copy command is authoritative; other applications retain the AX fast path.
+pub fn requires_app_copy(bundle_id: &str) -> bool {
+    bundle_id == "com.yzj.cloudhub.mac"
+}
+
+/// Bound native Copy to fresh selection changes, including keyboard changes.
+/// Temporary AX disappearance/recovery must not copy the same selection again.
+#[derive(Default)]
+pub struct AppCopyGate {
+    attempted: Option<(u64, Option<String>)>,
+}
+
+impl AppCopyGate {
+    pub fn should_copy(&mut self, press: u64, eligible: bool, ax_text: Option<&str>) -> bool {
+        if !eligible {
+            return false;
+        }
+        if self
+            .attempted
+            .as_ref()
+            .is_some_and(|(previous_press, previous_text)| {
+                *previous_press == press && previous_text.as_deref() == ax_text
+            })
+        {
+            return false;
+        }
+        self.attempted = Some((press, ax_text.map(str::to_owned)));
+        true
+    }
+}
+
 /// Fence delayed monitor events against the interaction consumed by translation.
 #[derive(Default)]
 pub struct PresentationGate {
@@ -125,6 +157,24 @@ pub fn double_click(elapsed_ms: u128, previous: (f64, f64), current: (f64, f64))
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_copy_is_once_per_fresh_selection_and_does_not_repeat_on_ax_recovery() {
+        assert!(requires_app_copy("com.yzj.cloudhub.mac"));
+        assert!(!requires_app_copy("com.google.Chrome"));
+        let mut gate = AppCopyGate::default();
+        assert!(!gate.should_copy(1, false, Some("partial"))); // Retained selection / mouse down.
+        assert!(gate.should_copy(1, true, Some("partial"))); // A valid release, even with nonempty AX.
+        for _ in 0..40 {
+            assert!(!gate.should_copy(1, true, Some("partial")));
+        }
+        assert!(!gate.should_copy(1, false, None));
+        assert!(!gate.should_copy(1, true, Some("partial"))); // AX recovery.
+        assert!(gate.should_copy(1, true, Some("keyboard change")));
+        assert!(gate.should_copy(2, true, Some("keyboard change"))); // Reselect the same text.
+        assert!(gate.should_copy(3, true, None)); // Fresh gesture with no AX text.
+        assert!(!gate.should_copy(3, true, None));
+    }
 
     #[test]
     fn delayed_icons_cannot_replace_translation_but_new_selections_can() {

@@ -214,11 +214,12 @@ pub fn selected_text_via_app(pid: i32, bundle_id: &str) -> Outcome {
                 Some(s) => clipboard::restore(&s),
                 None => clipboard::clear(),
             }
+            clipboard::note_own_write();
             match text {
                 Some(t) if !t.trim().is_empty() => {
                     eprintln!(
-                        "[beek] 取词：菜单拷贝拿到 {:?}",
-                        t.chars().take(20).collect::<String>()
+                        "[beek] 取词：菜单拷贝拿到 {} 字符",
+                        t.chars().count()
                     );
                     Outcome::Copied(t)
                 }
