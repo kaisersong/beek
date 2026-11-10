@@ -17,6 +17,7 @@ name: Release
 #
 # 触发方式：
 #   - 手动：Actions → Release → Run workflow（publish=false 只构建+公证，产物进 artifact）
+#   - 推送匹配版本的发布分支：release/1.1.5（全部检查通过后创建 tag 并发布）
 #   - 打 tag：git tag v1.0.8 && git push origin v1.0.8（自动发布到 Release）
 
 on:
@@ -31,6 +32,8 @@ on:
         type: boolean
         default: false
   push:
+    branches:
+      - 'release/**'
     tags:
       - 'v*'
 
@@ -58,6 +61,10 @@ jobs:
           V=$(sed -n 's/^version = "\(.*\)".*/\1/p' Cargo.toml | head -1)
           [ -n "$V" ] || { echo "::error::读不到 Cargo.toml 里的 version"; exit 1; }
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then TAG="${GITHUB_REF_NAME}"; else TAG="v$V"; fi
+          if [ "${GITHUB_REF_TYPE}" = "branch" ] && [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF_NAME}" != "release/$V" ]; then
+            echo "::error::发布分支(${GITHUB_REF_NAME}) 与 Cargo.toml 的版本($V) 不一致，拒绝发布"
+            exit 1
+          fi
           # 防呆：tag 必须与 Cargo.toml 的版本一致。资产名是 BeeK-v$V.zip，
           # 而 app 的检查更新按「远端版本号」找这个文件名 —— 对不上就是 404。
           if [ "$TAG" != "v$V" ]; then
