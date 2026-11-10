@@ -1,4 +1,11 @@
-## BeeK v1.1.4
+## BeeK v1.1.5
+
+### macOS 浏览器授权与菜单整理
+
+- “开启自动化授权（控制浏览器）…”先选择已运行的浏览器，再主动请求系统授权；首次安装不再只打开没有 BeeK 条目的自动化设置页。
+- 已拒绝过的授权会引导用户到系统设置恢复；补充 Apple Events 授权用途说明。
+- 移除菜单栏、应用菜单和 Dock 菜单中重复的“豆包 API Key…”入口，统一在翻译服务中配置 Key 和模型。
+- 首次授权、拒绝恢复仍需在签名安装包上完成真实交互验证。
 
 ### Windows 更新检查修正
 
@@ -25,7 +32,7 @@
 - 修复代码在 macOS 标准格式检查、90 项 locked Rust 测试及 release 构建中通过；双机本地安装通过原生窗口和按钮超时自检，云之家真实划词由用户确认标题完整。
 - 合成文本的原生 Copy 成功路径、PNG / 纯文本 / 自定义剪贴板类型还原及 own-write 标记通过。本轮原生内存压力查询仍缺少诊断进程的辅助功能授权，没有新的压力通过证据。
 - Windows 更新修复通过格式检查、73 项 locked Rust 测试及 27 项 Windows 工具测试；两台 Windows 机器的显式在线检查通过。macOS 开发 shader 配置下 92 项 Rust 测试通过。
-- v1.1.4 的双平台安装包、macOS 签名公证和资产校验结果以本次 Release 工作流为准。
+- v1.1.5 的双平台安装包、macOS 签名公证和资产校验结果以本次 Release 工作流为准。
 
 ### English
 
@@ -35,4 +42,4 @@ Unclicked bee buttons now hide after five seconds on macOS and Windows. New sele
 
 On macOS, CloudHub uses its own Copy command to obtain the complete selection when Accessibility returns shifted text. All clipboard types are restored, including images, and repeated polling does not repeatedly copy the same selection. This workaround currently applies to CloudHub.
 
-BeeK is built with Rust + GPUI. Both READMEs now describe the stack and updated selection behavior. Final package availability, signing, notarization and asset validation are determined by the v1.1.4 Release workflow.
+BeeK is built with Rust + GPUI. Both READMEs now describe the stack and updated selection behavior. Final package availability, signing, notarization and asset validation are determined by the v1.1.5 Release workflow.

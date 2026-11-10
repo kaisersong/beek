@@ -17,7 +17,7 @@ pub enum Outcome {
 }
 
 /// 常见浏览器的 (bundle id, 应用名) 映射 —— AppleScript 用得上
-const BROWSERS: &[(&str, &str)] = &[
+pub(crate) const BROWSERS: &[(&str, &str)] = &[
     ("com.apple.Safari", "Safari"),
     ("com.apple.SafariTechnologyPreview", "Safari Technology Preview"),
     ("com.google.Chrome", "Google Chrome"),

@@ -1,6 +1,7 @@
 // BeeK v1.0 — GPUI 重写版
 // 选中文本 → 小蜜蜂图标 → 点击翻译 → 弹窗显示（流式增量）
 mod appcopy;
+mod automation;
 mod ax;
 mod clipboard;
 mod config;
@@ -49,6 +50,8 @@ enum UiEvent {
     SetUiLanguage(config::UiLanguage),
     OnboardingAction(onboarding::Action),
     OnboardingTrialDone(u64,Result<String,String>),
+    OpenAutomationSettings,
+    AutomationPermissionDone(&'static str, i32),
     OpenCacheSettings,
     OpenTranslationSettings,
     /// 「关于 BeeK」
@@ -1868,7 +1871,6 @@ actions!(
         MenuOpenAbout,
         MenuOnboarding,
         MenuCheckUpdate,
-        MenuKeySettings,
         MenuCacheSettings,
         MenuTranslationSettings,
         MenuReadmeKey,
@@ -1891,10 +1893,6 @@ fn setup_app_menus(cx: &mut App, tx: mpsc::Sender<UiEvent>) {
     let t2 = tx.clone();
     cx.on_action(move |_: &MenuCheckUpdate, _cx| {
         let _ = t2.send(UiEvent::CheckUpdate);
-    });
-    let t3 = tx.clone();
-    cx.on_action(move |_: &MenuKeySettings, _cx| {
-        let _ = t3.send(UiEvent::OpenKeySettings);
     });
     let cache_tx = tx.clone();
     cx.on_action(move |_: &MenuCacheSettings, _cx| {
@@ -1920,7 +1918,6 @@ fn refresh_app_menus(cx:&mut App) {
             MenuItem::action(localization::tr("使用引导…"), MenuOnboarding),
             MenuItem::action(localization::tr("关于 BeeK"), MenuOpenAbout),
             MenuItem::action(localization::tr("检查更新…"), MenuCheckUpdate),
-            MenuItem::action(localization::tr("豆包 API Key…"), MenuKeySettings),
             MenuItem::action(localization::tr("翻译服务设置…"), MenuTranslationSettings),
             MenuItem::action(localization::tr("翻译缓存设置…"), MenuCacheSettings),
             MenuItem::action(localization::tr("如何获取 API Key…"), MenuReadmeKey),
@@ -1933,7 +1930,6 @@ fn refresh_app_menus(cx:&mut App) {
     // Dock 右键菜单：走 gpui 的 set_dock_menu，AppKit 会经 delegate 拿到它
     cx.set_dock_menu(vec![
         MenuItem::action(localization::tr("使用引导…"), MenuOnboarding),
-        MenuItem::action(localization::tr("豆包 API Key…"), MenuKeySettings),
         MenuItem::action(localization::tr("翻译服务设置…"), MenuTranslationSettings),
         MenuItem::action(localization::tr("翻译缓存设置…"), MenuCacheSettings),
         MenuItem::action(localization::tr("如何获取 API Key…"), MenuReadmeKey),
@@ -2569,6 +2565,8 @@ fn main() {
                                 }
                             }
                         }
+                        UiEvent::OpenAutomationSettings => automation::choose_browser(tx.clone()),
+                        UiEvent::AutomationPermissionDone(name, status) => automation::show_result(name, status),
                         UiEvent::OpenCacheSettings => {
                             let current = config::load().translation_cache;
                             if let Some(settings) = dialogs::cache_settings_dialog(current) {
