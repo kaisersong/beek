@@ -12,6 +12,8 @@ BeeK 使用 **Rust + GPUI** 开发：Rust 实现取词、翻译与后台逻辑�
 
 **[下载 macOS 版](https://github.com/kaisersong/beek/releases/latest/download/BeeK.dmg)** · **[下载 Windows 安装包](https://github.com/kaisersong/beek/releases/latest/download/BeeK-windows-x64-setup.exe)** · [Windows 便携版](https://github.com/kaisersong/beek/releases/latest/download/BeeK-windows-x64.zip) · [所有版本](https://github.com/kaisersong/beek/releases)
 
+**macOS 放心安装：Developer ID 签名 · Apple 公证 · Gatekeeper 验证**，官方 Release 下载后可直接打开，无需绕过系统安全检查。Windows 当前仍为未签名预览。
+
 <p align="center">
   <img src="resources/screenshots/onboarding-welcome-zh.png" width="960" alt="BeeK macOS 欢迎页：世界很大，理解很轻。右侧展示划词翻译卡片，左下方为开始体验按钮。">
 </p>
@@ -116,12 +118,11 @@ sh scripts/package_app.sh
 
 ## 配置（macOS）
 
-以下为豆包配置方式，配置文件优先；其他服务在「翻译服务：…」中分别保存：
+本地开发候选：在「翻译服务设置…」的「API Key 保存位置」可选择「配置文件（明文）」或「macOS 钥匙串」，默认保持文件保存。只有选择钥匙串并点击「保存并启用」，才迁移当前服务的 Key；启动、打开/取消设置以及保存语言、缓存等偏好均不迁移。已经使用钥匙串的服务保留原选择。钥匙串写入与读回校验成功后才移除该服务文件中的明文，失败时保留旧配置。此变更尚未发布。
 
-1. 菜单「豆包 API Key…」，写入 `~/Library/Application Support/BeeK/config.json`。**优先使用。**
-2. 环境变量 `BEEK_ARK_KEY`。作为兜底。
+豆包没有保存凭据时仍可使用环境变量 `BEEK_ARK_KEY`；已有钥匙串引用但无法读取时会报错，不换用环境变量。Windows 已使用系统 Credential Manager 保护 Key。
 
-`config.json` 豆包示例（请替换占位符，不要把真实 Key 提交到 Git）：
+`config.json` 非秘密设置示例（Key 请通过服务设置保存，不要手工填写真实 Key）：
 
 ```json
 {
@@ -132,7 +133,6 @@ sh scripts/package_app.sh
   "translation_cache": { "max_entries": 128, "ttl_minutes": 30 },
   "providers": {
     "ark": {
-      "api_key": "your-ark-api-key",
       "model": "doubao-seed-2-0-mini-260428"
     }
   }
@@ -140,7 +140,8 @@ sh scripts/package_app.sh
 ```
 
 - `show_in_dock`：是否在 Dock 显示图标。菜单「在 Dock 中显示」改这个字段。
-- `providers.ark.api_key`：方舟 API Key。
+- `credential_storage`：各服务的保存位置，`file` 或 `keychain`。
+- `credential_refs`：应用管理的钥匙串凭据引用，请勿手工编辑；文件模式仍用 `providers.<服务>.api_key`。
 - `providers.ark.model`：可选。不填就用默认模型 `doubao-seed-2-0-mini-260428`。
 - `translation_target` 与 `ui_language` 分别控制翻译目标和界面语言；`translation_cache` 控制缓存条数与时效。
 - `providers.ark.base_url`：可选。不填就用方舟默认地址；填了就请求这个 OpenAI 兼容端点（例如自建网关）。
