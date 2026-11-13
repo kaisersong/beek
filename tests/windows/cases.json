@@ -1306,6 +1306,111 @@
         "environment",
         "actual-result"
       ]
+    },
+    {
+      "id": "G2-21-CROSS-APP-DRAG",
+      "stage": "G2",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "从记事本已选文本按下拖向 Edge/系统设置/其他窗口并松开；反向重复，并在切换后等待旧 helper 回包"
+      ],
+      "expected": "手势不得迁移到新 HWND/PID；旧响应不得复活蜜蜂；新的完整划词仍可用",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-22-ICON-TTL-BOUNDARY",
+      "stage": "G2",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "录制同一次公开选区的按钮，标记创建时刻；检查 4999ms、5000ms 及之后一个 UI tick；期间保留已有译文卡片"
+      ],
+      "expected": "4999ms 不提前关闭，>=5000ms 后首个 UI tick 隐藏且缓存失效；已有译文保留；超时后点击旧位置不翻译",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-23-RESELECT-TTL",
+      "stage": "G2",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "在按钮显示 4.8 秒时重新划相同文本，再改选另一段；重复同次来源检测及焦点通知，持续观察 6 秒"
+      ],
+      "expected": "新划词获得独立 5 秒期限；同次重复检测不续期；旧期限不关闭新按钮；过期选区不因迟到消息复活",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-24-ADMIN-WINDOW",
+      "stage": "G2",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "普通权限 BeeK 分别在普通记事本与管理员记事本划词；切到 UAC 安全桌面再返回；在两种权限之间切换且保留旧选区"
+      ],
+      "expected": "管理员/安全桌面被拒绝或明确降级，不注入 Ctrl+C、不弹旧文本、不提升 BeeK 权限；普通窗口的新划词恢复可用",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G2-25-TTL-CLICK-RACE",
+      "stage": "G2",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "在按钮期限前后重复按下按钮，覆盖 4.9 秒按住跨过 5 秒和隐藏后按下；用慢流返回翻译"
+      ],
+      "expected": "期限前已接收按下的按钮由点击流程接管且仅一次请求；隐藏后按下不发请求；新结果不被旧超时关闭",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G5-16-MIXED-DPI-SELECTION",
+      "stage": "G5",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "双屏 100%+150%、100%+200%、150%+200%；副屏依次在左/上/右；两屏各划词、点蜜蜂、拖动卡片跨屏并复制/朗读"
+      ],
+      "expected": "记录每屏分辨率、物理/逻辑坐标与缩放；负坐标锚点、命中、字号正确，无跳屏/裁切/离屏；真实交互录像齐全",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
+    },
+    {
+      "id": "G5-17-DPI-HOTPLUG",
+      "stage": "G5",
+      "method": "manual",
+      "priority": "required",
+      "steps": [
+        "混合 DPI 下显示蜜蜂及译文，改变主屏、缩放，拔掉来源屏、休眠恢复；重连后重新划词"
+      ],
+      "expected": "旧选区/按钮失效；卡片保持可访问，新选区在正确屏显示；不复活旧响应，无残留 helper；附前后截图与显示器布局",
+      "evidence": [
+        "screenshot-or-video",
+        "environment",
+        "actual-result"
+      ]
     }
   ]
 }
