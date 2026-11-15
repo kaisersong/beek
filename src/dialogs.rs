@@ -181,20 +181,37 @@ pub fn cache_settings_dialog(settings: beek::core::translation_cache::CacheSetti
     }
 }
 
+#[cfg(feature = "test-fixtures")]
+thread_local! {
+    static STORAGE_UI_CHECK: std::cell::RefCell<Option<(crate::config::CredentialStorage, crate::config::CredentialStorage, bool)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Exercise actual modal controls on the main thread; never touches user settings.
+#[cfg(feature = "test-fixtures")]
+pub fn storage_choice_selftest(config: &crate::config::Config, next: crate::config::CredentialStorage, cancel: bool)
+    -> Option<(crate::config::Engine, crate::config::ProviderConfig, crate::config::CredentialStorage)> {
+    STORAGE_UI_CHECK.with(|plan| *plan.borrow_mut()=Some((config.credential_storage(crate::config::ARK),next,cancel)));
+    let result=doubao_settings_dialog(config);
+    assert!(STORAGE_UI_CHECK.with(|plan|plan.borrow().is_none()),"native storage test did not reach its controls");
+    result
+}
+
 /// Native picker then provider-specific fields. Nothing is persisted until Save.
 pub fn translation_settings_dialog(config: &crate::config::Config)
-    -> Option<(crate::config::Engine, crate::config::ProviderConfig)> {
+    -> Option<(crate::config::Engine, crate::config::ProviderConfig, crate::config::CredentialStorage)> {
     translation_settings_starting_at(config,None)
 }
 
-pub fn doubao_settings_dialog(config: &crate::config::Config) -> Option<(crate::config::Engine,crate::config::ProviderConfig)> {
+pub fn doubao_settings_dialog(config: &crate::config::Config) -> Option<(crate::config::Engine,crate::config::ProviderConfig,crate::config::CredentialStorage)> {
     translation_settings_starting_at(config,Some(crate::config::Engine::Ark))
 }
 
-fn translation_settings_starting_at(config:&crate::config::Config,mut direct:Option<crate::config::Engine>) -> Option<(crate::config::Engine,crate::config::ProviderConfig)> {
+fn translation_settings_starting_at(config:&crate::config::Config,mut direct:Option<crate::config::Engine>) -> Option<(crate::config::Engine,crate::config::ProviderConfig,crate::config::CredentialStorage)> {
     use crate::config::Engine;
     let mut selected = config.translation_engine;
     let mut drafts = config.providers.clone();
+    let mut hydrated = std::collections::BTreeSet::new();
+    let mut storage_drafts = config.credential_storage.clone();
     loop {
         let picked = if let Some(engine)=direct.take() { Some(engine) } else { unsafe {
             let _pool = crate::macos_runtime::AutoreleasePool::new();
@@ -222,10 +239,17 @@ fn translation_settings_starting_at(config:&crate::config::Config,mut direct:Opt
             if response==1000 { Engine::ALL.get(chosen as usize).copied() } else { None }
         }}?;
         selected = picked;
+        if hydrated.insert(selected.key()) {
+            match config.try_provider(selected.key()) {
+                Ok(provider) => { drafts.insert(selected.key().into(), provider); }
+                Err(error) => { alert("翻译服务未保存", &error, &["好"]); return None; }
+            }
+        }
         let mut provider = drafts.get(selected.key()).cloned().unwrap_or_default();
+        let mut storage = storage_drafts.get(selected.key()).copied().unwrap_or_else(||config.credential_storage(selected.key()));
         let mut error = String::new();
         loop {
-            let (response, values) = unsafe {
+            let (response, values, next_storage) = unsafe {
                 let _pool = crate::macos_runtime::AutoreleasePool::new();
                 let prev = enter_dialog_context();
                 // key, label, placeholder, value, secure
@@ -239,7 +263,9 @@ fn translation_settings_starting_at(config:&crate::config::Config,mut direct:Opt
                     Engine::LibreTranslate => vec![("url","LibreTranslate / Argos 服务地址","http://127.0.0.1:5000/translate",provider.base_url.clone().unwrap_or_default(),false),("key","服务 API Key（本地服务可留空）","可选 API Key",provider.api_key.clone(),true)],
                     _ => unreachable!(),
                 };
-                let height = (specs.len() * 58) as f64;
+                let has_key = specs.iter().any(|(key,_,_,_,_)| *key == "key");
+                let storage_height = if has_key { 64. } else { 0. };
+                let height = (specs.len() * 58) as f64 + storage_height;
                 let view: id = msg_send![class!(NSView), alloc];
                 let view: id = msg_send![view, initWithFrame: NSRect::new(NSPoint::new(0.,0.),NSSize::new(460.,height))];
                 let mut owned = Vec::new(); let mut fields = Vec::new();
@@ -255,6 +281,19 @@ fn translation_settings_starting_at(config:&crate::config::Config,mut direct:Opt
                     let _: () = msg_send![view, addSubview: caption]; let _: () = msg_send![view, addSubview: input];
                     owned.extend([caption,input]); fields.push((key.to_string(),input));
                 }
+                let storage_picker = if has_key {
+                    let caption = label("API Key 保存位置", NSRect::new(NSPoint::new(0.,34.),NSSize::new(460.,18.)));
+                    let picker: id = msg_send![class!(NSPopUpButton), alloc];
+                    let picker: id = msg_send![picker, initWithFrame: NSRect::new(NSPoint::new(0.,2.),NSSize::new(460.,28.)) pullsDown: NO];
+                    for title in ["配置文件（明文）", "macOS 钥匙串"] { let _: () = msg_send![picker, addItemWithTitle: uistr(title)]; }
+                    let index: NSInteger = if storage == crate::config::CredentialStorage::Keychain { 1 } else { 0 };
+                    let _: () = msg_send![picker, selectItemAtIndex: index];
+                    let _: () = msg_send![picker, setIdentifier: nsstr("beek-credential-storage")];
+                    let _: () = msg_send![view, addSubview: caption];
+                    let _: () = msg_send![view, addSubview: picker];
+                    owned.extend([caption,picker]);
+                    Some(picker)
+                } else { None };
                 let alert: id = msg_send![class!(NSAlert), new];
                 let _: () = msg_send![alert, setMessageText: uistr(selected.label())];
                 let help = if !error.is_empty(){error.clone()}else{match selected {
@@ -270,19 +309,38 @@ fn translation_settings_starting_at(config:&crate::config::Config,mut direct:Opt
                 for title in ["保存并启用","返回","取消"] { let _: id = msg_send![alert, addButtonWithTitle: uistr(title)]; }
                 if selected == Engine::LibreTranslate { let _: id = msg_send![alert, addButtonWithTitle: uistr("本地安装说明…")]; }
                 if let Some((_,first))=fields.first() { let window: id = msg_send![alert, window]; let _: () = msg_send![window, makeFirstResponder: *first]; }
+                #[cfg(feature = "test-fixtures")]
+                if let Some((expected,next,cancel))=STORAGE_UI_CHECK.with(|plan|plan.borrow_mut().take()) {
+                    let picker=storage_picker.expect("API Key storage picker missing");
+                    let index: NSInteger=msg_send![picker,indexOfSelectedItem];
+                    assert_eq!(index,if expected==crate::config::CredentialStorage::Keychain {1}else{0},"incorrect persisted storage choice");
+                    let count: NSInteger=msg_send![picker,numberOfItems];
+                    assert_eq!(count,2);
+                    let index: NSInteger=if next==crate::config::CredentialStorage::Keychain {1}else{0};
+                    let _: ()=msg_send![picker,selectItemAtIndex:index];
+                    let buttons: id=msg_send![alert,buttons];
+                    let button: id=msg_send![buttons,objectAtIndex:if cancel {2usize}else{0usize}];
+                    let modes: id=msg_send![class!(NSArray),arrayWithObject:nsstr("NSModalPanelRunLoopMode")];
+                    let _: ()=msg_send![button,performSelector:sel!(performClick:) withObject:nil afterDelay:0.2f64 inModes:modes];
+                }
                 let response: NSInteger = msg_send![alert, runModal];
+                let next_storage = storage_picker.map(|picker| {
+                    let index: NSInteger = msg_send![picker, indexOfSelectedItem];
+                    if index == 1 { crate::config::CredentialStorage::Keychain } else { crate::config::CredentialStorage::File }
+                }).unwrap_or(storage);
                 let values=fields.iter().map(|(key,input)|(key.clone(),nsstring_value(msg_send![*input,stringValue]).trim().to_owned())).collect::<Vec<_>>();
                 let _: () = msg_send![alert, release]; let _: () = msg_send![view, release];
                 for object in owned { let _: () = msg_send![object, release]; }
                 leave_dialog_context(prev);
-                (response,values)
+                (response,values,next_storage)
             };
+            storage = next_storage;
             for (key,value) in values { match key.as_str() {
                 "key"=>provider.api_key=value,"model"=>provider.model=(!value.is_empty()).then_some(value),"url"=>provider.base_url=(!value.is_empty()).then_some(value),"region"=>provider.region=value,"app_id"=>provider.app_id=value,"source"=>provider.source_language=value,"email"=>provider.email=value,_=>{}
             }}
             match response {
-                1000=>match crate::config::validate_engine_settings(selected,&provider) { Ok(())=>return Some((selected,provider)),Err(message)=>error=message },
-                1001=>{ drafts.insert(selected.key().into(),provider); break; },
+                1000=>match crate::config::validate_engine_settings(selected,&provider) { Ok(())=>return Some((selected,provider,storage)),Err(message)=>error=message },
+                1001=>{ drafts.insert(selected.key().into(),provider); storage_drafts.insert(selected.key().into(),storage); break; },
                 1003 if selected == Engine::LibreTranslate => local_translation_help_dialog(),
                 _=>return None,
             }

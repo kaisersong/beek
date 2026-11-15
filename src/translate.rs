@@ -60,7 +60,7 @@ impl TranslationRequest {
 
     pub(crate) fn from_config(config: &crate::config::Config, text: &str, explain: bool) -> Result<Self, String> {
         let engine = config.translation_engine;
-        let mut cfg = config.provider(engine.key());
+        let mut cfg = config.try_provider(engine.key())?;
         cfg.target_language = config.translation_target;
         if engine == Engine::Ark && cfg.api_key.trim().is_empty() {
             cfg.api_key = std::env::var("BEEK_ARK_KEY").unwrap_or_default().trim().to_owned();

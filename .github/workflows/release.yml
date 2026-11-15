@@ -28,9 +28,9 @@ on:
         type: boolean
         default: false
       sign_windows:
-        description: '使用 Windows 签名证书（默认发布明确标注的未签名预览包）'
+        description: '使用 Windows 正式签名（正式发布强制启用；关闭仅允许构建预览 artifact）'
         type: boolean
-        default: false
+        default: true
   push:
     branches:
       - 'release/**'
@@ -44,7 +44,7 @@ jobs:
   windows:
     uses: ./.github/workflows/windows-product.yml
     with:
-      formal: ${{ inputs.sign_windows == true || vars.WINDOWS_SIGN_RELEASES == 'true' }}
+      formal: ${{ github.event_name == 'push' || inputs.publish == true || inputs.sign_windows == true || vars.WINDOWS_SIGN_RELEASES == 'true' }}
     secrets: inherit
   release:
     runs-on: macos-15
@@ -261,7 +261,7 @@ jobs:
           merge-multiple: true
       - name: Validate both platforms and checksums
         env:
-          SIGN_WINDOWS: ${{ inputs.sign_windows == true || vars.WINDOWS_SIGN_RELEASES == 'true' }}
+          SIGN_WINDOWS: ${{ github.event_name == 'push' || inputs.publish == true || inputs.sign_windows == true || vars.WINDOWS_SIGN_RELEASES == 'true' }}
         run: |
           set -eu
           V=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["package"]["version"])')

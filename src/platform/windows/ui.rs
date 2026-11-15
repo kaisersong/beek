@@ -250,7 +250,23 @@ impl Render for Panel {
         let content_width = POPUP_W - POPUP_PAD * 2.;
         let header_height = if word.is_some() && !preview {
             let font_size = f32::from(window.rem_size()) * 1.125;
-            text_height(window, word.as_deref().unwrap(), font_size, content_width) + 8.
+            text_height(window, word.as_deref().unwrap(), font_size, content_width).max(
+                if pron.is_some() {
+                    text_height(
+                        window,
+                        "Ag",
+                        f32::from(window.rem_size()) * 0.875,
+                        content_width,
+                    ) + text_height(
+                        window,
+                        tr("AI 生成发音"),
+                        f32::from(window.rem_size()) * 0.75,
+                        content_width,
+                    )
+                } else {
+                    0.
+                },
+            ) + 8.
         } else {
             0.
         };
@@ -354,11 +370,13 @@ impl Render for Panel {
                                         .text_color(rgb(0x1f1f1f))
                                         .child(word),
                                 )
-                                .children(
-                                    pron.clone().map(|p| {
-                                        div().text_sm().text_color(rgb(0x666666)).child(p)
-                                    }),
-                                )
+                                .children(pron.clone().map(|p| {
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(0x666666))
+                                        .child(p)
+                                        .child(div().text_xs().child(tr("AI 生成发音")))
+                                }))
                                 .child(
                                     div()
                                         .id("speak")
@@ -1675,7 +1693,7 @@ pub fn run() -> Result<(), String> {
       let purpose=pending.take().unwrap().1;
       if s.epoch==epoch&&s.epoch==native::EPOCH.load(Ordering::Acquire)&&(util::is_current(s.source)||matches!(purpose,Purpose::Clipboard(false))){match purpose{
        Purpose::Copy=>{},
-       Purpose::Detect=>{cache=Some((s.clone(),Instant::now()));let _=cx.update(|cx|{hide(&mut bee,cx);bee=open_bee(cx,tx.clone(),s);});},
+       Purpose::Detect=>{let duplicate=cache.as_ref().is_some_and(|(old,_)|old.source==s.source&&old.epoch==s.epoch&&old.text==s.text)&&bee.is_some();if !duplicate{cache=Some((s.clone(),Instant::now()));let _=cx.update(|cx|{hide(&mut bee,cx);bee=open_bee(cx,tx.clone(),s);});}},
        Purpose::Verify(old)=>if old.same_selection(&s){let _=tx.try_send(Command::Translate(s,false));}else{let _=cx.update(|cx|hide(&mut bee,cx));},
        Purpose::Preview|Purpose::Clipboard(false)=>{generation+=1;pool.cancel_pending();mailbox=None;let _=cx.update(|cx|{hide(&mut bee,cx);hide(&mut panel,cx);panel=open_panel(cx,tx.clone(),s,true);});},
        Purpose::Clipboard(true)=>{cache=Some((s.clone(),Instant::now()));let _=cx.update(|cx|{hide(&mut bee,cx);bee=open_bee(cx,tx.clone(),s);});}

@@ -12,6 +12,8 @@ BeeK 使用 **Rust + GPUI** 开发：Rust 实现取词、翻译与后台逻辑�
 
 **[下载 macOS 版](https://github.com/kaisersong/beek/releases/latest/download/BeeK.dmg)** · **[下载 Windows 安装包](https://github.com/kaisersong/beek/releases/latest/download/BeeK-windows-x64-setup.exe)** · [Windows 便携版](https://github.com/kaisersong/beek/releases/latest/download/BeeK-windows-x64.zip) · [所有版本](https://github.com/kaisersong/beek/releases)
 
+**macOS 放心安装：Developer ID 签名 · Apple 公证 · Gatekeeper 验证**，官方 Release 下载后可直接打开，无需绕过系统安全检查。Windows 当前仍为未签名预览。
+
 快速跳转：[安装](#安装) · [授予权限](#授予权限macos) · [获取 API Key](#获取-api-key) · [常见问题](#常见问题)
 
 <p align="center">
@@ -142,7 +144,7 @@ open "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation
 
 官方文档：[获取 API Key 并配置](https://www.volcengine.com/docs/82379/1541594)。
 
-拿到 Key 后，点菜单栏的蜜蜂图标 → 「豆包 API Key…」。菜单项「如何获取 API Key…」会打开本节的 GitHub 页面（锚点 `#获取-api-key`）。
+拿到 Key 后，点菜单栏的蜜蜂图标 → 「翻译服务：…」，在豆包 / OpenAI 兼容服务的设置里填写并保存。菜单项「如何获取 API Key…」会打开本节的 GitHub 页面（锚点 `#获取-api-key`）。
 
 ## 首次使用引导（macOS）
 
@@ -169,12 +171,11 @@ open "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation
 
 ## 配置（macOS）
 
-以下为豆包配置方式，配置文件优先；其他服务在「翻译服务：…」中分别保存：
+本地开发候选：在「翻译服务设置…」的「API Key 保存位置」可选择「配置文件（明文）」或「macOS 钥匙串」，默认保持文件保存。只有选择钥匙串并点击「保存并启用」，才迁移当前服务的 Key；启动、打开/取消设置以及保存语言、缓存等偏好均不迁移。已经使用钥匙串的服务保留原选择。钥匙串写入与读回校验成功后才移除该服务文件中的明文，失败时保留旧配置。此变更尚未发布。
 
-1. 菜单「豆包 API Key…」，写入 `~/Library/Application Support/BeeK/config.json`。**优先使用。**
-2. 环境变量 `BEEK_ARK_KEY`。作为兜底。
+豆包没有保存凭据时仍可使用环境变量 `BEEK_ARK_KEY`；已有钥匙串引用但无法读取时会报错，不换用环境变量。Windows 已使用系统 Credential Manager 保护 Key。
 
-`config.json` 豆包示例（请替换占位符，不要把真实 Key 提交到 Git）：
+`config.json` 非秘密设置示例（Key 请通过服务设置保存，不要手工填写真实 Key）：
 
 ```json
 {
@@ -185,7 +186,6 @@ open "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation
   "translation_cache": { "max_entries": 128, "ttl_minutes": 30 },
   "providers": {
     "ark": {
-      "api_key": "your-ark-api-key",
       "model": "doubao-seed-2-0-mini-260428"
     }
   }
@@ -193,7 +193,8 @@ open "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation
 ```
 
 - `show_in_dock`：是否在 Dock 显示图标。菜单「在 Dock 中显示」改这个字段。
-- `providers.ark.api_key`：方舟 API Key。
+- `credential_storage`：各服务的保存位置，`file` 或 `keychain`。
+- `credential_refs`：应用管理的钥匙串凭据引用，请勿手工编辑；文件模式仍用 `providers.<服务>.api_key`。
 - `providers.ark.model`：可选。不填就用默认模型 `doubao-seed-2-0-mini-260428`。
 - `translation_target` 与 `ui_language` 分别控制翻译目标和界面语言；`translation_cache` 控制缓存条数与时效。
 - `providers.ark.base_url`：可选。不填就用方舟默认地址；填了就请求这个 OpenAI 兼容端点（例如自建网关）。
@@ -263,9 +264,8 @@ python3 scripts/check_macos_memory.py --baseline-ref ae7713f
 | 开启取词权限（辅助功能）… | 打开系统的辅助功能面板 |
 | 开启自动化授权（控制浏览器）… | 选择正在运行的浏览器并主动发起系统授权；**之前点过「不允许」的系统不会再弹**，此时会提示并直达「自动化」面板手动勾选。不授权也能取词（会走菜单拷贝 + 剪贴板兜底），见[授予权限](#授予权限macos) |
 | 在 Dock 中显示 | 切换 Dock 图标，勾选项 |
-| 豆包 API Key… | 配置豆包 / OpenAI 兼容服务的 Key、模型与地址 |
 | 使用引导… | 重新打开四步引导 |
-| 翻译服务：… | 选择服务并保存该服务的配置 |
+| 翻译服务：… | 选择服务并保存该服务的配置（Key、模型、地址与 Key 保存位置） |
 | 翻译为：… | 选择译文目标语言 |
 | 界面语言：… | 跟随系统，或切换简体中文 / English |
 | 翻译缓存设置… | 配置缓存条数、时效或关闭缓存 |
@@ -280,12 +280,12 @@ python3 scripts/check_macos_memory.py --baseline-ref ae7713f
 
 Dock 图标（菜单「在 Dock 中显示」打开后才有）：
 
-- **右键**：弹出同一套动作（豆包 API Key / 翻译服务 / 如何获取 API Key / 取词权限 / 检查更新 / 关于 / 重新启动 / 退出）。
+- **右键**：弹出同一套动作（使用引导 / 翻译服务设置 / 翻译缓存设置 / 如何获取 API Key / 取词权限 / 检查更新 / 关于 / 重新启动 / 退出）。
   这份菜单走的是 gpui 的 `set_dock_menu` —— macOS 是通过 `applicationDockMenu:` 这个委托方法要 Dock 菜单的，
   手写挂在 `NSApp.dockMenu` 上会被 gpui 自己的 delegate 挡住。
 - **左键**：macOS 发出「重新打开」（`applicationShouldHandleReopen`）。
   BeeK 的处理是把菜单栏那份菜单弹出来（等于点菜单栏图标），不会出现「点了没反应」。
-- 顶部菜单栏（app 激活时）：app 菜单（关于 / 检查更新 / 豆包 API Key / … / 退出）+ 编辑菜单。
+- 顶部菜单栏（app 激活时）：app 菜单（使用引导 / 关于 / 检查更新 / 翻译服务设置 / 翻译缓存设置 / 如何获取 API Key / 重新启动 / 退出）+ 编辑菜单。
   「编辑」这一项是手搓的，因为 gpui 的 delegate 自己实现了 `copy:`/`paste:`，用 gpui 的菜单项
   会让动作发给 delegate 而不是文本框，对话框里的 ⌘V 就废了。
 

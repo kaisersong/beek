@@ -89,7 +89,8 @@ impl AppCopyGate {
             .attempted
             .as_ref()
             .is_some_and(|(previous_press, previous_text)| {
-                *previous_press == press && previous_text.as_deref() == ax_text
+                *previous_press == press
+                    && (ax_text.is_none() || previous_text.as_deref() == ax_text)
             })
         {
             return false;
@@ -169,6 +170,7 @@ mod tests {
             assert!(!gate.should_copy(1, true, Some("partial")));
         }
         assert!(!gate.should_copy(1, false, None));
+        assert!(!gate.should_copy(1, true, None)); // Eligible AX gap must retain deduplication.
         assert!(!gate.should_copy(1, true, Some("partial"))); // AX recovery.
         assert!(gate.should_copy(1, true, Some("keyboard change")));
         assert!(gate.should_copy(2, true, Some("keyboard change"))); // Reselect the same text.

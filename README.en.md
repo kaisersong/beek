@@ -12,6 +12,8 @@ Built with **Rust + GPUI**. Rust handles text selection, translation and backgro
 
 **[Download for macOS](https://github.com/kaisersong/beek/releases/latest/download/BeeK.dmg)** · **[Windows installer](https://github.com/kaisersong/beek/releases/latest/download/BeeK-windows-x64-setup.exe)** · [Windows portable ZIP](https://github.com/kaisersong/beek/releases/latest/download/BeeK-windows-x64.zip) · [All releases](https://github.com/kaisersong/beek/releases)
 
+**macOS: Developer ID signed, Apple notarized, and Gatekeeper verified.** Official Release downloads open without bypassing system security. Windows remains an unsigned preview.
+
 Quick links: [Install](#install) · [Permissions](#permissions-macos) · [FAQ](#faq)
 
 <p align="center">
@@ -103,7 +105,7 @@ The four-step onboarding covers welcome, selection gestures, service setup, and 
 3. Click **Try translation** to test the public sample. You do not need to select the sample text.
 4. Select text in another app, then click the floating bee. A selection alone does not send a translation request.
 
-**Doubao is recommended** for streaming translation and dictionary explanations. Create an API key in the [Volcengine Ark console](https://console.volcengine.com/ark/), enable your model, and enter the key and optional model/endpoint ID through onboarding or **Doubao API key…**. Calls use your own Ark account quota. Existing configurations keep their selected service and credentials.
+**Doubao is recommended** for streaming translation and dictionary explanations. Create an API key in the [Volcengine Ark console](https://console.volcengine.com/ark/), enable your model, and enter the key and optional model/endpoint ID through onboarding or **Translation service settings…**. Calls use your own Ark account quota. Existing configurations keep their selected service and credentials.
 
 For browser selection, BeeK can request Automation permission from its menu: open the browser first, then choose **Enable automation permission (control browser)…** and click Allow in the system prompt. If you previously denied it, macOS will not ask again — BeeK then offers to open **System Settings → Privacy & Security → Automation**, where you can enable the browser manually. Other selection fallbacks remain available. Full steps are in [Permissions](#permissions-macos).
 
@@ -184,3 +186,5 @@ Ark settings and credentials are preserved. Each service stores its own key in
 Windows Credential Manager. Save settings with Ctrl+S; Try translation sends
 only a public sample. Automatic update checks are optional; installation remains
 manual. Upgrade to 1.1.2 for these additions; existing service settings and credentials are retained.
+
+Local development candidate (not yet released): each service offers “Configuration file (plain text)” or “macOS Keychain” for API key storage. File storage remains the default. Only clicking Save after choosing Keychain migrates that service's key; startup, cancellation, and preference saves never migrate keys. Existing Keychain choices are preserved. Migration commits only after a verified Keychain write; failures preserve the original configuration. Windows already uses Credential Manager.

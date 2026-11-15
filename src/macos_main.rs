@@ -5,6 +5,7 @@ mod automation;
 mod ax;
 mod clipboard;
 mod config;
+mod mac_credentials;
 mod eventtap;
 mod dialogs;
 mod onboarding;
@@ -317,7 +318,7 @@ impl Render for PopupView {
                 .gap_1()
                 .mb(px(8.))
                 .child(div().text_lg().font_weight(FontWeight::BOLD).child(w))
-                .children(pron.clone().map(|p| div().text_sm().text_color(rgb(0x666666)).child(p)))
+                .children(pron.clone().map(|p| div().text_sm().text_color(rgb(0x666666)).child(p).child(div().text_xs().child(localization::tr("AI 生成发音")))))
                 .child(
                     div()
                         .id("beek-speak")
@@ -741,14 +742,15 @@ fn card_height(window: &Window, view: &PopupView) -> f32 {
     let text_w = POPUP_W - POPUP_PAD * 2.;
     // 单词模式：正文里的「读音：…」那一行会显示在标题里，量高度时要先把它拆出去，
     // 否则会多算一行
-    let body = view.pron_and_body().1;
+    let (pron, body) = view.pron_and_body();
     let body_h = text_height(window, &body, base, base * unit, text_w);
     // 单词模式顶部多一行「词 + 读音」（text_lg = 1.125rem，下边距 8）
     let head_h = match view.word.as_deref() {
         // 标题里的词用 text_lg = 1.125rem，跟正文不是一个号，所以按 rem 基准量
         Some(w) => {
             let head_base = win_base * 1.125;
-            text_height(window, w, head_base, head_base * unit, text_w) + 8.
+            text_height(window, w, head_base, head_base * unit, text_w)
+                .max(if pron.is_some() { win_base * (0.875 + 0.75) * unit } else { 0. }) + 8.
         }
         None => 0.,
     };
@@ -1628,7 +1630,7 @@ fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
         update::selftest();
 
         // ---- 菜单功能：设置 API Key → 检查更新 → 关于 ----
-        // 配置写入这块会动真实 config.json，所以先快照、跑完恢复
+        // config_path 在此诊断进程使用隔离临时配置；先快照、跑完恢复
         // （不用假 HOME：换掉 HOME 会让 AppKit 在某些阶段抛异常，自检跑不完）
         let cfg_path = config::config_path();
         let cfg_backup = std::fs::read(&cfg_path).ok();
@@ -1638,7 +1640,7 @@ fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
         );
         let _ = tx.send(UiEvent::OpenKeySettings);
         std::thread::sleep(Duration::from_millis(400));
-        let saved = config::load().provider(config::ARK);
+        let saved = config::load().try_provider(config::ARK).expect("diagnostic credential read failed");
         eprintln!(
             "[自检] 配置回读：api_key 长度={}（期望 21）model={:?}（期望 selftest-model）配置路径={}",
             saved.api_key.chars().count(),
@@ -1657,7 +1659,9 @@ fn spawn_selftest(tx: mpsc::Sender<UiEvent>, orig_show_in_dock: bool) {
         if let Ok(url) = std::env::var("BEEK_UPDATE_SELFTEST_URL") {
             update::selftest_download(&url);
         }
-        // 恢复用户原配置（快照是什么就写回什么）
+        // Only synthetic items belong to the isolated diagnostic config.
+        for reference in config::load().credential_refs.values() { mac_credentials::delete(reference); }
+        // 恢复隔离诊断配置（不读取或替换用户配置）
         match &cfg_backup {
             Some(bytes) => match std::fs::write(&cfg_path, bytes) {
                 Ok(_) => eprintln!(
@@ -2059,6 +2063,31 @@ fn copy_result_selftest() {
 // ---------- 主入口 ----------
 fn main() {
     #[cfg(feature = "test-fixtures")]
+    if std::env::var_os("BEEK_STORAGE_UI_SELFTEST").is_some() {
+        match config::credential_storage_ui_selftest() {
+            Ok(()) => eprintln!("[beek-storage-ui-test] PASS native_modal=true default_file=true save_keychain=true cancel_preserved=true file_roundtrip=true; synthetic account cleaned"),
+            Err(error) => { eprintln!("[beek-storage-ui-test] FAIL {error}"); std::process::exit(1); }
+        }
+        return;
+    }
+    #[cfg(feature = "test-fixtures")]
+    if std::env::var_os("BEEK_STORAGE_SELFTEST").is_some() {
+        match config::credential_storage_selftest() {
+            Ok(()) => eprintln!("[beek-storage-test] PASS file=true explicit_keychain=true preference_preserved=true file_roundtrip=true; synthetic account cleaned"),
+            Err(error) => { eprintln!("[beek-storage-test] FAIL {error}"); std::process::exit(1); }
+        }
+        return;
+    }
+    #[cfg(feature = "test-fixtures")]
+    if std::env::var_os("BEEK_CREDENTIAL_SELFTEST").is_some() {
+        match mac_credentials::selftest() {
+            Ok(()) => eprintln!("[beek-credential-test] PASS synthetic write/read/delete; no config access"),
+            Err(error) => { eprintln!("[beek-credential-test] FAIL {error}"); std::process::exit(1); }
+        }
+        return;
+    }
+
+    #[cfg(feature = "test-fixtures")]
     if std::env::var_os("BEEK_COPY_RESULT_SELFTEST").is_some() { copy_result_selftest(); return; }
     if std::env::var("BEEK_DISPLAY_SELFTEST").is_ok() { display_selftest(); return; }
     if std::env::var("BEEK_TRANSLATE_SELFTEST").is_ok() {
@@ -2348,8 +2377,8 @@ fn main() {
                                 Action::Configure|Action::Other=>{
                                     let cfg=config::load();
                                     let picked=if matches!(action,Action::Configure) {dialogs::doubao_settings_dialog(&cfg)}else{dialogs::translation_settings_dialog(&cfg)};
-                                    if let Some((engine,provider))=picked {
-                                        match config::save_engine_settings(engine,provider) {
+                                    if let Some((engine,provider,storage))=picked {
+                                        match config::save_engine_settings(engine,provider,storage) {
                                             Ok(())=>{
                                                 shown=None;close_icon_window(cx,&mut icon_win);close_window(cx,&mut popup_win);popup_geom=None;
                                                 menubar::set_translation_engine(engine);
@@ -2373,6 +2402,9 @@ fn main() {
                         }
                         UiEvent::ShowIcon(b, text, press) => {
                             if !presentation_gate.accepts(press, &text) { continue; }
+                            // Duplicate observations are not a new selection and must not reset TTL.
+                            if icon_win.as_ref().is_some_and(|w| w.update(cx, |v, _, _|
+                                v.press_seq == press && v.text == text).unwrap_or(false)) { continue; }
                             // 发现候选选区只更新按钮。AX 的恢复/变化不能关掉当前译文；
                             // 点击新按钮才会切换请求与结果窗口。
                             close_icon_window(cx, &mut icon_win);
@@ -2551,8 +2583,8 @@ fn main() {
                             menubar::dump_windows("自检：真实拖动之后（期望 x=520、frame 上沿=700）");
                         }
                         UiEvent::OpenTranslationSettings => {
-                            if let Some((engine, provider)) = dialogs::translation_settings_dialog(&config::load()) {
-                                match config::save_engine_settings(engine, provider) {
+                            if let Some((engine, provider, storage)) = dialogs::translation_settings_dialog(&config::load()) {
+                                match config::save_engine_settings(engine, provider, storage) {
                                     Ok(()) => {
                                         shown = None;
                                         close_window(cx, &mut popup_win);
@@ -2578,18 +2610,22 @@ fn main() {
                         }
                         UiEvent::OpenKeySettings => {
                             // AppKit 对话框只能在主线程弹，这里就是主线程
-                            let cur = config::load().provider(config::ARK);
+                            let cur = match config::load().try_provider(config::ARK) {
+                                Ok(provider) => provider,
+                                Err(error) => { dialogs::alert("翻译服务未保存", &error, &["好"]); continue; }
+                            };
                             let cur_model = cur.model.clone().unwrap_or_default();
                             match dialogs::key_settings_dialog(cur.api_key.clone(), cur_model) {
                                 Some(input) => {
                                     let key = input.api_key.clone();
                                     let model = input.model.clone();
-                                    config::update(|c| {
-                                        let mut provider = c.provider(config::ARK);
-                                        provider.api_key = key.clone();
-                                        provider.model = if model.is_empty() { None } else { Some(model.clone()) };
-                                        c.set_provider(config::ARK, provider);
-                                    });
+                                    let mut provider = cur.clone();
+                                    provider.api_key = key.clone();
+                                    provider.model = if model.is_empty() { None } else { Some(model.clone()) };
+                                    if let Err(error) = config::save_engine_settings(config::Engine::Ark, provider, config::load().credential_storage(config::ARK)) {
+                                        dialogs::alert("翻译服务未保存", &error, &["好"]);
+                                        continue;
+                                    }
                                     eprintln!(
                                         "[beek] +{}ms 已保存 API Key（长度 {}，模型 {}）到 {}",
                                         ms(t0),

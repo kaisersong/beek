@@ -288,5 +288,9 @@
   "Windows 无需开启辅助功能权限。": "Windows does not require Accessibility permission.",
   "查看取词设置": "Selection settings",
   "选区检测已开启，可以在其他应用中取词。": "Selection detection is on. Select text in another app.",
-  "可在设置中开启划词取词。": "Enable selection detection in Settings."
+  "可在设置中开启划词取词。": "Enable selection detection in Settings.",
+  "AI 生成发音": "AI-generated pronunciation",
+  "API Key 保存位置": "API key storage",
+  "配置文件（明文）": "Configuration file (plain text)",
+  "macOS 钥匙串": "macOS Keychain"
 }
