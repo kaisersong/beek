@@ -12,6 +12,8 @@ BeeK 使用 **Rust + GPUI** 开发：Rust 实现取词、翻译与后台逻辑�
 
 **[下载 macOS 版](https://github.com/kaisersong/beek/releases/latest/download/BeeK.dmg)** · **[下载 Windows 安装包](https://github.com/kaisersong/beek/releases/latest/download/BeeK-windows-x64-setup.exe)** · [Windows 便携版](https://github.com/kaisersong/beek/releases/latest/download/BeeK-windows-x64.zip) · [所有版本](https://github.com/kaisersong/beek/releases)
 
+快速跳转：[安装](#安装) · [授予权限](#授予权限macos) · [获取 API Key](#获取-api-key) · [常见问题](#常见问题)
+
 <p align="center">
   <img src="resources/screenshots/onboarding-welcome-zh.png" width="960" alt="BeeK macOS 欢迎页：世界很大，理解很轻。右侧展示划词翻译卡片，左下方为开始体验按钮。">
 </p>
@@ -26,7 +28,7 @@ BeeK 使用 **Rust + GPUI** 开发：Rust 实现取词、翻译与后台逻辑�
 | 多翻译服务、近期结果缓存及设置 | 支持 | 支持（1.1.2） |
 | 分发 | Developer ID 签名并公证 | 未签名公开预览 |
 
-Windows 安装后从开始菜单打开 BeeK；便携版请完整解压，保留 `beek.exe` 同目录的 `beek-selection-host.exe`。系统可能显示未知发布者提示，可核对 Release 的 SHA256 文件。完整多屏 / 混合 DPI 验收仍待完成。[Windows 安装与使用说明](packaging/windows/README-WINDOWS.txt)
+Windows 的安装步骤与 SmartScreen 提示处理见下方[安装](#安装)；更多细节见 [Windows 安装与使用说明](packaging/windows/README-WINDOWS.txt)。
 
 ## Windows 使用（1.1.2）
 
@@ -50,19 +52,28 @@ Windows 安装后从开始菜单打开 BeeK；便携版请完整解压，保留 
 - **点外部关闭**：在弹窗外面按一下鼠标就关闭弹窗。
 - **服务可切换**：百度公共服务免 Key，也可保存自己的服务配置；各引擎配置独立保留。
 
-## 安装（macOS）
+## 安装
 
-### 方式 A：下载 Release
+### macOS（三步）
 
-1. 直接点上面的 **[下载最新版 BeeK.dmg](https://github.com/kaisersong/beek/releases/latest/download/BeeK.dmg)**；
-   想挑特定版本就去 [Releases](https://github.com/kaisersong/beek/releases) 下对应的 **`BeeK-v<版本>.dmg`**。
-2. 双击挂载，把 `BeeK` 拖到 `Applications` 快捷方式上（或拖进「应用程序」）。
-3. 卸载磁盘映像，双击打开 BeeK 即可 —— 已用 Developer ID 签名并公证，**不需要右键 → 打开**。
+1. **下载**：点上面的 **[下载最新版 BeeK.dmg](https://github.com/kaisersong/beek/releases/latest/download/BeeK.dmg)**（稳定文件名，始终指向最新版）；想挑特定版本就去 [Releases](https://github.com/kaisersong/beek/releases) 下对应的 **`BeeK-v<版本>.dmg`**。
+2. **安装**：双击挂载 dmg，把 `BeeK` 拖到 `Applications` 快捷方式上（或拖进「应用程序」），然后卸载磁盘映像。
+3. **打开**：双击打开 BeeK 即可。官方 Release 已用 **Developer ID 签名并通过 Apple 公证**，Gatekeeper 直接放行——**不需要右键 → 打开，也不需要任何终端命令**。首次启动会进入四步引导，最后一步带你开启辅助功能并试译（详见下一节[授予权限](#授予权限macos)）。
 
+可选校验：每个资产都配了 `.sha256`，下载后运行 `shasum -a 256 -c BeeK-v<版本>.dmg.sha256`。
 旁边的 `BeeK-v<版本>.zip` 是给内置更新器用的（`检查更新…` 会按这个名字找升级包），手动安装不需要它。
-每个资产都配了 `.sha256`，想校验就 `shasum -a 256 -c BeeK-v<版本>.dmg.sha256`。
 
-### 方式 B：本地构建
+打不开或被系统拦截？见[常见问题](#常见问题)。
+
+### Windows 11 x64（三步）
+
+1. **下载**：[安装包](https://github.com/kaisersong/beek/releases/latest/download/BeeK-windows-x64-setup.exe) 或 [便携版 ZIP](https://github.com/kaisersong/beek/releases/latest/download/BeeK-windows-x64.zip)。当前为未签名公开预览，建议先核对 Release 里的 SHA256。
+2. **安装**：安装包双击安装；便携版请**完整解压**，保留 `beek.exe` 同目录的 `beek-selection-host.exe`——两个文件必须来自同一版本，启动时会校验。
+3. **首次运行**：可能被 SmartScreen / 未知发布者提示拦截，点 **「更多信息」→「仍要运行」**。安装后从开始菜单打开 BeeK。
+
+Windows 通过系统 UI Automation 取词，不需要 macOS 那样的权限授权。完整多屏 / 混合 DPI 验收仍待完成。更多见 [Windows 安装与使用说明](packaging/windows/README-WINDOWS.txt)。
+
+### 本地构建（macOS，开发者）
 
 ```bash
 git clone https://github.com/kaisersong/beek.git
@@ -73,6 +84,48 @@ sh scripts/package_app.sh
 `scripts/package_app.sh` 按顺序做五件事：`cargo build --release`、停掉旧进程、组装 `/Applications/BeeK.app`、重新签名、启动 LaunchAgent。
 
 需要 `rust-toolchain.toml` 指定的 Rust 1.99.1，以及带有 Metal 编译工具的 Xcode。
+
+注意：本地构建的签名身份与官方 Release 不同，**辅助功能授权需要重新勾选一次**；脚本优先用钥匙串里的 Apple Development 证书（授权可跨本地更新保留），找不到证书时退回 ad-hoc 签名，每次重新打包都要再勾选。详见[授予权限](#授予权限macos)与[发布](#发布)。
+
+## 授予权限（macOS）
+
+BeeK 只需要 **1 项必需权限**（辅助功能），浏览器取词另有 1 项可选授权（自动化）。正常取词不截屏、不监听键盘输入，**不需要「屏幕录制」或「输入监控」权限**。Windows 无需本节操作。
+
+| 权限 | 必需？ | 用途 |
+| --- | --- | --- |
+| 辅助功能 | 必需 | 读取其他应用里选中的文字，划词后弹出小蜜蜂 |
+| 自动化（控制浏览器） | 可选 | 直接向 Safari / Chrome 等浏览器要选区，不碰剪贴板；不授权会自动走菜单拷贝 / 剪贴板兜底 |
+
+### 第 1 项：辅助功能（必需）
+
+1. 点菜单栏蜜蜂图标 → **「开启取词权限（辅助功能）…」**，直接打开系统设置面板。等价命令：
+
+   ```bash
+   open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+   ```
+
+2. 在 系统设置 → 隐私与安全性 → **辅助功能** 列表里：有 BeeK 就打开它的开关；没有就点「＋」添加 `/Applications/BeeK.app` 再打开开关。
+3. **不用退出 BeeK**：授权后约 2 秒自动生效。仍无反应时点菜单「重新启动 BeeK」。
+
+**勾选了仍提示未授权 / 不生效？** 多半是列表里留着旧签名身份的条目：先用「−」删掉旧的 BeeK，再重新添加并打开开关，然后点菜单「重新启动 BeeK」。macOS 把辅助功能授权记在**签名身份**上：官方 Release 之间更新（含内置更新器）身份不变，授权保留；本地构建与官方 Release 互装、或 ad-hoc 重签，都要重新勾选一次。
+
+**验证**：在「备忘录」里选中一段文字，选区旁应出现小蜜蜂，点它即翻译；也可以从菜单「使用引导…」重开引导，最后一步自带试译。
+
+### 第 2 项：自动化（可选，浏览器取词）
+
+在 Safari / Chrome 等浏览器里，BeeK 可以通过 AppleScript 直接读选区，不占用剪贴板。
+
+1. 先打开要授权的浏览器（授权列表只显示正在运行的浏览器）。
+2. 点菜单 **「开启自动化授权（控制浏览器）…」**，在弹出列表里选择浏览器，然后在系统提示中点「允许」。
+3. Chromium 系（Chrome / Edge / Brave / Arc）还需在该浏览器里开启「查看 → 开发者 → **允许 Apple 事件中的 JavaScript**」；没开会自动回退到菜单拷贝。
+
+**之前点过「不允许」？** 系统不会再弹第二次授权框，且「自动化」列表**不能手动「＋」添加 BeeK**。再点一次菜单「开启自动化授权（控制浏览器）…」，BeeK 会提示已被拒绝并提供「打开系统设置」：到 隐私与安全性 → **自动化** → BeeK 下勾选对应浏览器即可。等价命令：
+
+```bash
+open "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"
+```
+
+不授权也能用：取词会走「按应用自己的拷贝菜单项」和剪贴板兜底，只是短暂占用剪贴板（读完立即整体还原）。
 
 ## 获取 API Key
 
@@ -190,26 +243,6 @@ python3 scripts/check_macos_memory.py
 python3 scripts/check_macos_memory.py --baseline-ref ae7713f
 ```
 
-## 权限（macOS）
-
-取词依赖辅助功能权限。
-
-1. 系统设置 → 隐私与安全性 → 辅助功能 → 勾选 BeeK。
-2. 也可以点菜单「开启取词权限（辅助功能）…」，直接跳到该面板。等价的命令：
-
-```bash
-open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-```
-
-**浏览器取词还有第二条路要授权**：Safari / Chrome 等会通过 AppleScript 问浏览器要选区，
-第一次会弹「BeeK 想要控制 Safari」。点了「不允许」的话系统**不会**再问，需要到
-系统设置 → 隐私与安全性 → **自动化** → BeeK 里手动勾上（菜单里有「开启自动化授权（控制浏览器）…」直达）。
-这条不授权也能用：取词会继续走「按应用自己的拷贝菜单项」和剪贴板兜底，只是多占一下剪贴板。
-
-改完权限后如果取词没有反应，点菜单「重新启动 BeeK」。
-
-**注意**：macOS 把辅助功能授权记在签名身份上。换一个身份签名，授权就失效，需要重新勾选一次。`scripts/package_app.sh` 优先用钥匙串里的 Apple Development 证书签名，授权因此能跨更新保留；找不到证书时它退回 ad-hoc 签名，这种情况下每次更新都要重新勾选。
-
 ## 更新
 
 菜单「检查更新…」：
@@ -220,7 +253,7 @@ open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibil
 
 手动更新有两种方式：下载 zip 后替换 `/Applications/BeeK.app`；或者拉最新代码后运行 `sh scripts/package_app.sh`。
 
-更新后如果取词失效，按上一节重新勾选辅助功能。
+更新后如果取词失效，按[授予权限](#授予权限macos)一节重新勾选辅助功能（官方 Release 之间更新通常不需要）。
 
 ## 菜单（macOS）
 
@@ -228,7 +261,7 @@ open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibil
 | --- | --- |
 | BeeK 划词翻译 v<版本> | 显示版本，不可点击 |
 | 开启取词权限（辅助功能）… | 打开系统的辅助功能面板 |
-| 开启自动化授权（控制浏览器）… | 打开系统的「自动化」面板。浏览器取词那条 AppleScript 路径第一次会问一次，**当时点了「不允许」就不会再弹**，只能来这里勾上；不勾也能取词（会走菜单拷贝 + 剪贴板兜底） |
+| 开启自动化授权（控制浏览器）… | 选择正在运行的浏览器并主动发起系统授权；**之前点过「不允许」的系统不会再弹**，此时会提示并直达「自动化」面板手动勾选。不授权也能取词（会走菜单拷贝 + 剪贴板兜底），见[授予权限](#授予权限macos) |
 | 在 Dock 中显示 | 切换 Dock 图标，勾选项 |
 | 豆包 API Key… | 配置豆包 / OpenAI 兼容服务的 Key、模型与地址 |
 | 使用引导… | 重新打开四步引导 |
@@ -259,6 +292,34 @@ Dock 图标（菜单「在 Dock 中显示」打开后才有）：
 更新进度和结果使用非模态窗口，保持用户的 Dock 显示设置。部分设置及关于对话框仍会临时激活应用，关闭后恢复原策略；不改写 `config.json` 的 Dock 偏好。
 
 版本号来自 `Cargo.toml` 的 `version`。
+
+## 常见问题
+
+安装与授权相关的集中在这里；其他问题欢迎在 [Issues](https://github.com/kaisersong/beek/issues) 提交，附上应用名与系统版本。
+
+**1. 必须准备 API Key 吗？**
+不需要。默认「百度翻译（免费公共服务）」免 Key 即可用（共享额度有限，单次最多 1500 字节）。想要流式翻译和单词详解，推荐自备豆包 / OpenAI 兼容 Key（见[获取 API Key](#获取-api-key)）；也可以装本地 LibreTranslate，翻译完全在本机完成。
+
+**2. macOS 提示「无法打开」「无法验证开发者」或「已损坏」？**
+官方 Release 已签名并公证，正常双击即可打开，**不需要右键 → 打开或任何终端命令**。遇到拦截请先确认：从本仓库 [Releases](https://github.com/kaisersong/beek/releases) 下载、文件完整（用 `.sha256` 校验，「已损坏」常见于下载不完整）。本地构建或第三方重打包未公证，才需要右键 → 打开。不要对官方包执行重签名命令——那会换掉签名身份，让辅助功能授权和公证一起失效。
+
+**3. 辅助功能已勾选，划词还是没反应？**
+按顺序检查：① BeeK 是否在运行（菜单栏有蜜蜂图标）；② 在辅助功能列表里用「−」删掉旧的 BeeK 条目，重新添加 `/Applications/BeeK.app` 并打开开关；③ 点菜单「重新启动 BeeK」；④ 换「备忘录」或 Chrome 试一下，排除特定应用的取词问题（探针命令见[取词方式](#取词方式macos)）。装过本地构建又换回官方 Release（或反过来）的，必须重新勾选一次。
+
+**4. 浏览器里划词不弹？**
+Safari：确认已授权自动化（菜单「开启自动化授权（控制浏览器）…」，步骤见[授予权限](#授予权限macos)）。Chrome / Edge / Brave / Arc：除自动化外，还要在该浏览器里开「查看 → 开发者 → 允许 Apple 事件中的 JavaScript」。都不授权也能用，会走菜单拷贝 / 剪贴板兜底。
+
+**5. 小蜜蜂出现几秒就消失了？**
+正常行为：未点击的按钮 5 秒后自动隐藏，重新划词会再出现；已打开的译文卡片不受影响。
+
+**6. Windows 提示未知发布者 / SmartScreen 拦截？**
+Windows 当前为未签名公开预览：点「更多信息」→「仍要运行」，安装前可核对 Release 的 SHA256。便携版要完整解压，`beek.exe` 与 `beek-selection-host.exe` 必须同目录且同版本。Windows 不需要 macOS 那样的权限授权。
+
+**7. 选中的文字会被上传吗？**
+只有**点击小蜜蜂后**才发送翻译请求，选中本身不联网。文字发给你选择的翻译服务：百度公共服务经 BeeK 公共网关转发给百度；豆包 / Azure / Google 等用你自己的账号；LibreTranslate 完全在本机。结果缓存只存在内存里，退出 BeeK 即清空。
+
+**8. 更新后权限会丢吗？**
+官方 Release 之间更新（含内置更新器）保留 Developer ID 签名身份，辅助功能授权不丢。只有本地构建与官方包互装、或重签名后才需要重新勾选，见[授予权限](#授予权限macos)。
 
 ## 开发文档
 

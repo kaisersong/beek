@@ -12,6 +12,8 @@ Built with **Rust + GPUI**. Rust handles text selection, translation and backgro
 
 **[Download for macOS](https://github.com/kaisersong/beek/releases/latest/download/BeeK.dmg)** · **[Windows installer](https://github.com/kaisersong/beek/releases/latest/download/BeeK-windows-x64-setup.exe)** · [Windows portable ZIP](https://github.com/kaisersong/beek/releases/latest/download/BeeK-windows-x64.zip) · [All releases](https://github.com/kaisersong/beek/releases)
 
+Quick links: [Install](#install) · [Permissions](#permissions-macos) · [FAQ](#faq)
+
 <p align="center">
   <img src="resources/screenshots/onboarding-welcome-en.png" width="960" alt="BeeK macOS welcome screen, with a translation card preview and a Get started button.">
 </p>
@@ -34,9 +36,63 @@ Only AI dictionary results separate a complete pronunciation line into the heade
 
 ## Install
 
-**macOS:** download `BeeK.dmg`, open it, and drag BeeK into Applications. Start BeeK and enable Accessibility when prompted. The released macOS app is signed and notarized. The versioned ZIP is used by the built-in updater.
+### macOS (3 steps)
 
-**Windows:** run the installer and open BeeK from the Start menu. For the portable version, extract the whole ZIP and keep `beek.exe` together with its matching `beek-selection-host.exe`. Windows may show an unknown-publisher or SmartScreen warning. SHA256 checksums are included in the release. Full mixed-DPI/multiple-monitor acceptance is still pending. See the [Windows usage guide](packaging/windows/README-WINDOWS.txt).
+1. **Download** **[BeeK.dmg](https://github.com/kaisersong/beek/releases/latest/download/BeeK.dmg)** (stable file name, always the latest release), or pick a specific `BeeK-v<version>.dmg` from [Releases](https://github.com/kaisersong/beek/releases).
+2. **Install:** open the dmg and drag `BeeK` onto the `Applications` shortcut, then eject the disk image.
+3. **Open:** double-click BeeK. Official releases are **Developer ID signed and Apple notarized**, so Gatekeeper lets them through — **no right-click → Open and no Terminal commands are needed**. First launch opens a four-step guide that ends with enabling Accessibility and a trial translation (see [Permissions](#permissions-macos)).
+
+Optional verification: every asset ships a `.sha256` file — run `shasum -a 256 -c BeeK-v<version>.dmg.sha256`. The versioned ZIP next to the dmg is for the built-in updater, not for manual installation.
+
+If macOS blocks the app, see the [FAQ](#faq).
+
+### Windows 11 x64 (3 steps)
+
+1. **Download** the [installer](https://github.com/kaisersong/beek/releases/latest/download/BeeK-windows-x64-setup.exe) or the [portable ZIP](https://github.com/kaisersong/beek/releases/latest/download/BeeK-windows-x64.zip). Windows builds are unsigned public previews; verify the published SHA256 first if you like.
+2. **Install:** run the installer, or extract the **whole** ZIP and keep `beek.exe` together with its matching `beek-selection-host.exe` — the pair is verified at startup, so never mix files from different builds.
+3. **First run:** SmartScreen / unknown-publisher prompts may appear — click **More info → Run anyway**. Then open BeeK from the Start menu.
+
+Windows reads selections through system UI Automation and needs no macOS-style permission grants. Full mixed-DPI/multiple-monitor acceptance is still pending. See the [Windows usage guide](packaging/windows/README-WINDOWS.txt).
+
+## Permissions (macOS)
+
+BeeK needs **one required permission** (Accessibility) plus one optional grant (Automation) for browser selection. It does not capture the screen or log keyboard input, so **Screen Recording and Input Monitoring are not needed**. Windows needs none of this.
+
+| Permission | Required? | Purpose |
+| --- | --- | --- |
+| Accessibility | Required | Read selected text in other apps and show the bee next to the selection |
+| Automation (control browsers) | Optional | Ask Safari / Chrome directly for the selection without touching the clipboard; without it, BeeK falls back to the app's own Copy command / clipboard |
+
+### 1. Accessibility (required)
+
+1. Click the menu-bar bee → **Enable selection permission (Accessibility)…** to open the system panel directly. Equivalent command:
+
+   ```bash
+   open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+   ```
+
+2. In **System Settings → Privacy & Security → Accessibility**: turn on BeeK if it is listed; otherwise click **+** and add `/Applications/BeeK.app`, then turn it on.
+3. **No need to quit BeeK** — the grant takes effect automatically within about two seconds. If nothing happens, use **Restart BeeK** in the menu.
+
+**Checked but still not working?** The list probably holds an entry for an old signing identity: remove the old BeeK entry with **−**, add it again, switch it on, then choose **Restart BeeK**. macOS ties Accessibility grants to the **signing identity**: updates between official releases (including the built-in updater) keep the grant; switching between local builds and official releases, or ad-hoc re-signing, requires granting once more.
+
+**Verify:** select text in Notes — the bee should appear next to the selection; click it to translate. You can also reopen **Getting started…**; its last step includes a trial translation.
+
+### 2. Automation (optional, browser selection)
+
+In Safari / Chrome and other browsers, BeeK can read the selection via AppleScript without using the clipboard.
+
+1. Open the browser you want to authorize (the picker only lists running browsers).
+2. Click **Enable automation permission (control browser)…** in the BeeK menu, choose the browser, then click **Allow** in the system prompt.
+3. Chromium browsers (Chrome / Edge / Brave / Arc) also need **View → Developer → Allow JavaScript from Apple Events**; without it BeeK falls back to the app's own Copy command.
+
+**Previously clicked "Don't Allow"?** macOS will not ask a second time, and the Automation list **cannot be populated manually with +**. Click the menu item again: BeeK reports the denial and offers to open System Settings, where you can enable the browser under **Privacy & Security → Automation → BeeK**. Equivalent command:
+
+```bash
+open "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"
+```
+
+Without this grant BeeK still works through the app's own Copy menu item and the clipboard fallback (the clipboard is restored immediately after reading).
 
 ## Start translating on macOS
 
@@ -49,7 +105,7 @@ The four-step onboarding covers welcome, selection gestures, service setup, and 
 
 **Doubao is recommended** for streaming translation and dictionary explanations. Create an API key in the [Volcengine Ark console](https://console.volcengine.com/ark/), enable your model, and enter the key and optional model/endpoint ID through onboarding or **Doubao API key…**. Calls use your own Ark account quota. Existing configurations keep their selected service and credentials.
 
-For browser selection, BeeK may also request Automation permission. If you previously denied it, use **System Settings → Privacy & Security → Automation**. Other selection fallbacks remain available.
+For browser selection, BeeK can request Automation permission from its menu: open the browser first, then choose **Enable automation permission (control browser)…** and click Allow in the system prompt. If you previously denied it, macOS will not ask again — BeeK then offers to open **System Settings → Privacy & Security → Automation**, where you can enable the browser manually. Other selection fallbacks remain available. Full steps are in [Permissions](#permissions-macos).
 
 Most macOS apps use Accessibility text selection without touching the clipboard. CloudHub can report shifted text through that API, so BeeK reads its own Copy command instead and restores all clipboard types, including images. This workaround currently applies to CloudHub; it does not assume that every Electron app has the same issue.
 
@@ -88,6 +144,34 @@ On macOS, **Check for updates…** immediately shows progress in a modeless wind
 Windows can optionally check for updates automatically. Installation remains manual; download a newer package from [Releases](https://github.com/kaisersong/beek/releases).
 
 See the [Chinese README](README.md) for source builds, configuration examples, selection internals, and development tools. Internal engineering documents are maintained in the separate mydocs repository; they are not required to build BeeK.
+
+## FAQ
+
+Installation and permission questions are collected here; for anything else, open an [issue](https://github.com/kaisersong/beek/issues) with the app name and your OS version.
+
+**1. Do I need an API key?**
+No. The default shared Baidu service works without a key (limited shared quota, up to 1,500 bytes per request). For streaming translation and dictionary explanations, bring your own Doubao / OpenAI-compatible key, or run LibreTranslate locally for fully on-device translation.
+
+**2. macOS says the app "can't be opened", is from an "unidentified developer", or "is damaged"?**
+Official releases are signed and notarized and open with a double-click — no right-click → Open or Terminal commands needed. If blocked, confirm you downloaded from this repository's [Releases](https://github.com/kaisersong/beek/releases) and that the file is complete (verify the `.sha256`; "damaged" usually means an incomplete download). Only local builds or third-party repackages need right-click → Open. Do not re-sign official packages: that changes the signing identity and invalidates both the Accessibility grant and notarization.
+
+**3. Accessibility is enabled but selection still does nothing?**
+Check in order: ① BeeK is running (bee icon in the menu bar); ② remove the old BeeK entry from the Accessibility list with −, re-add `/Applications/BeeK.app` and switch it on; ③ choose **Restart BeeK** in the menu; ④ try Notes or Chrome to rule out app-specific selection issues. Switching between local builds and official releases always requires granting once more. See [Permissions](#permissions-macos).
+
+**4. No bee in my browser?**
+Safari: make sure Automation is granted (menu item **Enable automation permission (control browser)…**). Chrome / Edge / Brave / Arc: also enable **View → Developer → Allow JavaScript from Apple Events**. Without either, BeeK falls back to the app's own Copy command / clipboard.
+
+**5. The bee disappears after a few seconds?**
+Expected: an unclicked button hides after five seconds; a new selection brings it back. Open translation cards are not affected.
+
+**6. Windows shows an unknown publisher / SmartScreen prompt?**
+Windows builds are unsigned public previews: click **More info → Run anyway**, and verify the release SHA256 if you like. Extract the portable ZIP completely and keep `beek.exe` with its matching `beek-selection-host.exe`. No macOS-style permission grants are needed on Windows.
+
+**7. Is my selected text uploaded?**
+A translation request is sent only **after you click the bee**; selecting text alone never contacts the network. Text goes to the service you chose: shared Baidu via the BeeK gateway, Doubao / Azure / Google through your own account, or LibreTranslate entirely on your machine. The result cache lives in memory and is cleared when BeeK exits.
+
+**8. Will an update reset my permissions?**
+Updates between official releases (including the built-in updater) keep the Developer ID signing identity, so the Accessibility grant survives. Only switching between local builds and official packages, or re-signing, requires granting again.
 
 ## Windows 1.1.2 preview
 
